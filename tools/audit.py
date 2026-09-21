@@ -16,7 +16,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from control_plane import (CYCLE_EDGES, EVENT_TYPES, HYP_EDGES, METHOD_SELF_ATTACK_ROWS,  # noqa: E402
                            REQUIRED_AUDIT_CLASSES, TECHNIQUE_RESULTS, ControlPlane,
-                           evidence_id_ok, secret_pattern_hits, sha256_file)
+                           asset_hosts, engagement_assets, evidence_id_ok,
+                           host_in_scope, scope_check, secret_pattern_hits, sha256_file)
 
 
 def parse_status(path: Path) -> dict[str, str]:
@@ -309,6 +310,52 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
             errors.append(f"action {e.get('entity_id')} missing preflight: {', '.join(missing)}")
         elif str(payload.get("scope_status")).upper() != "IN_SCOPE":
             errors.append(f"action {e.get('entity_id')} is not IN_SCOPE")
+
+    # Scope is a live invariant: each recorded action is re-checked against the CURRENT
+    # asset list, so a scope narrowed after the fact cannot stay silent. request_shape.url
+    # is authoritative when present (fall back to target). Only URL/host-shaped targets
+    # are re-checked: free-text labels ("the provided apk (static review, no network)")
+    # describe an action, they do not name a host, and must not fail the workspace. A
+    # `gate: none` opt-out or an in-scope host passes; unset/unenforceable fail closed.
+    # An action whose host is listed in the previous_assets of the first SCOPE_CHANGED
+    # recorded after it was in scope when recorded — downgrade to a warning instead of
+    # an error.
+    HOST_SHAPED = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(:\d+)?$")
+    scope_assets = engagement_assets(root)
+    for idx, e in enumerate(events):
+        if e.get("type") != "ACTION_RECORDED":
+            continue
+        payload = e.get("payload") or {}
+        shape = payload.get("request_shape") if isinstance(payload.get("request_shape"), dict) else {}
+        target = str(shape.get("url") or payload.get("target") or "").strip()
+        if not target:
+            continue
+        if "://" not in target and not HOST_SHAPED.fullmatch(target):
+            continue
+        scope = scope_check(root, target if "://" in target else f"https://{target}")
+        if scope["gate"] == "disabled":
+            continue
+        if scope["gate"] not in {"unset", "unenforceable"} and scope["in_scope"]:
+            continue
+        previous: list[str] = []
+        for later in events[idx + 1:]:
+            if later.get("type") == "SCOPE_CHANGED":
+                previous = list((later.get("payload") or {}).get("previous_assets") or [])
+                break
+        if previous and scope["host"] and host_in_scope(scope["host"], asset_hosts(previous)):
+            warnings.append(
+                f"action {e.get('entity_id')} targets '{scope['host']}' which was in scope when recorded "
+                "(the next SCOPE_CHANGED lists it in previous_assets) but is not in the current scope"
+            )
+            continue
+        errors.append(
+            f"action {e.get('entity_id')} targets '{scope['host']}' but the current "
+            f"engagement scope does not include it (gate={scope['gate']})"
+        )
+    if scope_assets and not any(e.get("type") == "SCOPE_CHANGED" for e in events):
+        warnings.append(
+            "engagement scope has no SCOPE_CHANGED provenance record — record it via researchctl scope-set"
+        )
 
     # Technique evaluations are the learning ledger: they are canonical events, not narrative
     # files. The projections in 10_learning/ rebuild from these; validate them here so a hand

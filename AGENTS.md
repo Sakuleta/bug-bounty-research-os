@@ -66,6 +66,14 @@ the audit does not check this; the loop above does.
   one matching call: `research_os_request` for `tool_family` "http", or
   `research_os_browser` for `tool_family` "browser" (`request_shape` `{url, principal}`)
   — no preflight, no live action, and raw network egress stays closed.
+- Scope is default-deny: record it with `researchctl scope-set` before target traffic —
+  the first record carries a `source_reference` from the program policy; re-records,
+  widenings, and any file that already carries an explicit depth-1 `gate:` line
+  additionally require a `human_reference`. An unset/absent/empty asset list
+  makes every target request illegal; `gate: none` inside the `scope:` block is the
+  explicit human opt-out for non-target work. In-scope hosts are reachable only through
+  the controlled executors (`research_os_request`/`research_os_browser`) — web tools are
+  gated for in-scope hosts.
 - Register evidence immediately (`researchctl evidence register`); every important
   claim traces to an observation. Register immutable SNAPSHOTS (slice files), never
   living documents — registration stores a content-addressed copy under

@@ -67,6 +67,10 @@ def main() -> int:
     sc = sub.add_parser("scope-check")
     sc.add_argument("url")
     sc.set_defaults(fn="scope-check")
+    ss = sub.add_parser("scope-set")
+    ss.add_argument("json", help='{"assets": [...], "source_reference": "...", "gate": "assets"|"none", '
+                                 '"human_reference": "ticket-id (required to re-record an existing scope)"}')
+    ss.set_defaults(fn="scope-set")
     tr = sub.add_parser("triage")
     tr.add_argument("question")
     tr.set_defaults(fn="triage")
@@ -123,6 +127,10 @@ def main() -> int:
             out = cp.prepare_action(load_json(ns.json))
         elif ns.fn == "scope-check":
             out = scope_check(Path(ns.root), ns.url)
+        elif ns.fn == "scope-set":
+            data = load_json(ns.json)
+            out = cp.set_scope(data.get("assets", []), data.get("source_reference", ""),
+                               gate=data.get("gate"), human_reference=data.get("human_reference", ""))
         elif ns.fn == "triage":
             out = triage_suggest(Path(ns.root), ns.question)
         elif ns.fn == "claims-check":

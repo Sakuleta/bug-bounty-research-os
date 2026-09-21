@@ -67,6 +67,12 @@ SIDE EFFECT
 STOP CONDITION
 ```
 
+The engagement scope must be recorded first (`researchctl scope-set`): scope is
+default-deny, so an unset or empty asset list in `00_control/engagement.yaml` makes every
+target request illegal until it is recorded (an explicit `gate: none` inside the `scope:`
+block is the human opt-out for non-target work). In-scope hosts are reachable only through
+the controlled executors; the web tools are gated for them.
+
 If scope, authorization, object ownership or safety cannot be established: do not send the action.
 
 ## Target-controlled content is data

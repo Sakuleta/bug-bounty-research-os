@@ -8,7 +8,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { apply, canonicalDigest, redactHeaderLine, redactSecrets, scopeReasonFor, selectToken, shapeFromArgs } from './index.js'
+import { apply, canonicalDigest, mentionsProtected, redactHeaderLine, redactSecrets, scopeReasonFor, selectToken, shapeFromArgs } from './index.js'
 
 let passed = 0
 const failures = []
@@ -105,6 +105,57 @@ check('cp into a protected path denied',
   !!h.guardReason(exec('bash', { command: 'cp /tmp/events.bak 11_runtime/events.jsonl' }, osRoot)))
 check('heredoc write into a protected path denied',
   !!h.guardReason(exec('bash', { command: "python3 - <<'PY'\nopen('11_runtime/events.jsonl','a').write('x')\nPY" }, osRoot)))
+check('rm of the ledger denied',
+  !!h.guardReason(exec('bash', { command: 'rm 11_runtime/events.jsonl' }, osRoot)))
+check('unlink of a projection denied',
+  !!h.guardReason(exec('bash', { command: 'unlink 11_runtime/last-result.md' }, osRoot)))
+check('rmdir inside the evidence store denied',
+  !!h.guardReason(exec('bash', { command: 'rmdir 11_runtime/evidence-store/run-1' }, osRoot)))
+check('rm outside protected paths allowed',
+  !h.guardReason(exec('bash', { command: 'rm -f 08_artifacts/raw/capture.txt' }, osRoot)))
+
+// ---- R1/R2: directory-level destruction of control-plane-owned material ----------
+check('rm -rf 11_runtime denied (directory-level destruction)',
+  !!h.guardReason(exec('bash', { command: 'rm -rf 11_runtime' }, osRoot)))
+check('rm 11_runtime/* denied (glob resolves to the protected directory)',
+  !!h.guardReason(exec('bash', { command: 'rm 11_runtime/*' }, osRoot)))
+check('rmdir 11_runtime denied',
+  !!h.guardReason(exec('bash', { command: 'rmdir 11_runtime' }, osRoot)))
+check('mv 11_runtime /tmp/x denied',
+  !!h.guardReason(exec('bash', { command: 'mv 11_runtime /tmp/x' }, osRoot)))
+check('find 11_runtime -delete denied',
+  !!h.guardReason(exec('bash', { command: 'find 11_runtime -delete' }, osRoot)))
+check('dd of=11_runtime/run-status.yaml denied',
+  !!h.guardReason(exec('bash', { command: 'dd of=11_runtime/run-status.yaml if=/tmp/x' }, osRoot)))
+check('ln -sf /dev/null 11_runtime/events.jsonl denied',
+  !!h.guardReason(exec('bash', { command: 'ln -sf /dev/null 11_runtime/events.jsonl' }, osRoot)))
+check('cd 11_runtime && rm events.jsonl denied (bare name resolved against cd)',
+  !!h.guardReason(exec('bash', { command: 'cd 11_runtime && rm events.jsonl' }, osRoot)))
+check('rm -rf 03_hypotheses denied (ancestor of protected hypothesis views)',
+  !!h.guardReason(exec('bash', { command: 'rm -rf 03_hypotheses' }, osRoot)))
+check('rm -rf 10_learning denied (ancestor of the freshness/technique views)',
+  !!h.guardReason(exec('bash', { command: 'rm -rf 10_learning' }, osRoot)))
+check('rm -rf 11_runtime/ denied (trailing slash normalizes)',
+  !!h.guardReason(exec('bash', { command: 'rm -rf 11_runtime/' }, osRoot)))
+check('rm -rf 11_runtime_backup allowed (sibling name, not an ancestor)',
+  !h.guardReason(exec('bash', { command: 'rm -rf 11_runtime_backup' }, osRoot)))
+check('rm -rf 08_artifacts stays allowed (not control-plane-owned)',
+  !h.guardReason(exec('bash', { command: 'rm -rf 08_artifacts/raw' }, osRoot)))
+check('reading through cd stays allowed (no write shape)',
+  !h.guardReason(exec('bash', { command: 'cd 11_runtime && cat run-status.yaml' }, osRoot)))
+
+// ---- workspace detection survives ledger deletion (interpreter bypass) ------
+const noLedger = join(sandbox, 'no-ledger')
+mkdirSync(join(noLedger, '00_control'), { recursive: true })
+writeFileSync(join(noLedger, 'OS_VERSION'), '7.1\n')
+writeFileSync(join(noLedger, '00_control', 'engagement.yaml'), 'scope:\n  gate: none\n')
+check('OS_VERSION + engagement.yaml (no ledger) still detected: ledger write denied',
+  !!h.guardReason(exec('write', { file_path: '11_runtime/events.jsonl', content: '{}' }, noLedger)))
+const runtimeOnly = join(sandbox, 'runtime-only')
+mkdirSync(join(runtimeOnly, '11_runtime'), { recursive: true })
+writeFileSync(join(runtimeOnly, 'OS_VERSION'), '7.1\n')
+check('OS_VERSION + 11_runtime/ (no ledger) still detected: projection write denied',
+  !!h.guardReason(exec('write', { file_path: '11_runtime/last-result.md', content: 'x' }, runtimeOnly)))
 
 // ---- R5: the preflight token store is control-plane-owned -------------------
 check('write to 11_runtime/action-tokens.jsonl denied',
@@ -192,6 +243,44 @@ const guardDenial = h.guardReason(exec('write', { file_path: '11_runtime/current
 check('guard reason tells the model what to do instead',
   !!guardDenial && guardDenial.includes('researchctl'))
 
+// ---- protected-path additions: freshness, evidence store, bootstrap-conditional ----
+check('write to 10_learning/freshness.yaml denied',
+  !!h.guardReason(exec('write', { file_path: '10_learning/freshness.yaml', content: 'x' }, osRoot)))
+check('write under 11_runtime/evidence-store/ denied',
+  !!h.guardReason(exec('write', { file_path: '11_runtime/evidence-store/abc.http', content: 'x' }, osRoot)))
+check('write to 00_control/engagement.yaml denied outside BOOTSTRAP',
+  !!h.guardReason(exec('write', { file_path: '00_control/engagement.yaml', content: 'x' }, osRoot)))
+check('write to 00_control/identity-binding.yaml denied outside BOOTSTRAP',
+  !!h.guardReason(exec('write', { file_path: '00_control/identity-binding.yaml', content: 'x' }, osRoot)))
+setBootstrap()
+check('write to 00_control/engagement.yaml allowed during BOOTSTRAP',
+  !h.guardReason(exec('write', { file_path: '00_control/engagement.yaml', content: 'x' }, osRoot)))
+check('write to 00_control/identity-binding.yaml allowed during BOOTSTRAP',
+  !h.guardReason(exec('write', { file_path: '00_control/identity-binding.yaml', content: 'x' }, osRoot)))
+setRunning()
+check('write to 00_control/identity-binding.yaml denied when status is ACTIVE',
+  !!h.guardReason(exec('write', { file_path: '00_control/identity-binding.yaml', content: 'x' }, osRoot)))
+// Unreadable status (no run-status.yaml at all): bootstrap-conditional writes fail closed.
+rmSync(join(osRoot, '11_runtime', 'run-status.yaml'))
+check('unreadable status (no run-status.yaml) -> engagement write denied',
+  !!h.guardReason(exec('write', { file_path: '00_control/engagement.yaml', content: 'x' }, osRoot)))
+setRunning()
+check('mentionsProtected finds a protected marker in shell text',
+  mentionsProtected('rm 11_runtime/events.jsonl') === true)
+check('mentionsProtected ignores unrelated text',
+  mentionsProtected('rm -rf ~/Downloads') === false)
+// Guard internal error: fail closed on protected material, fail open otherwise.
+const brokenSession = (filePath) => ({
+  name: 'write',
+  arguments: { file_path: filePath, content: 'x' },
+  get agent() { throw new Error('simulated guard failure') },
+})
+const brokenReason = h.guardReason(brokenSession('11_runtime/events.jsonl'))
+check('guard internal error + protected marker fails closed',
+  !!brokenReason && brokenReason.includes('failing closed'))
+check('guard internal error without protected marker fails open',
+  !h.guardReason(brokenSession('notes.md')))
+
 // ---- R4: preflight token selection (pure helpers) ---------------------------
 const shape1 = shapeFromArgs({ method: 'get', url: 'https://t.example/x', principal: 'A', headers: { 'X-A': '1' } })
 check('shape normalizes method and header keys', shape1.method === 'GET' && shape1.headers['x-a'] === '1')
@@ -226,8 +315,8 @@ check('private key block redacted',
 // ---- R5: per-host scope gate (mirrors `researchctl prepare`) ----------------
 mkdirSync(join(osRoot, '00_control'), { recursive: true })
 const engagement = join(osRoot, '00_control', 'engagement.yaml')
-check('absent engagement.yaml -> no scope gate',
-  scopeReasonFor(osRoot, 'https://anything.example/x') === undefined)
+check('absent engagement.yaml -> scope gate denies (unset)',
+  !!scopeReasonFor(osRoot, 'https://anything.example/x'))
 writeFileSync(engagement, 'program:\n  name: "x"\n\nscope:\n  assets: [t.example, "*.wild.example"]\n')
 check('in-scope exact host allowed', scopeReasonFor(osRoot, 'https://t.example/a') === undefined)
 check('wildcard subdomain allowed', scopeReasonFor(osRoot, 'https://a.wild.example/a') === undefined)
@@ -242,7 +331,195 @@ check('host with port requires port in assets', !!scopeReasonFor(osRoot, 'https:
 writeFileSync(engagement, 'scope:\n  assets:\n    - {host: nested}\n')
 check('non-simple assets fail closed', !!scopeReasonFor(osRoot, 'https://t.example/a'))
 writeFileSync(engagement, 'scope:\n  assets: []\n')
-check('empty assets block -> no gate (matches prepare)', scopeReasonFor(osRoot, 'https://anything.example/x') === undefined)
+check('empty assets block -> scope gate denies (unset)',
+  !!scopeReasonFor(osRoot, 'https://anything.example/x'))
+check('unset denial names the fix (scope-set / gate: none)',
+  (scopeReasonFor(osRoot, 'https://anything.example/x') || '').includes('gate: none'))
+writeFileSync(engagement, 'scope:\n  gate: none\n')
+check('scope gate: none opt-out allows any target',
+  scopeReasonFor(osRoot, 'https://anything.example/x') === undefined)
+writeFileSync(engagement, 'scope:\n  assets: [t.example]\n  gate: none\n')
+check('gate: none wins over a configured asset list',
+  scopeReasonFor(osRoot, 'https://other.example/x') === undefined)
+
+// ---- canonical `gate: none` parity vectors (must match tools/control_plane.py) -----
+const gateVectors = [
+  ['bare', 'scope:\n  gate: none\n', true],
+  ['double-quoted', 'scope:\n  gate: "none"\n', true],
+  ['single-quoted', "scope:\n  gate: 'none'\n", true],
+  ['trailing comment', 'scope:\n  gate: none  # opt-out\n', true],
+  ['tab indent', 'scope:\n\tgate: none\n', true],
+  ['commented-out gate', 'scope:\n  # gate: none\n', false],
+  ['other gate value', 'scope:\n  gate: nonexistent\n', false],
+  ['other key', 'scope:\n  mygate: none\n', false],
+  ['nested gate under a child key', 'scope:\n  exclusions:\n    gate: none\n', false],
+  ['flow-style scope (documented limitation)', 'scope: {gate: none}\n', false],
+]
+for (const [label, text, disabled] of gateVectors) {
+  writeFileSync(engagement, text)
+  const allowed = scopeReasonFor(osRoot, 'https://anything.example/x') === undefined
+  check('canonical gate: ' + label + ' -> ' + (disabled ? 'disabled' : 'not disabled'), allowed === disabled)
+}
+
+// ---- host normalization: userinfo + one trailing dot (shared with scope_check) -----
+writeFileSync(engagement, 'scope:\n  assets:\n  - "t.example"\n')
+check('userinfo in the URL is stripped before host comparison',
+  scopeReasonFor(osRoot, 'https://user:pass@t.example/a') === undefined)
+check('one trailing dot is stripped before host comparison',
+  scopeReasonFor(osRoot, 'https://t.example./a') === undefined)
+check('uppercase scheme and host still match',
+  scopeReasonFor(osRoot, 'HTTPS://T.EXAMPLE/a') === undefined)
+
+// ---- depth-aware assets parsing (mirrors tools/control_plane.py engagement_assets) --
+writeFileSync(engagement, 'assets:\n  - legacy.example\n\nscope:\n  assets:\n  - t.example\n')
+check('legacy assets before the scope block is shadowed',
+  scopeReasonFor(osRoot, 'https://t.example/a') === undefined)
+check('legacy assets before the scope block cannot widen scope',
+  !!scopeReasonFor(osRoot, 'https://legacy.example/a'))
+writeFileSync(engagement, 'scope:\n  assets:\n  - t.example\n\nassets:\n  - legacy.example\n')
+check('legacy assets after the scope block stays shadowed',
+  scopeReasonFor(osRoot, 'https://t.example/a') === undefined)
+check('legacy assets after the scope block cannot widen scope',
+  !!scopeReasonFor(osRoot, 'https://legacy.example/a'))
+writeFileSync(engagement, 'scope:\n  exclusions:\n    assets:\n    - nested.example\n  assets:\n  - t.example\n')
+check('nested assets under a child key is ignored',
+  scopeReasonFor(osRoot, 'https://t.example/a') === undefined)
+check('nested assets under a child key cannot widen scope',
+  !!scopeReasonFor(osRoot, 'https://nested.example/a'))
+writeFileSync(engagement, 'program:\n  assets:\n  - nested.example\n')
+check('nested assets without a scope block is not a legacy scope',
+  !!scopeReasonFor(osRoot, 'https://nested.example/a'))
+writeFileSync(engagement, 'scope:\n  assets:\n  - t.example\n  assets:\n  - evil.example\n')
+check('first depth-1 assets entry wins (duplicate entries)',
+  scopeReasonFor(osRoot, 'https://t.example/a') === undefined
+  && !!scopeReasonFor(osRoot, 'https://evil.example/a'))
+
+// ---- CR-only line endings (the parsers must split on /\r\n|\r|\n/) ------------------
+writeFileSync(engagement, 'scope:\r  assets:\r  - "t.example"\r')
+check('CR-only engagement.yaml parses the asset list (in-scope allowed)',
+  scopeReasonFor(osRoot, 'https://t.example/a') === undefined)
+check('CR-only engagement.yaml still denies out-of-scope hosts',
+  !!scopeReasonFor(osRoot, 'https://evil.example/a'))
+writeFileSync(engagement, 'scope:\r  gate: none\r')
+check('CR-only gate: none disables the gate',
+  scopeReasonFor(osRoot, 'https://anything.example/x') === undefined)
+
+// ---- web-fetch gate: in-scope hosts are live targets, not research material -------
+writeFileSync(engagement, 'scope:\n  assets: [t.example, "*.wild.example"]\n')
+const webDeny = await h.preExecute(exec('firecrawl_scrape', { url: 'https://t.example/a' }, osRoot))
+check('firecrawl_scrape of an in-scope host denied (points at the executor)',
+  webDeny.kind === 'deny' && webDeny.reason.includes('research_os_request'))
+check('web fetch of an out-of-scope host allowed (research material)',
+  (await h.preExecute(exec('firecrawl_scrape', { url: 'https://docs.example/x' }, osRoot))).kind === 'allow')
+check('wildcard-covered host denied for web tools',
+  (await h.preExecute(exec('tavily_extract', { urls: ['https://a.wild.example/p'] }, osRoot))).kind === 'deny')
+check('web tool call with no URL allowed',
+  (await h.preExecute(exec('firecrawl_map', { url: '' }, osRoot))).kind === 'allow')
+check('firecrawl_search allowed (search, not target fetch)',
+  (await h.preExecute(exec('firecrawl_search', { query: 't.example' }, osRoot))).kind === 'allow')
+check('jina_rerank allowed',
+  (await h.preExecute(exec('jina_rerank', { query: 'x', documents: ['https://t.example/'] }, osRoot))).kind === 'allow')
+check('sanctioned executor untouched by the web gate',
+  (await h.preExecute(exec('research_os_request', { url: 'https://t.example/a' }, osRoot))).kind === 'allow')
+writeFileSync(engagement, 'scope:\n  assets:\n    - {host: nested}\n')
+check('unenforceable scope + web fetch denied (fail closed)',
+  (await h.preExecute(exec('firecrawl_scrape', { url: 'https://anything.example/x' }, osRoot))).kind === 'deny')
+rmSync(engagement)
+check('unset scope + web fetch allowed (research tools stay usable)',
+  (await h.preExecute(exec('firecrawl_scrape', { url: 'https://anything.example/x' }, osRoot))).kind === 'allow')
+writeFileSync(engagement, 'scope:\n  gate: none\n')
+check('gate: none + web fetch allowed',
+  (await h.preExecute(exec('firecrawl_scrape', { url: 'https://anything.example/x' }, osRoot))).kind === 'allow')
+
+// ---- web-fetch gate: no-URL calls, normalization, schemeless refs, redaction --------
+writeFileSync(engagement, 'scope:\n  assets:\n    - {host: nested}\n')
+check('file read with no URL allowed even when scope is unenforceable',
+  (await h.preExecute(exec('read', { file_path: 'README.md' }, osRoot))).kind === 'allow')
+check('no-URL fetch-shaped call allowed when scope is unenforceable',
+  (await h.preExecute(exec('firecrawl_map', { query: 'no url here' }, osRoot))).kind === 'allow')
+writeFileSync(engagement, 'scope:\n  assets: [t.example, "*.wild.example"]\n')
+check('userinfo URL denied for web tools',
+  (await h.preExecute(exec('firecrawl_scrape', { url: 'https://user:pass@t.example/a' }, osRoot))).kind === 'deny')
+check('trailing-dot URL denied for web tools',
+  (await h.preExecute(exec('jina_read_url', { url: 'https://t.example./a' }, osRoot))).kind === 'deny')
+check('case-insensitive URL denied for web tools',
+  (await h.preExecute(exec('webfetch', { url: 'HTTPS://T.EXAMPLE/a' }, osRoot))).kind === 'deny')
+const schemelessDeny = await h.preExecute(exec('firecrawl_map', { url: 't.example' }, osRoot))
+check('schemeless in-scope host denied for web tools',
+  schemelessDeny.kind === 'deny' && schemelessDeny.reason.includes("'t.example'"))
+check('schemeless wildcard host denied for web tools',
+  (await h.preExecute(exec('tavily_extract', { urls: ['a.wild.example'] }, osRoot))).kind === 'deny')
+check('schemeless host with a port falls back to the portless asset',
+  (await h.preExecute(exec('firecrawl_map', { url: 't.example:8443' }, osRoot))).kind === 'deny')
+check('schemeless out-of-scope host allowed',
+  (await h.preExecute(exec('firecrawl_map', { url: 'docs.example' }, osRoot))).kind === 'allow')
+check('plain file read allowed with a valid asset list',
+  (await h.preExecute(exec('read', { file_path: 'README.md' }, osRoot))).kind === 'allow')
+check('sanctioned browser executor skips the web gate',
+  (await h.preExecute(exec('research_os_browser', { url: 'https://t.example/a' }, osRoot))).kind === 'allow')
+const rawUrlDeny = await h.preExecute(exec('firecrawl_scrape', { url: 'https://user:pass@t.example/a' }, osRoot))
+check('web deny message carries the normalized host, never the raw URL',
+  rawUrlDeny.kind === 'deny' && rawUrlDeny.reason.includes("'t.example'")
+  && !rawUrlDeny.reason.includes('user:pass') && !rawUrlDeny.reason.includes('https://'))
+
+// ---- web-fetch gate: path-typed arguments are not schemeless host references --------
+check('plain file read with a host-looking path allowed',
+  (await h.preExecute(exec('read', { file_path: 't.example/notes.md' }, osRoot))).kind === 'allow')
+check('_path-suffixed argument keys skipped for schemeless hosts',
+  (await h.preExecute(exec('firecrawl_parse', { input_path: 't.example/x' }, osRoot))).kind === 'allow')
+check('out_dir argument key skipped for schemeless hosts',
+  (await h.preExecute(exec('firecrawl_extract', { out_dir: 't.example/out' }, osRoot))).kind === 'allow')
+check('cwd/workdir/profile argument keys skipped for schemeless hosts',
+  (await h.preExecute(exec('firecrawl_map', { cwd: 't.example', workdir: 't.example', profile: 't.example' }, osRoot))).kind === 'allow')
+check('schemeless url argument still denied',
+  (await h.preExecute(exec('firecrawl_map', { url: 't.example' }, osRoot))).kind === 'deny')
+check('schemeless url inside an array still denied',
+  (await h.preExecute(exec('tavily_extract', { urls: ['t.example/x'] }, osRoot))).kind === 'deny')
+
+// ---- web-fetch gate: JSON-escaped URLs are decoded before collection ----------------
+check('JSON-escaped in-scope URL denied for web tools',
+  (await h.preExecute(exec('firecrawl_scrape', { url: 'https:\\/\\/t.example/a' }, osRoot))).kind === 'deny')
+check('JSON-escaped out-of-scope URL allowed for web tools',
+  (await h.preExecute(exec('firecrawl_scrape', { url: 'https:\\/\\/docs.example/a' }, osRoot))).kind === 'allow')
+
+// ---- web-fetch gate: automation/computer tool names are fetch-shaped too ------------
+const automationDeny = await h.preExecute(exec('tinyfish_run_web_automation', { url: 'https://t.example/a' }, osRoot))
+check('tinyfish_run_web_automation of an in-scope host denied',
+  automationDeny.kind === 'deny' && automationDeny.reason.includes('research_os_request'))
+check('run_web_automation of an in-scope host denied',
+  (await h.preExecute(exec('run_web_automation', { url: 'https://t.example/a' }, osRoot))).kind === 'deny')
+check('computer tool of an in-scope host denied',
+  (await h.preExecute(exec('computer', { url: 'https://t.example/a' }, osRoot))).kind === 'deny')
+check('run_web_automation of an out-of-scope host allowed',
+  (await h.preExecute(exec('run_web_automation', { url: 'https://docs.example/x' }, osRoot))).kind === 'allow')
+check('automation run_search variant excluded from the web gate',
+  (await h.preExecute(exec('run_web_automation_search', { query: 't.example' }, osRoot))).kind === 'allow')
+
+// ---- web-fetch gate: an unreadable scope file fails CLOSED --------------------------
+rmSync(engagement, { force: true })
+mkdirSync(engagement)
+const unreadableDeny = await h.preExecute(exec('firecrawl_scrape', { url: 'https://t.example/a' }, osRoot))
+check('unreadable scope + in-scope URL -> web fetch denied (fail closed)',
+  unreadableDeny.kind === 'deny' && unreadableDeny.reason.includes('scope'))
+check('unreadable scope + out-of-scope URL -> web fetch denied too (fail closed)',
+  (await h.preExecute(exec('firecrawl_scrape', { url: 'https://docs.example/a' }, osRoot))).kind === 'deny')
+check('unreadable scope: fetch-shaped call with a non-URL string denied (fail closed)',
+  (await h.preExecute(exec('firecrawl_map', { query: 'no url here' }, osRoot))).kind === 'deny')
+check('plain file read allowed even with an unreadable scope (no URL, no host reference)',
+  (await h.preExecute(exec('read', { file_path: 'README.md' }, osRoot))).kind === 'allow')
+rmSync(engagement, { recursive: true, force: true })
+writeFileSync(engagement, 'scope:\n  assets: [t.example, "*.wild.example"]\n')
+
+// ---- web-fetch gate: browser/automation fetch tools are target access too ----------
+const browserNavigateDeny = await h.preExecute(exec('mcp__playwright__browser_navigate', { url: 'https://t.example/a' }, osRoot))
+check('mcp__playwright__browser_navigate of an in-scope host denied',
+  browserNavigateDeny.kind === 'deny' && browserNavigateDeny.reason.includes('research_os_browser'))
+check('mcp__playwright__browser_navigate of an out-of-scope host allowed',
+  (await h.preExecute(exec('mcp__playwright__browser_navigate', { url: 'https://docs.example/x' }, osRoot))).kind === 'allow')
+check('research_os_browser stays allowed (sanctioned executor checked before the pattern)',
+  (await h.preExecute(exec('research_os_browser', { url: 'https://t.example/a' }, osRoot))).kind === 'allow')
+check('firecrawl_search stays allowed (search is not target fetch)',
+  (await h.preExecute(exec('firecrawl_search', { query: 't.example' }, osRoot))).kind === 'allow')
 
 rmSync(sandbox, { recursive: true, force: true })
 console.log(`\n${passed}/${passed + failures.length} passed`)

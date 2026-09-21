@@ -46,6 +46,11 @@ const root = mkdtempSync(join(tmpdir(), 'enforcer-exec-'))
 cpSync(join(OS_REPO, 'tools'), join(root, 'tools'), { recursive: true })
 writeFileSync(join(root, 'OS_VERSION'), '7.1\n')
 
+// 1b. Scope fixture: an unset scope denies at prepare and at the executor, so the lab
+//     host must be a listed asset for the happy-path chain below.
+mkdirSync(join(root, '00_control'), { recursive: true })
+writeFileSync(join(root, '00_control', 'engagement.yaml'), `scope:\n  assets: ["127.0.0.1:${server.address().port}"]\n`)
+
 // 1. A real RUNNING cycle built through the control plane.
 const setupPy = join(root, 'setup.py')
 writeFileSync(setupPy, [

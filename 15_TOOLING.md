@@ -342,26 +342,78 @@ dedicated task script carrying its documented precondition.
 
 When the `research-os-enforcer` DSH plugin is installed on the machine
 (`~/.dsh/profiles/web/plugins/research-os-enforcer/`; source: `<this repo>/dsh-plugin/`,
-install with its `install.sh`, activate by restarting the DSH host), the harness itself
-enforces two rules inside any workspace it detects as a Research OS (`OS_VERSION` +
-`11_runtime/events.jsonl`):
+install with its `install.sh`, activate by restarting the DSH host), the harness
+intercepts tool calls inside any workspace it detects as a Research OS (`OS_VERSION`
+plus at least one of `11_runtime/events.jsonl`, `00_control/engagement.yaml` or the
+`11_runtime/` directory — ledger deletion alone does not disarm it). This is
+**advisory interception, not an OS security boundary**: it closes the common shapes
+and documents the gaps.
 
 - projection and canonical paths are **write-denied at the tool layer** (`write`/`edit`
-  plus common shell write shapes); state mutates only through `tools/researchctl.py`;
-- raw network egress (`curl`/`wget`/`ssh`/… to a non-local host) is **closed**; target
-  traffic goes through the **`research_os_request` controlled executor**, which consumes
-  the single-use preflight token from `python3 tools/researchctl.py <ROOT> prepare payload.json`
+  plus common shell write shapes) for the protected-path list: runtime
+  projections/views, `10_learning/freshness.yaml`, the evidence store
+  (`11_runtime/evidence-store/**`), and `00_control/engagement.yaml` +
+  `00_control/identity-binding.yaml` once the workspace leaves BOOTSTRAP (unreadable
+  status counts as protected). State mutates only through `tools/researchctl.py`.
+- raw network egress is **intercepted for a known binary list** (`curl`/`wget`/`ssh`/…
+  to a non-local host) and only in `bash`; interpreter one-liners (`python3 -c`, node,
+  php) and bash-invoked CLIs bypass it (documented v1 limit). Target traffic goes
+  through the **`research_os_request` controlled executor**, which consumes the
+  single-use preflight token from `python3 tools/researchctl.py <ROOT> prepare payload.json`
   (canonical digest over `{method,url,principal[,headers][,body_sha256]}`), re-checks the
   request host against the engagement asset list (`00_control/engagement.yaml`, same
   semantics as `prepare`) and refuses out-of-scope targets before any network I/O,
   captures the exchange under `08_artifacts/raw/`, registers it as evidence and records
   the action; localhost/lab traffic is never blocked. The token store
   (`11_runtime/action-tokens.jsonl`) is control-plane-owned and write-protected.
+- **web-fetch tools are gated** for hosts in the engagement scope: fetch-shaped tools
+  (scrape/crawl/map/parse/extract/read/fetch/browser/navigate/automation/computer;
+  `_search` excluded; JSON-escaped URLs are decoded first) must not retrieve an in-scope
+  asset — those are live targets, so use `research_os_request` or `research_os_browser`
+  instead. Out-of-scope retrieval is research material and stays allowed; path-typed
+  arguments (`file_path`, `out_dir`, ...) are not host references.
+- **scope is default-deny**: unset/absent/empty assets refuse target traffic;
+  `gate: none` inside the top-level `scope:` block is the explicit human opt-out for
+  non-target work; unparseable assets fail closed. Record scope through
+  `researchctl scope-set` — the first record on a pristine template needs a
+  `source_reference` from the program policy; re-records, widenings, and any file that
+  already carries an explicit depth-1 `gate:` line additionally require a
+  `human_reference`. The writer enforces its postcondition in code: it rewrites the
+  depth-1 `assets:` entry, removes every depth-1 `gate:` line and every shadowed
+  duplicate/legacy `assets:` occurrence, then re-parses; on mismatch it restores the
+  pre-write file and raises without recording an event.
 
 The plugin is defense-in-depth, not the OS: the control plane and `tools/audit.py`
-remain the source of truth, and the plugin fails open (logging to
-`~/.dsh/research-os-enforcer.log`) if it errors. To disable it, delete its row in
+remain the source of truth. Internal errors fail open and log to
+`~/.dsh/research-os-enforcer.log`, with deliberate fail-closed exceptions: the
+executor-side scope re-checks (`researchctl prepare` semantics and the controlled
+executors), the web-fetch gate (an unreadable scope file denies the fetch), and a write
+guard that throws while the call names protected material. Command-line/interpreter
+paths remain advisory interception: a scope decision made inside an interpreter script
+or a bash-invoked CLI is not visible to the plugin. To disable it, delete its row in
 `~/.dsh/profiles/web/cordis.patch.yml` and restart the host.
+
+### Residual risks (v1, accepted)
+
+- Interpreter one-liners (`python3 -c`, node, php) and bash-invoked CLIs bypass the
+  egress gate: command scanning cannot see inside them.
+- Ledger and projection destruction is denied for common shell shapes — file deletes and
+  directory-level forms (`rm -rf 11_runtime`, `rm 11_runtime/*`, `find … -delete`,
+  `mv … /tmp/x`, `cd 11_runtime && rm …`) resolve their targets, including bare names
+  and globs. A deletion executed inside an interpreter or a bash-invoked CLI is not
+  visible to command scanning; workspace detection then still holds as long as the
+  engagement binding or the `11_runtime/` directory remains — mitigated, not eliminated.
+- Web fetches are allowed while the scope is unset, so research tools stay usable before
+  scope is recorded: an in-scope URL cannot be classified until then.
+- `gate: none` disables the executor gate, the web-fetch gate and the audit's historical
+  host re-check.
+- Scope checks are evaluated against the current assets: actions recorded under an
+  earlier scope are downgraded to a warning by the audit, not re-legalized.
+- `scope-set` is agent-invocable; `human_reference` is procedural friction, not
+  cryptographic proof.
+- Host matching is literal `host[:port]` plus `*.domain` — no CIDR, no DNS resolution.
+- The browser arm is read-only (navigate + capture).
+- `source_reference` is only pattern-redacted, never guaranteed secret-free.
 
 ## Triage aid (TypeSafe Jev, optional)
 

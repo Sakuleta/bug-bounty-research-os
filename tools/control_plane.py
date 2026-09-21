@@ -14,6 +14,8 @@ import os
 import re
 import secrets
 import shutil
+import stat
+import tempfile
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -49,7 +51,7 @@ EVENT_TYPES = {
     "HYPOTHESIS_CREATED", "HYPOTHESIS_UPDATED", "HYPOTHESIS_TRANSITIONED",
     "EVIDENCE_REGISTERED", "ACTION_RECORDED", "TECHNIQUE_EVALUATED", "WORKER_RESULT",
     "HUMAN_GATE_REQUESTED", "HUMAN_GATE_RESOLVED", "AUDIT_RECORDED", "FRESHNESS_RECORDED",
-    "STATE_CHANGE", "NOTE",
+    "STATE_CHANGE", "NOTE", "SCOPE_CHANGED",
 }
 HUMAN_GATE_DECISIONS = {"RESUME", "PROVIDED", "APPROVED", "DENIED", "CANCELLED"}
 REQUIRED_AUDIT_CLASSES = {"scope", "coverage", "negative", "open-hypothesis", "novelty-duplicate", "hygiene-cleanup", "method-self-attack"}
@@ -79,57 +81,117 @@ def secret_pattern_hits(value: str) -> list[str]:
     return [p.pattern for p in _SECRET_PATTERNS if p.search(value)]
 
 
+def _leading_ws(line: str) -> str:
+    return line[: len(line) - len(line.lstrip(" \t"))]
+
+
+def _scope_block_end(lines: list[str], start: int) -> int:
+    """First non-blank, non-indented line after `start` (the block boundary)."""
+    for j in range(start + 1, len(lines)):
+        raw = lines[j].rstrip("\r\n")
+        if raw.strip() and not raw.startswith((" ", "\t")):
+            return j
+    return len(lines)
+
+
+def _scope_child_indent(lines: list[str], start: int, end: int) -> str:
+    """Indentation of the block's first real (non-comment) entry = depth 1."""
+    for j in range(start + 1, end):
+        stripped = lines[j].strip()
+        if stripped and not stripped.startswith("#"):
+            return _leading_ws(lines[j])
+    return "  "
+
+
+def _assets_block_items(lines: list[str], entry: int, end: int, legacy: bool) -> tuple[list[str], int]:
+    """Items of the `assets:` entry at `entry`, scanned within [entry+1, end).
+
+    A depth-1 entry whose value is neither empty, `[]`, nor an inline list counts as
+    unparsed (the caller fails closed). A block list ends at the first depth-1 non-item
+    line when the entry sits inside the `scope:` block (`legacy=False`); a legacy
+    top-level entry keeps the historical rule and ends at the first col-0 line.
+    """
+    rest = lines[entry].rstrip("\r\n").strip().split(":", 1)[1].strip()
+    items: list[str] = []
+    unparsed = 0
+    if rest in ("", "[]"):
+        j = entry + 1
+        while j < end:
+            raw = lines[j].rstrip("\r\n")
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                j += 1
+                continue
+            if not raw.startswith((" ", "\t")):
+                break
+            if not legacy and not stripped.startswith("-"):
+                break
+            m = re.match(r"^-\s*(.+?)\s*$", stripped)
+            if not m:
+                j += 1
+                continue
+            val = m.group(1)
+            if val.startswith(("[", "{")):
+                unparsed += 1
+                j += 1
+                continue
+            val = val.strip("\"'")
+            if val:
+                items.append(val)
+            j += 1
+    elif rest.startswith("[") and rest.endswith("]"):
+        for part in rest[1:-1].split(","):
+            val = part.strip().strip("\"'")
+            if val:
+                items.append(val)
+    else:
+        unparsed += 1
+    return items, unparsed
+
+
 def engagement_assets(root: Path) -> list[str] | None:
     """Parse the engagement's in-scope asset list (simple YAML string list).
 
-    Returns None when the file/block is absent or empty (no scope gate configured),
-    the parsed items when they are simple strings, and [] when the block exists but
-    is not a simple string list — the caller treats [] as unenforceable, fail closed.
+    Depth-aware: only a depth-1 `assets:` entry inside the top-level `scope:` block is
+    authoritative. A legacy top-level `assets:` block is still accepted, but ONLY when
+    no `scope:` block exists (a shadowed legacy block can never override the scope; the
+    writer removes such occurrences). Returns None when the file/block is absent or
+    empty (no scope gate configured), the parsed items when they are simple strings,
+    and [] when the block exists but is not a simple string list — the caller treats
+    [] as unenforceable, fail closed.
     """
     path = root / "00_control" / "engagement.yaml"
     if not path.exists():
         return None
-    in_assets = False
-    items: list[str] = []
-    unparsed = 0
-    for line in path.read_text(errors="ignore").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if not in_assets:
-            m = re.match(r"^assets:\s*(.*)$", stripped)
-            if not m:
-                continue
-            rest = m.group(1).strip()
-            if rest in ("", "[]"):
-                in_assets = True
-                continue
-            if rest.startswith("[") and rest.endswith("]"):
-                for part in rest[1:-1].split(","):
-                    val = part.strip().strip("\"'")
-                    if val:
-                        items.append(val)
-                continue
-            unparsed += 1
-            in_assets = True
-            continue
-        if not line.startswith((" ", "\t")):
-            break
-        m = re.match(r"^\s*-\s*(.+?)\s*$", line)
-        if not m:
-            continue
-        val = m.group(1)
-        if val.startswith(("[", "{")):
-            unparsed += 1
-            continue
-        val = val.strip("\"'")
-        if val:
-            items.append(val)
+    lines = path.read_text(errors="ignore").splitlines()
+    scope_at = next((i for i, line in enumerate(lines)
+                     if not line.startswith((" ", "\t"))
+                     and re.fullmatch(r"scope:\s*(#.*)?", line.strip())), None)
+    if scope_at is not None:
+        end = _scope_block_end(lines, scope_at)
+        indent = _scope_child_indent(lines, scope_at, end)
+        entry = next((j for j in range(scope_at + 1, end)
+                      if lines[j].strip() and not lines[j].strip().startswith("#")
+                      and _leading_ws(lines[j]) == indent
+                      and re.match(r"assets:", lines[j].strip())), None)
+        items, unparsed = ([], 0) if entry is None else _assets_block_items(lines, entry, end, False)
+    else:
+        entry = next((i for i, line in enumerate(lines)
+                      if not line.startswith((" ", "\t")) and re.match(r"assets:", line.strip())), None)
+        items, unparsed = ([], 0) if entry is None else _assets_block_items(lines, entry, len(lines), True)
     if items:
         return items
-    if in_assets and unparsed:
+    if unparsed:
         return []
     return None
+
+
+def _normalize_host(host: str) -> str:
+    """Host normalization shared with the enforcer: strip userinfo and one trailing dot."""
+    value = (host or "").rsplit("@", 1)[-1]
+    if value.endswith("."):
+        value = value[:-1]
+    return value.lower()
 
 
 def _asset_hosts(assets: list[str]) -> list[str]:
@@ -138,9 +200,9 @@ def _asset_hosts(assets: list[str]) -> list[str]:
         value = asset.strip()
         if "://" in value:
             value = value.split("://", 1)[1]
-        host = value.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0].strip().lower()
+        host = value.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0].strip()
         if host:
-            hosts.append(host)
+            hosts.append(_normalize_host(host))
     return hosts
 
 
@@ -156,24 +218,107 @@ def _host_in_scope(host: str, patterns: list[str]) -> bool:
     return False
 
 
+# Public seam names: audit.py and other harnesses consume these without reaching into
+# private helpers. The private aliases stay for backwards compatibility.
+asset_hosts = _asset_hosts
+host_in_scope = _host_in_scope
+
+
+def scope_gate_disabled(root: Path) -> bool:
+    """True when the engagement carries the explicit `gate: none` opt-out.
+
+    Canonical rule (identical in dsh-plugin/index.js): after a top-level
+    (unindented) `scope:` line, scan its indented block until the first non-blank
+    line that is not indented; only depth-1 entries count (the first non-comment
+    block line fixes that indentation). For each depth-1 line: skip it when its
+    trimmed form starts with `#`; otherwise cut any trailing comment with
+    split('#', 1)[0] and require the result to fullmatch
+    `^gate:\\s*['\\"]?none['\\"]?\\s*$`.
+    """
+    path = root / "00_control" / "engagement.yaml"
+    if not path.exists():
+        return False
+    in_scope = False
+    child_indent: str | None = None
+    for line in path.read_text(errors="ignore").splitlines():
+        stripped = line.strip()
+        if not in_scope:
+            if not line.startswith((" ", "\t")) and re.match(r"^scope:\s*(#.*)?$", stripped):
+                in_scope = True
+            continue
+        if not stripped:
+            continue
+        if not line.startswith((" ", "\t")):
+            break
+        if stripped.startswith("#"):
+            continue
+        indent = line[: len(line) - len(line.lstrip(" \t"))]
+        if child_indent is None:
+            child_indent = indent
+        if indent != child_indent:
+            continue
+        candidate = stripped.split("#", 1)[0].strip()
+        if re.fullmatch(r"gate:\s*['\"]?none['\"]?\s*", candidate):
+            return True
+    return False
+
+
+def _scope_gate_line_present(root: Path) -> bool:
+    """True when the top-level `scope:` block carries an explicit depth-1 `gate:` line.
+
+    Any value counts: the line is deliberate configuration the human put there, so
+    `set_scope` must demand a human_reference even when the parsed asset list is empty.
+    """
+    path = root / "00_control" / "engagement.yaml"
+    if not path.exists():
+        return False
+    in_scope = False
+    child_indent: str | None = None
+    for line in path.read_text(errors="ignore").splitlines():
+        stripped = line.strip()
+        if not in_scope:
+            if not line.startswith((" ", "\t")) and re.match(r"^scope:\s*(#.*)?$", stripped):
+                in_scope = True
+            continue
+        if not stripped:
+            continue
+        if not line.startswith((" ", "\t")):
+            break
+        if stripped.startswith("#"):
+            continue
+        indent = _leading_ws(line)
+        if child_indent is None:
+            child_indent = indent
+        if indent != child_indent:
+            continue
+        if re.match(r"gate:", stripped.split("#", 1)[0].strip()):
+            return True
+    return False
+
+
 def scope_check(root: Path, url: str) -> dict[str, Any]:
     """Per-host scope decision for a URL from 00_control/engagement.yaml assets.
 
     Single seam for prepare, the BUA runner and any harness that needs the same
-    answer: `gate` is "none" when no asset list is configured, "unenforceable" when
+    answer: `gate` is "disabled" for an explicit `gate: none` opt-out, "unset"
+    when no asset list is configured (callers default-deny), "unenforceable" when
     the block exists but is not a simple string list (callers fail closed), and
     "assets" otherwise; `in_scope` is the verdict. Hosts compare as
     host[:port] strings, lowercase, with `*.domain` matching the base and any
     subdomain.
     """
     assets = engagement_assets(root)
-    if assets is None:
-        return {"gate": "none", "in_scope": True, "host": "", "assets": None}
-    if assets == []:
-        return {"gate": "unenforceable", "in_scope": False, "host": "", "assets": []}
     host = ""
     if "://" in url:
-        host = url.split("://", 1)[1].split("/", 1)[0].split("?", 1)[0].split("#", 1)[0].lower()
+        host = _normalize_host(
+            url.split("://", 1)[1].split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+        )
+    if scope_gate_disabled(root):
+        return {"gate": "disabled", "in_scope": True, "host": host, "assets": assets}
+    if assets is None:
+        return {"gate": "unset", "in_scope": False, "host": host, "assets": None}
+    if assets == []:
+        return {"gate": "unenforceable", "in_scope": False, "host": host, "assets": []}
     return {
         "gate": "assets",
         "in_scope": bool(host) and _host_in_scope(host, _asset_hosts(assets)),
@@ -763,6 +908,297 @@ class ControlPlane:
         self.refresh()
         return event
 
+    # ---------- engagement scope ----------
+    def set_scope(self, assets: list[str], source_reference: str, gate: str | None = None,
+                  human_reference: str = "", actor: str = "controller") -> dict[str, Any]:
+        """Rewrite the engagement scope block and record its provenance.
+
+        The engagement binding is human-owned and is NOT rebuilt by refresh(); the
+        SCOPE_CHANGED event records its history, and this method rewrites the depth-1
+        `assets:` entry, every depth-1 `gate:` line and any shadowed duplicate/legacy
+        `assets:` occurrence — the postcondition is that `engagement_assets()` returns
+        exactly the requested list (see `_write_scope_block`). The rewrite is staged in
+        a sibling temp file, fsynced and os.replace'd onto engagement.yaml, and the
+        event is appended only after the replace (and the re-parse postcondition) succeed,
+        both under the lock.
+
+        `human_reference` is required to re-record or widen a scope that already exists:
+        a recorded SCOPE_CHANGED, a non-empty parsed asset list, or an explicit depth-1
+        `gate:` line (deliberate configuration). The first bootstrap record on a pristine
+        template may omit it.
+        """
+        reference = str(source_reference or "").strip()
+        if not reference:
+            raise ValueError("scope-set requires a non-empty source_reference (policy URL/section; never a secret)")
+        mode = str(gate or "assets").lower()
+        if mode not in {"assets", "none"}:
+            raise ValueError("scope-set gate must be 'assets' or 'none'")
+        if not isinstance(assets, list):
+            raise ValueError("scope-set assets must be a list of strings")
+        items: list[str] = []
+        for item in assets:
+            if not isinstance(item, str):
+                raise ValueError(f"scope-set asset {item!r} is not a string")
+            if not item or re.search(r"[\s\"'\\#\x00-\x1f\x7f]", item):
+                raise ValueError(
+                    f"scope-set asset {item!r} is not a plain host/URL string — empty items and "
+                    "whitespace, quotes, backslash, '#' and control characters are refused so the "
+                    "asset can never inject YAML structure"
+                )
+            items.append(item)
+        if mode == "assets" and not items:
+            raise ValueError("scope-set in assets mode requires a non-empty assets list")
+        human = str(human_reference or "").strip()
+        with _lock(self.root):
+            previous = engagement_assets(self.root)
+            prior = any(e.get("type") == "SCOPE_CHANGED" for e in self._read_events())
+            explicit_gate = _scope_gate_line_present(self.root)
+            if not human and (prior or previous or explicit_gate):
+                raise ValueError(
+                    "scope-set requires human_reference (a ticket/message id from the human who authorized "
+                    "the change) — this re-records or widens an existing engagement scope; only the first "
+                    "bootstrap record on a pristine template may omit it"
+                )
+            # The postcondition re-parse lives inside this lock too, so the checked state
+            # cannot change between the write and the append.
+            self._write_scope_block(items, mode)
+            event = self._append_locked(
+                "SCOPE_CHANGED", "scope", "engagement", actor=actor,
+                reason=f"engagement scope set ({mode})",
+                payload={
+                    "assets": items,
+                    "previous_assets": [] if previous is None else list(previous),
+                    "gate": mode,
+                    "source_reference": reference,
+                    "human_reference": human,
+                },
+            )
+        self.refresh()
+        return event
+
+    @staticmethod
+    def _leading_ws(line: str) -> str:
+        return _leading_ws(line)
+
+    @staticmethod
+    def _scope_block_end(lines: list[str], start: int) -> int:
+        """First non-blank, non-indented line after `start` (the block boundary)."""
+        return _scope_block_end(lines, start)
+
+    @staticmethod
+    def _scope_child_indent(lines: list[str], start: int, end: int) -> str:
+        """Indentation of the block's first real (non-comment) entry = depth 1."""
+        return _scope_child_indent(lines, start, end)
+
+    @staticmethod
+    def _scope_item_end(lines: list[str], start: int, end: int) -> int:
+        """End of a block list: `-` items plus blank/comment runs followed by more items."""
+        j = start
+        while j < end:
+            raw = lines[j].rstrip("\r\n")
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                look = j + 1
+                while look < end and (not lines[look].strip() or lines[look].strip().startswith("#")):
+                    look += 1
+                if (look < end and lines[look].startswith((" ", "\t"))
+                        and lines[look].strip().startswith("-")):
+                    j = look
+                    continue
+                return j
+            if raw.startswith((" ", "\t")) and stripped.startswith("-"):
+                j += 1
+                continue
+            return j
+        return j
+
+    @staticmethod
+    def _legacy_block_end(lines: list[str], start: int) -> int:
+        """End of a legacy top-level assets block: `-` items, blank/comment runs."""
+        j = start
+        while j < len(lines):
+            raw = lines[j].rstrip("\r\n")
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                look = j + 1
+                while look < len(lines) and (not lines[look].strip() or lines[look].strip().startswith("#")):
+                    look += 1
+                if look < len(lines) and lines[look].strip().startswith("-"):
+                    j = look
+                    continue
+                return j
+            if stripped.startswith("-"):
+                j += 1
+                continue
+            return j
+        return j
+
+    @classmethod
+    def _top_level_assets_ranges(cls, lines: list[str]) -> list[tuple[int, int]]:
+        """Line ranges of every col-0 `assets:` entry (legacy/shadowed duplicates)."""
+        ranges: list[tuple[int, int]] = []
+        for i, line in enumerate(lines):
+            if line.startswith((" ", "\t")):
+                continue
+            stripped = line.rstrip("\r\n").strip()
+            m = re.match(r"assets:\s*(.*?)\s*$", stripped)
+            if not m:
+                continue
+            end = i + 1 if m.group(1) else cls._legacy_block_end(lines, i + 1)
+            ranges.append((i, end))
+        return ranges
+
+    @staticmethod
+    def _splice(lines: list[str], removals: list[tuple[int, int]], insert_at: int,
+                replacement: list[str]) -> list[str]:
+        """Drop every removal range and insert `replacement` before line `insert_at`."""
+        drop = [False] * len(lines)
+        for start, end in removals:
+            for i in range(start, end):
+                drop[i] = True
+        out: list[str] = []
+        for i, line in enumerate(lines):
+            if i == insert_at:
+                out.extend(replacement)
+            if not drop[i]:
+                out.append(line)
+        return out
+
+    @staticmethod
+    def _atomic_replace(target: Path, text: str, mode_bits: int | None) -> None:
+        """Stage `text` in a sibling temp file, fsync and os.replace it onto `target`.
+
+        The temp file carries the original mode (when known) before the rename, so a
+        replacement never silently widens or narrows the file permissions.
+        """
+        fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=".engagement-", suffix=".yaml")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+            if mode_bits is not None:
+                os.chmod(tmp_name, mode_bits)
+            os.replace(tmp_name, target)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+
+    @staticmethod
+    def _scope_block_lines(items: list[str], mode: str, indent: str = "  ", nl: str = "\n") -> list[str]:
+        block = [f"{indent}assets:{nl}",
+                 *[f"{indent}- {json.dumps(item, ensure_ascii=False)}{nl}" for item in items]]
+        if mode == "none":
+            block.append(f"{indent}gate: none{nl}")
+        return block
+
+    def _write_scope_block(self, items: list[str], mode: str) -> None:
+        """Depth-aware line surgery on the top-level `scope:` block, with postcondition.
+
+        The depth-1 `assets:` entry is rewritten and EVERY depth-1 `gate:` line is
+        removed (then the requested one is written); nested keys (e.g.
+        `exclusions:\\n    gate: strict`) and unrelated bytes survive. Every other
+        `assets:` occurrence the parser could see is removed too: duplicate depth-1
+        entries inside the `scope:` block and shadowed legacy col-0 `assets:` blocks
+        before or after it. A legacy top-level `assets:` entry without a `scope:` block
+        is rewritten in place as a `scope:` block; otherwise the block is appended at
+        EOF. Line endings are preserved; the write goes through a symlinked target (the
+        link survives) carrying the original file mode.
+
+        After the atomic replace the scope is re-parsed inside the caller's lock: when
+        `engagement_assets()` no longer equals the requested list, or the gate mode does
+        not match the request, the pre-write content is restored and ValueError is
+        raised — the writer can never leave a fail-open scope behind.
+        """
+        path = self.root / "00_control" / "engagement.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        real = Path(os.path.realpath(path))
+        try:
+            real.relative_to(self.root)
+        except ValueError as exc:
+            raise ValueError(
+                "engagement.yaml resolves outside the engagement root — refusing to follow the symlink"
+            ) from exc
+        real.parent.mkdir(parents=True, exist_ok=True)
+        raw = ""
+        mode_bits: int | None = None
+        if real.exists():
+            with real.open("r", encoding="utf-8", newline="") as fh:
+                raw = fh.read()
+            mode_bits = stat.S_IMODE(real.stat().st_mode)
+        nl = "\r\n" if "\r\n" in raw else "\n"
+        lines = raw.splitlines(keepends=True)
+        scope_at = next((i for i, line in enumerate(lines)
+                         if not line.startswith((" ", "\t"))
+                         and re.fullmatch(r"scope:\s*(#.*)?", line.rstrip("\r\n"))), None)
+        if scope_at is not None:
+            end = self._scope_block_end(lines, scope_at)
+            indent = self._scope_child_indent(lines, scope_at, end)
+            assets_ranges: list[tuple[int, int]] = []
+            gate_positions: list[int] = []
+            j = scope_at + 1
+            while j < end:
+                raw_line = lines[j].rstrip("\r\n")
+                stripped = raw_line.strip()
+                if not stripped or stripped.startswith("#") or self._leading_ws(raw_line) != indent:
+                    j += 1
+                    continue
+                m = re.match(r"assets:\s*(.*?)\s*$", stripped)
+                if m:
+                    a_end = j + 1 if m.group(1) else self._scope_item_end(lines, j + 1, end)
+                    assets_ranges.append((j, a_end))
+                    j = a_end
+                    continue
+                if re.match(r"gate:", stripped):
+                    gate_positions.append(j)
+                j += 1
+            removals = assets_ranges[1:] + [(g, g + 1) for g in gate_positions]
+            removals += self._top_level_assets_ranges(lines)
+            if assets_ranges:
+                insert_at = assets_ranges[0][0]
+                removals.append(assets_ranges[0])
+            else:
+                insert_at = scope_at + 1
+            new_lines = self._splice(lines, removals, insert_at,
+                                     self._scope_block_lines(items, mode, indent, nl))
+        else:
+            legacy = self._top_level_assets_ranges(lines)
+            if legacy:
+                insert_at = legacy[0][0]
+                removals = legacy[1:] + [legacy[0]]
+                new_lines = self._splice(lines, removals, insert_at,
+                                         [f"scope:{nl}", *self._scope_block_lines(items, mode, "  ", nl)])
+            else:
+                tail = list(lines)
+                if tail and not tail[-1].endswith(("\n", "\r")):
+                    tail[-1] += nl
+                if tail and tail[-1].strip():
+                    tail.append(nl)
+                new_lines = [*tail, f"scope:{nl}", *self._scope_block_lines(items, mode, "  ", nl)]
+        self._atomic_replace(real, "".join(new_lines), mode_bits)
+        try:
+            parsed = engagement_assets(self.root)
+            gate = scope_check(self.root, "https://scope-postcondition.invalid/")["gate"]
+            ok = (parsed or []) == items and gate == ("assets" if mode == "assets" else "disabled")
+        except Exception:
+            ok = False
+        if not ok:
+            try:
+                self._atomic_replace(real, raw, mode_bits)
+            except OSError as exc:
+                raise ValueError(
+                    "scope-set postcondition failed and the previous engagement.yaml could not be "
+                    f"restored: {exc} — inspect 00_control/engagement.yaml before retrying"
+                ) from exc
+            raise ValueError(
+                "scope-set postcondition failed: after the rewrite engagement_assets() does not equal "
+                "the requested list or the gate mode does not match (a duplicate or shadowed assets: "
+                "occurrence escaped the rewrite); the previous file was restored and no event was recorded"
+            )
+
     # ---------- action + gate ----------
     def record_action(self, action: dict[str, Any], actor: str = "controller") -> dict[str, Any]:
         required = [
@@ -783,8 +1219,28 @@ class ControlPlane:
         hyp = str(action.get("hypothesis", ""))
         if hyp.startswith("H-") and self.hypothesis_status(hyp) is None:
             raise ValueError(f"live-action preflight references unknown hypothesis: {hyp}")
+        shape = action.get("request_shape")
         refs = list(action.get("evidence_refs", []))
         with _lock(self.root):
+            # The scope re-check runs inside the same critical section as the append:
+            # the checked state cannot change between check and record.
+            if isinstance(shape, dict) and "url" in shape:
+                scope = scope_check(self.root, str(shape.get("url", "")))
+                if scope["gate"] == "unenforceable":
+                    raise ValueError(
+                        "engagement assets are present but not a simple string list; keep "
+                        "00_control/engagement.yaml assets as host/URL strings — scope is unenforceable otherwise"
+                    )
+                if scope["gate"] == "unset":
+                    raise ValueError(
+                        "no scope configured — record the engagement scope with `researchctl scope-set` "
+                        "or set an explicit `gate: none` for non-target work"
+                    )
+                if not scope["in_scope"]:
+                    raise ValueError(
+                        f"request_shape host '{scope['host']}' is outside the engagement scope "
+                        f"(00_control/engagement.yaml assets={scope['assets']})"
+                    )
             self._validate_refs(refs)
             existing = self._read_events()
             aid = action.get("id") or f"A-{len(existing) + 1:06d}"
@@ -834,6 +1290,11 @@ class ControlPlane:
             raise ValueError(
                 "engagement assets are present but not a simple string list; keep "
                 "00_control/engagement.yaml assets as host/URL strings — scope is unenforceable otherwise"
+            )
+        if scope["gate"] == "unset":
+            raise ValueError(
+                "no scope configured — record the engagement scope with `researchctl scope-set` "
+                "or set an explicit `gate: none` for non-target work"
             )
         if not scope["in_scope"]:
             raise ValueError(

@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 TOOLS = Path(__file__).resolve().parent
 ROOT_REPO = TOOLS.parent
 sys.path.insert(0, str(TOOLS))
+import control_plane as _control_plane  # noqa: E402
 from control_plane import (ControlPlane, METHOD_SELF_ATTACK_ROWS,  # noqa: E402
-                           REQUIRED_AUDIT_CLASSES, scope_check)
+                           REQUIRED_AUDIT_CLASSES, asset_hosts, engagement_assets,
+                           host_in_scope, scope_check)
 
 passed: list[str] = []
 
@@ -55,6 +59,29 @@ def write_objective(root: Path, cid: str) -> None:
     (d / "objective.md").write_text(
         "# Cycle Objective\n\n## Question\nDoes behavior differ by principal?\n\n"
         "## Minimal test\nTwo-principal differential on a researcher-owned object.\n")
+
+
+def scope_workspace(assets_yaml: str | None, target: str) -> tuple[Path, ControlPlane]:
+    """Fixture workspace with a RUNNING cycle, one hypothesis and one recorded action."""
+    r = fresh_root()
+    if assets_yaml is not None:
+        (r / "00_control/engagement.yaml").write_text(assets_yaml)
+    c = ControlPlane(r)
+    c.create_cycle("C-0001", cycle_fixture("C-0001"))
+    write_objective(r, "C-0001")
+    c.transition_cycle("C-0001", "READY", reason="ready")
+    c.transition_cycle("C-0001", "RUNNING", reason="run")
+    c.create_hypothesis("H-0001", {
+        "cycle_id": "C-0001",
+        "observation": "scope fixture",
+        "hypothesis": "scope fixture",
+        "secure_prediction": "denied",
+        "vulnerable_prediction": "allowed",
+    })
+    action = {k: v for k, v in base_action.items() if k != "evidence_refs"}
+    action["target"] = target
+    c.record_action(action)
+    return r, c
 
 
 def write_results(root: Path, cid: str, eid: str | None = None, disposition: str = "VERIFIED") -> None:
@@ -146,6 +173,7 @@ ev = cp.record_action(base_action)
 check("live action preflight recorded", ev["type"] == "ACTION_RECORDED")
 
 # 4b. Preflight tokens: the single-use binding the enforcer plugin consumes.
+#     Default-deny first: with no scope recorded, prepare refuses and names the fix.
 no_shape = {k: v for k, v in base_action.items() if k != "evidence_refs"}
 try:
     cp.prepare_action(no_shape)
@@ -153,6 +181,16 @@ try:
 except ValueError as exc:
     check("prepare requires request_shape", "request_shape" in str(exc))
 shape = {"method": "GET", "url": "https://example.test/api", "principal": "researcher-A"}
+try:
+    cp.prepare_action({**base_action, "tool_family": "http", "request_shape": shape})
+    check("prepare refuses when scope is unset", False)
+except ValueError as exc:
+    check("prepare refuses when scope is unset",
+          "no scope configured" in str(exc) and "scope-set" in str(exc) and "gate: none" in str(exc))
+
+# 4c. Per-host scope: once assets are listed, prepare enforces them.
+(root / "00_control/engagement.yaml").write_text(
+    'program:\n  name: "x"\nassets:\n  - "example.test"\n  - "*.wild.example"\nstatus: "configured"\n')
 tok = cp.prepare_action({**base_action, "tool_family": "http", "request_shape": shape})
 check("preflight token issued with digest",
       tok["action_id"].startswith("A-") and len(tok["argument_digest"]) == 64 and len(tok["nonce"]) == 32)
@@ -165,9 +203,6 @@ check("token store is not the ledger",
       (root / "11_runtime/action-tokens.jsonl").is_file()
       and "action-tokens" not in (root / "11_runtime/events.jsonl").read_text())
 
-# 4c. Per-host scope: prepare enforces engagement.yaml assets when they are listed.
-(root / "00_control/engagement.yaml").write_text(
-    'program:\n  name: "x"\nassets:\n  - "example.test"\n  - "*.wild.example"\nstatus: "configured"\n')
 try:
     cp.prepare_action({**base_action, "request_shape": {"method": "GET", "url": "https://evil.test/x", "principal": "researcher-A"}})
     check("out-of-scope prepare rejected", False)
@@ -186,11 +221,578 @@ check("scope_check seam reports out-of-scope", sc["in_scope"] is False and sc["h
 nogate = Path(tempfile.mkdtemp())
 (nogate / "00_control").mkdir(parents=True)
 sc = scope_check(nogate, "https://anything.example/x")
-check("scope_check seam: no asset list -> no gate", sc["gate"] == "none" and sc["in_scope"] is True)
+check("scope_check seam: absent scope defaults to deny",
+      sc["gate"] == "unset" and sc["in_scope"] is False)
 (nogate / "00_control/engagement.yaml").write_text("scope:\n  assets:\n    - {host: nested}\n")
 sc = scope_check(nogate, "https://anything.example/x")
 check("scope_check seam: unparseable assets fail closed",
       sc["gate"] == "unenforceable" and sc["in_scope"] is False)
+(nogate / "00_control/engagement.yaml").write_text("scope:\n  gate: none\n")
+sc = scope_check(nogate, "https://anything.example/x")
+check("scope_check seam: explicit gate none disables the gate",
+      sc["gate"] == "disabled" and sc["in_scope"] is True)
+(nogate / "00_control/engagement.yaml").write_text("scope:\n  gate: yes\n")
+sc = scope_check(nogate, "https://anything.example/x")
+check("scope_check seam: other gate values stay default-deny",
+      sc["gate"] == "unset" and sc["in_scope"] is False)
+(nogate / "00_control/engagement.yaml").write_text("program:\n  gate: none\n")
+sc = scope_check(nogate, "https://anything.example/x")
+check("scope_check seam: gate outside the scope block does not disable",
+      sc["gate"] == "unset" and sc["in_scope"] is False)
+(nogate / "00_control/engagement.yaml").write_text("program:\n  scope:\n  gate: none\n")
+sc = scope_check(nogate, "https://anything.example/x")
+check("scope_check seam: an indented scope block is not top-level",
+      sc["gate"] == "unset" and sc["in_scope"] is False)
+
+# 4d-bis. Canonical `gate: none` rule (parity with dsh-plugin scopeReasonFor): depth-1
+#         entries only, comment lines skipped, trailing comments cut, fullmatch value.
+for label, text, disabled in [
+    ("bare", "scope:\n  gate: none\n", True),
+    ("double-quoted", 'scope:\n  gate: "none"\n', True),
+    ("single-quoted", "scope:\n  gate: 'none'\n", True),
+    ("trailing comment", "scope:\n  gate: none  # opt-out\n", True),
+    ("tab indent", "scope:\n\tgate: none\n", True),
+    ("commented-out gate", "scope:\n  # gate: none\n", False),
+    ("other gate value", "scope:\n  gate: nonexistent\n", False),
+    ("other key", "scope:\n  mygate: none\n", False),
+    ("nested gate under a child key", "scope:\n  exclusions:\n    gate: none\n", False),
+    ("flow-style scope (documented limitation)", "scope: {gate: none}\n", False),
+]:
+    (nogate / "00_control/engagement.yaml").write_text(text)
+    sc = scope_check(nogate, "https://anything.example/x")
+    check(f"canonical gate: {label} -> {'disabled' if disabled else 'not disabled'}",
+          (sc["gate"] == "disabled") is disabled)
+
+# 4d-ter. Host normalization shared with the enforcer: userinfo and one trailing dot.
+(nogate / "00_control/engagement.yaml").write_text('scope:\n  assets:\n  - "t.example"\n')
+sc = scope_check(nogate, "https://user:pass@t.example/a")
+check("scope_check strips userinfo before host comparison",
+      sc["in_scope"] is True and sc["host"] == "t.example")
+sc = scope_check(nogate, "https://t.example./a")
+check("scope_check strips one trailing dot before host comparison",
+      sc["in_scope"] is True and sc["host"] == "t.example")
+sc = scope_check(nogate, "HTTPS://T.EXAMPLE/a")
+check("scope_check lowercases scheme and host", sc["in_scope"] is True)
+
+# 4e. Prepare honors the gate modes end to end: disabled allows, assets enforce.
+scope_root = fresh_root(); cp_scope = ControlPlane(scope_root)
+cp_scope.create_cycle("C-0001", cycle_fixture("C-0001"))
+write_objective(scope_root, "C-0001")
+cp_scope.transition_cycle("C-0001", "READY", reason="ready")
+cp_scope.transition_cycle("C-0001", "RUNNING", reason="run")
+cp_scope.create_hypothesis("H-0001", {
+    "cycle_id": "C-0001",
+    "observation": "scope fixture",
+    "hypothesis": "scope fixture",
+    "secure_prediction": "denied",
+    "vulnerable_prediction": "allowed",
+})
+scope_action = {k: v for k, v in base_action.items() if k != "evidence_refs"}
+scope_action["request_shape"] = {"method": "GET", "url": "https://off-target.example/x", "principal": "researcher-A"}
+(scope_root / "00_control/engagement.yaml").write_text("scope:\n  gate: none\n")
+tok = cp_scope.prepare_action(scope_action)
+check("prepare allows an explicit gate none opt-out", tok["action_id"].startswith("A-"))
+(scope_root / "00_control/engagement.yaml").write_text("scope:\n  assets:\n  - \"example.test\"\n")
+try:
+    cp_scope.prepare_action(scope_action)
+    check("prepare enforces assets mode", False)
+except ValueError as exc:
+    check("prepare enforces assets mode", "outside the engagement scope" in str(exc))
+
+# 4f. scope-set: provenance-backed mutation that preserves every unrelated byte.
+set_root = fresh_root()
+(set_root / "00_control/engagement.yaml").write_text(
+    'program:\n  name: "x"\n\nscope:\n  assets: []\n  out_of_scope: []\n\n'
+    'accounts:\n  researcher_controlled: []\n\nconfidence: "VERIFIED"\n')
+cp_set = ControlPlane(set_root)
+try:
+    cp_set.set_scope(["example.test"], "")
+    check("scope-set rejects an empty source_reference", False)
+except ValueError as exc:
+    check("scope-set rejects an empty source_reference", "source_reference" in str(exc))
+try:
+    cp_set.set_scope([], "policy#scope")
+    check("scope-set rejects empty assets in assets mode", False)
+except ValueError as exc:
+    check("scope-set rejects empty assets in assets mode", "assets" in str(exc))
+ev = cp_set.set_scope(["example.test", "*.sub.example"], "policy#scope")
+check("SCOPE_CHANGED recorded on the scope entity",
+      ev["type"] == "SCOPE_CHANGED" and ev["entity_type"] == "scope" and ev["entity_id"] == "engagement")
+check("SCOPE_CHANGED payload carries previous/new assets, gate and source",
+      ev["payload"]["previous_assets"] == [] and ev["payload"]["assets"] == ["example.test", "*.sub.example"]
+      and ev["payload"]["gate"] == "assets" and ev["payload"]["source_reference"] == "policy#scope")
+text = (set_root / "00_control/engagement.yaml").read_text()
+check("scope-set rewrites assets as a quoted block list",
+      '  assets:\n  - "example.test"\n  - "*.sub.example"\n' in text)
+check("scope-set preserves unrelated blocks and comments",
+      '  name: "x"' in text and "  researcher_controlled: []" in text
+      and 'confidence: "VERIFIED"' in text and "  out_of_scope: []" in text)
+cp_set.set_scope(["example.test", "*.sub.example"], "policy#scope", human_reference="ticket-1")
+check("scope-set is idempotent on re-run", (set_root / "00_control/engagement.yaml").read_text() == text)
+ev2 = cp_set.set_scope([], "policy#non-target work", gate="none", human_reference="ticket-1")
+check("scope-set gap: gate none mode records cleared assets",
+      ev2["payload"]["gate"] == "none" and ev2["payload"]["assets"] == []
+      and ev2["payload"]["previous_assets"] == ["example.test", "*.sub.example"])
+text2 = (set_root / "00_control/engagement.yaml").read_text()
+check("scope-set writes the gate line and preserves the rest",
+      "  gate: none\n" in text2 and "  out_of_scope: []" in text2 and "  researcher_controlled: []" in text2)
+check("scope-set gate none is reachable through scope_check",
+      scope_check(set_root, "https://anything.example/x")["gate"] == "disabled")
+cp_set.set_scope(["example.test"], "policy#scope", human_reference="ticket-1")
+text3 = (set_root / "00_control/engagement.yaml").read_text()
+check("scope-set removes the gate line in assets mode",
+      "gate:" not in text3 and '  assets:\n  - "example.test"\n' in text3)
+comment_root = fresh_root()
+(comment_root / "00_control/engagement.yaml").write_text("scope:  # assets live here\n  assets: []\n")
+ControlPlane(comment_root).set_scope(["example.test"], "policy#scope")
+comment_text = (comment_root / "00_control/engagement.yaml").read_text()
+check("scope-set rewrites a commented scope header in place",
+      comment_text.count("scope:") == 1 and '  assets:\n  - "example.test"\n' in comment_text)
+cli_payload = set_root / "scope-payload.json"
+cli_payload.write_text(json.dumps({"assets": ["cli.example"], "source_reference": "policy#cli",
+                                   "human_reference": "ticket-cli"}))
+sub = subprocess.run([sys.executable, str(TOOLS / "researchctl.py"), str(set_root),
+                      "scope-set", str(cli_payload)], capture_output=True, text=True)
+check("researchctl scope-set CLI records the change",
+      sub.returncode == 0 and '"SCOPE_CHANGED"' in sub.stdout)
+check("CLI scope-set is readable back by scope_check",
+      scope_check(set_root, "https://cli.example/x")["gate"] == "assets")
+
+# 4f-bis. scope-set input validation: assets are host/URL strings only, so a crafted
+#         item can never inject YAML structure. The item is named in the error.
+bad_root = fresh_root()
+bad_file = bad_root / "00_control/engagement.yaml"
+cp_bad = ControlPlane(bad_root)
+for bad in ['ok.example"\nmalicious: true', 'embedded"quote', "embedded'quote",
+            "back\\slash", "hash#comment", "space in host", "tab\thost",
+            "control\x01char", "cr\rreturn", "line\nbreak", "", "   "]:
+    try:
+        cp_bad.set_scope([bad], "policy#x")
+        check(f"scope-set rejects unsafe asset {bad!r}", False)
+    except ValueError as exc:
+        check(f"scope-set rejects unsafe asset {bad!r}", repr(bad) in str(exc))
+check("scope-set rejected input never reaches the file",
+      not bad_file.exists() or "malicious" not in bad_file.read_text())
+check("scope-set rejected input records no event",
+      "SCOPE_CHANGED" not in (bad_root / "11_runtime/events.jsonl").read_text())
+ok_root = fresh_root()
+ControlPlane(ok_root).set_scope(
+    ["api.example.com", "*.wild.example", "127.0.0.1:8443", "https://url.example/path"], "policy#x")
+check("scope-set accepts host, wildcard, host:port and URL assets",
+      engagement_assets(ok_root) == ["api.example.com", "*.wild.example", "127.0.0.1:8443",
+                                     "https://url.example/path"])
+
+# 4f-ter. Writer round-trip: three file shapes + CRLF, depth-aware, idempotent.
+shape_a = fresh_root()
+(shape_a / "00_control/engagement.yaml").write_text(
+    'program:\n  name: "x"\n\nscope:\n  assets:\n  - "old.example"\n  exclusions:\n'
+    '    gate: strict\n  gate: none\n\naccounts:\n  researcher_controlled: []\n')
+cp_a = ControlPlane(shape_a)
+cp_a.set_scope(["new.example"], "policy#round-trip", human_reference="ticket-1")
+a_text = (shape_a / "00_control/engagement.yaml").read_text()
+check("set_scope shape A: assets parse back exactly", engagement_assets(shape_a) == ["new.example"])
+check("set_scope shape A: assets mode round-trips through the gate parser",
+      scope_check(shape_a, "https://new.example/x")["gate"] == "assets")
+check("set_scope shape A: nested gate survives, depth-1 gate is replaced",
+      "    gate: strict" in a_text and "  gate: none" not in a_text and a_text.count("gate:") == 1)
+check("set_scope shape A: unrelated blocks survive",
+      '  name: "x"' in a_text and "researcher_controlled: []" in a_text)
+cp_a.set_scope(["new.example"], "policy#round-trip", human_reference="ticket-1")
+check("set_scope shape A: idempotent", (shape_a / "00_control/engagement.yaml").read_text() == a_text)
+cp_a.set_scope(["new.example"], "policy#round-trip", gate="none", human_reference="ticket-1")
+check("set_scope shape A: gate none round-trips",
+      scope_check(shape_a, "https://anything.example/x")["gate"] == "disabled")
+
+shape_b = fresh_root()
+(shape_b / "00_control/engagement.yaml").write_text(
+    'program:\n  name: "x"\n\nassets:\n  - "old.example"\n\nstatus: "configured"\n')
+cp_b = ControlPlane(shape_b)
+cp_b.set_scope(["new.example"], "policy#round-trip", human_reference="ticket-1")
+b_text = (shape_b / "00_control/engagement.yaml").read_text()
+check("set_scope shape B: legacy assets entry becomes a scope block in place",
+      "scope:\n  assets:\n  - \"new.example\"\n" in b_text and "old.example" not in b_text)
+check("set_scope shape B: assets parse back exactly", engagement_assets(shape_b) == ["new.example"])
+check("set_scope shape B: blank line and later entries survive",
+      'status: "configured"' in b_text and "program:" in b_text)
+check("set_scope shape B: gate mode round-trips",
+      scope_check(shape_b, "https://new.example/x")["gate"] == "assets")
+
+shape_b2 = fresh_root()
+(shape_b2 / "00_control/engagement.yaml").write_text(
+    'program:\n  name: "x"\nassets: [old.example]\nstatus: "configured"\n')
+cp_b2 = ControlPlane(shape_b2)
+cp_b2.set_scope(["new.example"], "policy#round-trip", human_reference="ticket-1")
+b2_text = (shape_b2 / "00_control/engagement.yaml").read_text()
+check("set_scope shape B2: legacy inline assets list becomes a scope block",
+      'scope:\n  assets:\n  - "new.example"\n' in b2_text and "old.example" not in b2_text
+      and engagement_assets(shape_b2) == ["new.example"])
+
+shape_a2 = fresh_root()
+(shape_a2 / "00_control/engagement.yaml").write_text('scope:\n  assets: [old.example]\n  gate: strict\n')
+cp_a2 = ControlPlane(shape_a2)
+cp_a2.set_scope(["new.example"], "policy#round-trip", human_reference="ticket-1")
+check("set_scope shape A2: inline assets list inside scope is rewritten as a block",
+      engagement_assets(shape_a2) == ["new.example"]
+      and '  - "new.example"' in (shape_a2 / "00_control/engagement.yaml").read_text()
+      and scope_check(shape_a2, "https://new.example/x")["gate"] == "assets")
+
+shape_a3 = fresh_root()
+(shape_a3 / "00_control/engagement.yaml").write_text('scope:\n  gate: none\n  assets:\n  - "old.example"\n')
+ControlPlane(shape_a3).set_scope(["new.example"], "policy#round-trip", human_reference="ticket-1")
+check("set_scope shape A3: gate line before assets is handled",
+      scope_check(shape_a3, "https://new.example/x")["gate"] == "assets"
+      and engagement_assets(shape_a3) == ["new.example"])
+
+shape_c = fresh_root()
+(shape_c / "00_control/engagement.yaml").write_text('program:\n  name: "x"\n')
+cp_c = ControlPlane(shape_c)
+cp_c.set_scope(["new.example"], "policy#round-trip")
+c_text = (shape_c / "00_control/engagement.yaml").read_text()
+check("set_scope shape C: first bootstrap record needs no human_reference",
+      c_text.startswith('program:\n  name: "x"'))
+check("set_scope shape C: appends a parseable scope block at EOF",
+      engagement_assets(shape_c) == ["new.example"])
+check("set_scope shape C: gate mode round-trips",
+      scope_check(shape_c, "https://new.example/x")["gate"] == "assets")
+try:
+    cp_c.set_scope(["other.example"], "policy#again")
+    check("scope-set requires human_reference once a change is recorded", False)
+except ValueError as exc:
+    check("scope-set requires human_reference once a change is recorded",
+          "human_reference" in str(exc))
+ev_c2 = cp_c.set_scope(["other.example"], "policy#again", human_reference="ticket-2")
+check("SCOPE_CHANGED carries the human_reference",
+      ev_c2["payload"]["human_reference"] == "ticket-2")
+
+hr_root = fresh_root()
+(hr_root / "00_control/engagement.yaml").write_text('scope:\n  assets:\n  - "legacy.example"\n')
+try:
+    ControlPlane(hr_root).set_scope(["new.example"], "policy#x")
+    check("scope-set requires human_reference to re-record an existing asset list", False)
+except ValueError as exc:
+    check("scope-set requires human_reference to re-record an existing asset list",
+          "human_reference" in str(exc))
+
+crlf_root = fresh_root()
+(crlf_root / "00_control/engagement.yaml").write_bytes(
+    'program:\r\n  name: "x"\r\n\r\nscope:\r\n  assets:\r\n  - "old.example"\r\n\r\naccounts: []\r\n'.encode())
+cp_crlf = ControlPlane(crlf_root)
+cp_crlf.set_scope(["new.example"], "policy#round-trip", human_reference="ticket-1")
+crlf_after = (crlf_root / "00_control/engagement.yaml").read_bytes().decode()
+check("set_scope CRLF: assets parse back exactly", engagement_assets(crlf_root) == ["new.example"])
+check("set_scope CRLF: gate mode round-trips",
+      scope_check(crlf_root, "https://new.example/x")["gate"] == "assets")
+check("set_scope CRLF: line endings preserved",
+      "\r\n" in crlf_after and crlf_after.count("\n") == crlf_after.count("\r\n"))
+
+# 4f-quinquies. CR-only line endings parse identically (the JS mirror splits on
+#               /\r\n|\r|\n/, the Python side on splitlines()).
+cr_only_root = fresh_root()
+(cr_only_root / "00_control/engagement.yaml").write_bytes(b'scope:\r  assets:\r  - "t.example"\r')
+check("CR-only engagement.yaml parses the asset list",
+      engagement_assets(cr_only_root) == ["t.example"])
+check("CR-only engagement.yaml is reachable through scope_check",
+      scope_check(cr_only_root, "https://t.example/a")["in_scope"] is True)
+check("CR-only engagement.yaml still denies out-of-scope hosts",
+      scope_check(cr_only_root, "https://evil.example/x")["in_scope"] is False)
+
+# 4f-sexies. Depth-aware parser: only a depth-1 `assets:` entry inside the top-level
+#            `scope:` block is authoritative; a legacy top-level `assets:` block is
+#            accepted ONLY when no `scope:` block exists.
+depth_root = fresh_root()
+depth_file = depth_root / "00_control/engagement.yaml"
+depth_cases = [
+    ("legacy-only", 'assets:\n  - "legacy.example"\n', ["legacy.example"], "assets"),
+    ("scope-wins-over-legacy-before",
+     'assets:\n  - "legacy.example"\n\nscope:\n  assets:\n  - "scoped.example"\n',
+     ["scoped.example"], "assets"),
+    ("scope-wins-over-legacy-after",
+     'scope:\n  assets:\n  - "scoped.example"\n\nassets:\n  - "legacy.example"\n',
+     ["scoped.example"], "assets"),
+    ("nested-assets-under-child-key",
+     'scope:\n  exclusions:\n    assets:\n    - "nested.example"\n  assets:\n  - "scoped.example"\n',
+     ["scoped.example"], "assets"),
+    ("nested-assets-only", 'program:\n  assets:\n  - "nested.example"\n', None, "unset"),
+    ("nested-assets-only-inside-scope",
+     'scope:\n  exclusions:\n    assets:\n    - "nested.example"\n', None, "unset"),
+    ("duplicate-assets-inside-scope",
+     'scope:\n  assets:\n  - "first.example"\n  assets:\n  - "second.example"\n',
+     ["first.example"], "assets"),
+    ("legacy-col0-comment-and-list",
+     '# program assets\nassets:\n  - "legacy.example"\n', ["legacy.example"], "assets"),
+]
+for label, text, expected, gate in depth_cases:
+    depth_file.write_text(text)
+    check(f"depth-aware parser: {label}", engagement_assets(depth_root) == expected)
+    check(f"depth-aware gate: {label}",
+          scope_check(depth_root, "https://anything.example/x")["gate"] == gate)
+
+# 4f-septies. Writer postcondition over hostile scope shapes: after set_scope the parser
+#             must return exactly the requested list, and the gate mode must match the
+#             request (a stale `gate: none` must be impossible).
+for label, text in [
+    ("legacy-before-scope",
+     'assets:\n  - "legacy.example"\n\nscope:\n  assets:\n  - "old.example"\n'),
+    ("legacy-after-scope",
+     'scope:\n  assets:\n  - "old.example"\n\nassets:\n  - "legacy.example"\n'),
+    ("nested-assets-under-child-key",
+     'scope:\n  assets:\n  - "old.example"\n  exclusions:\n    assets:\n    - "nested.example"\n'),
+    ("duplicate-assets-inside-scope",
+     'scope:\n  assets:\n  - "old.example"\n  assets:\n  - "other.example"\n'),
+    ("col0-comment-and-legacy-block-list",
+     '# program assets\nassets:\n  - "old.example"\n'),
+    ("col0-comment-and-scope-block-list",
+     '# scope block\nscope:\n  assets:\n  - "old.example"\n'),
+]:
+    wroot = fresh_root()
+    (wroot / "00_control/engagement.yaml").write_text(text)
+    ControlPlane(wroot).set_scope(["new.example"], "policy#writer", human_reference="ticket-1")
+    check(f"writer postcondition: {label}", engagement_assets(wroot) == ["new.example"])
+    check(f"writer gate mode: {label}",
+          scope_check(wroot, "https://new.example/x")["gate"] == "assets")
+    wtext = (wroot / "00_control/engagement.yaml").read_text()
+    if label.startswith("nested"):
+        check(f"writer preserves nested bytes: {label}", "nested.example" in wtext)
+    if label == "duplicate-assets-inside-scope":
+        check("writer collapses duplicate scope assets entries", wtext.count("assets:") == 1)
+    if label.startswith("legacy"):
+        check(f"writer removes the shadowed legacy block: {label}", "legacy.example" not in wtext)
+    if label.startswith("col0"):
+        check(f"writer preserves the col-0 comment: {label}", wtext.lstrip().startswith("#"))
+
+# 4f-octies. Duplicate depth-1 gate lines are all removed; a nested gate survives.
+dup_gate_root = fresh_root()
+(dup_gate_root / "00_control/engagement.yaml").write_text(
+    'scope:\n  assets:\n  - "old.example"\n  gate: none\n  exclusions:\n'
+    '    gate: strict\n  gate: none\n')
+ControlPlane(dup_gate_root).set_scope(["new.example"], "policy#gate", human_reference="ticket-1")
+dup_text = (dup_gate_root / "00_control/engagement.yaml").read_text()
+check("set_scope removes every depth-1 gate line", dup_text.count("gate: none") == 0)
+check("set_scope keeps the nested gate", "    gate: strict" in dup_text)
+check("set_scope postcondition asserts the gate mode",
+      scope_check(dup_gate_root, "https://new.example/x")["gate"] == "assets")
+
+# 4f-nonies. Postcondition enforcement: a parse mismatch after the atomic replace restores
+#            the pre-write content and records no event.
+guard_root = fresh_root()
+guard_text = 'scope:\n  assets:\n  - "old.example"\n'
+(guard_root / "00_control/engagement.yaml").write_text(guard_text)
+cp_guard = ControlPlane(guard_root)
+ledger_before = (guard_root / "11_runtime/events.jsonl").read_text()
+try:
+    with mock.patch.object(_control_plane, "engagement_assets", return_value=["tampered.example"]):
+        cp_guard.set_scope(["new.example"], "policy#x", human_reference="ticket-1")
+    check("scope-set postcondition mismatch is refused", False)
+except ValueError as exc:
+    check("scope-set postcondition mismatch is refused", "postcondition" in str(exc))
+check("postcondition mismatch restores the pre-write file",
+      (guard_root / "00_control/engagement.yaml").read_text() == guard_text)
+check("postcondition mismatch records no event",
+      (guard_root / "11_runtime/events.jsonl").read_text() == ledger_before)
+
+# 4f-decies. Non-ASCII assets round-trip through the writer (ensure_ascii=False).
+uni_root = fresh_root()
+ControlPlane(uni_root).set_scope(["münich.example", "xn--bcher-kva.example"], "policy#unicode")
+uni_text = (uni_root / "00_control/engagement.yaml").read_text()
+check("scope-set writes non-ASCII assets raw (no \\uXXXX escapes)",
+      "münich.example" in uni_text and "\\u" not in uni_text)
+check("non-ASCII assets round-trip",
+      engagement_assets(uni_root) == ["münich.example", "xn--bcher-kva.example"])
+
+# 4f-undecies. A symlinked engagement.yaml is written through (the link survives) and the
+#              original file mode is preserved on the replacement.
+link_root = fresh_root()
+real_file = link_root / "00_control" / "engagement-real.yaml"
+real_file.write_text('scope:\n  assets:\n  - "old.example"\n')
+os.chmod(real_file, 0o640)
+link = link_root / "00_control" / "engagement.yaml"
+os.symlink(real_file, link)
+ControlPlane(link_root).set_scope(["new.example"], "policy#symlink", human_reference="ticket-1")
+check("set_scope keeps engagement.yaml a symlink", link.is_symlink())
+check("set_scope writes through the symlink", engagement_assets(link_root) == ["new.example"])
+check("set_scope preserves the original file mode",
+      (os.stat(link).st_mode & 0o777) == 0o640)
+
+# 4f-duodecies. human_reference is required to touch a deliberately configured scope:
+#              a prior SCOPE_CHANGED, a non-empty asset list, or an explicit gate: line.
+hr_gate_root = fresh_root()
+(hr_gate_root / "00_control/engagement.yaml").write_text('scope:\n  assets: []\n  gate: none\n')
+try:
+    ControlPlane(hr_gate_root).set_scope(["new.example"], "policy#x")
+    check("explicit gate line requires human_reference", False)
+except ValueError as exc:
+    check("explicit gate line requires human_reference", "human_reference" in str(exc))
+hr_gate_ev = ControlPlane(hr_gate_root).set_scope(["new.example"], "policy#x",
+                                                  human_reference="ticket-1")
+check("explicit gate line accepted with human_reference", hr_gate_ev["type"] == "SCOPE_CHANGED")
+hr_gate2_root = fresh_root()
+(hr_gate2_root / "00_control/engagement.yaml").write_text('scope:\n  assets: []\n  gate: assets\n')
+try:
+    ControlPlane(hr_gate2_root).set_scope(["new.example"], "policy#x")
+    check("explicit non-none gate line requires human_reference", False)
+except ValueError as exc:
+    check("explicit non-none gate line requires human_reference", "human_reference" in str(exc))
+hr_pristine = fresh_root()
+(hr_pristine / "00_control/engagement.yaml").write_text('scope:\n  assets: []\n')
+check("pristine assets: [] template stays bootstrap-free",
+      ControlPlane(hr_pristine).set_scope(["new.example"], "policy#x")["type"] == "SCOPE_CHANGED")
+
+# 4f-terdecies. The host helpers are public seam functions (audit imports them, not the
+#               private aliases).
+check("asset_hosts reduces a URL to its host",
+      asset_hosts(["https://User@T.Example/path"]) == ["t.example"])
+check("host_in_scope matches wildcard bases and subdomains",
+      host_in_scope("a.wild.example", ["*.wild.example"])
+      and host_in_scope("wild.example", ["*.wild.example"])
+      and not host_in_scope("evil.example", ["*.wild.example"]))
+audit_src = (TOOLS / "audit.py").read_text()
+check("audit imports the public host helpers",
+      "asset_hosts" in audit_src and "host_in_scope" in audit_src
+      and "_asset_hosts" not in audit_src and "_host_in_scope" not in audit_src)
+
+# 4f-quaterdecies. TOCTOU: scope is re-checked inside the lock critical section.
+toctou_root, cp_toctou = scope_workspace('scope:\n  assets:\n  - "good.example"\n',
+                                         "https://good.example/")
+toctou_action = {k: v for k, v in base_action.items() if k != "evidence_refs"}
+toctou_action["id"] = "A-TOCTOU"
+toctou_action["request_shape"] = {"method": "GET", "url": "https://good.example/x",
+                                  "principal": "researcher-A"}
+seen_locked = {}
+_real_scope_check = _control_plane.scope_check
+
+
+def _spy_scope_check(root, url):
+    seen_locked["locked"] = (root / "11_runtime" / ".control-plane.lock").is_dir()
+    return _real_scope_check(root, url)
+
+
+with mock.patch.object(_control_plane, "scope_check", side_effect=_spy_scope_check):
+    cp_toctou.record_action(toctou_action)
+check("record_action re-checks scope inside the lock", seen_locked.get("locked") is True)
+seen_set_locked = {}
+
+
+def _spy_set_scope_check(root, url):
+    seen_set_locked["locked"] = (root / "11_runtime" / ".control-plane.lock").is_dir()
+    return _real_scope_check(root, url)
+
+
+with mock.patch.object(_control_plane, "scope_check", side_effect=_spy_set_scope_check):
+    cp_toctou.set_scope(["good.example"], "policy#toctou", human_reference="ticket-1")
+check("set_scope asserts the postcondition inside the lock", seen_set_locked.get("locked") is True)
+
+# 4g. Audit re-checks recorded actions against the CURRENT scope and demands provenance.
+#            appended only after the replace succeeds.
+atomic_root = fresh_root()
+(atomic_root / "00_control/engagement.yaml").write_text('scope:\n  assets:\n  - "keep.example"\n')
+cp_atomic = ControlPlane(atomic_root)
+ledger_before = (atomic_root / "11_runtime/events.jsonl").read_text()
+try:
+    with mock.patch.object(_control_plane.os, "replace", side_effect=OSError("simulated rename failure")):
+        cp_atomic.set_scope(["new.example"], "policy#x", human_reference="ticket-1")
+    check("scope-set aborts when the atomic replace fails", False)
+except OSError:
+    check("scope-set aborts when the atomic replace fails", True)
+check("scope-set replace failure leaves engagement.yaml intact",
+      "keep.example" in (atomic_root / "00_control/engagement.yaml").read_text())
+check("scope-set replace failure appends no event",
+      (atomic_root / "11_runtime/events.jsonl").read_text() == ledger_before)
+check("scope-set replace failure cleans up the temp file",
+      [p.name for p in (atomic_root / "00_control").iterdir()] == ["engagement.yaml"])
+cp_atomic.set_scope(["new.example"], "policy#x", human_reference="ticket-1")
+check("scope-set success leaves no staging file behind",
+      [p.name for p in (atomic_root / "00_control").iterdir()] == ["engagement.yaml"]
+      and engagement_assets(atomic_root) == ["new.example"])
+
+# 4g. Audit re-checks recorded actions against the CURRENT scope and demands provenance.
+audit_root, cp_audit = scope_workspace('scope:\n  assets:\n  - "good.example"\n', "https://evil.example/x")
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(audit_root)], capture_output=True, text=True)
+check("audit errors when a recorded action left the current scope",
+      sub.returncode != 0
+      and "targets 'evil.example' but the current engagement scope does not include it (gate=assets)" in sub.stdout)
+cp_audit.set_scope([], "policy#non-target work", gate="none", human_reference="ticket-1")
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(audit_root)], capture_output=True, text=True)
+check("audit skips the scope re-check when the gate is disabled", sub.returncode == 0)
+
+audit_root2, cp_audit2 = scope_workspace('scope:\n  assets:\n  - "good.example"\n', "https://good.example/")
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(audit_root2)], capture_output=True, text=True)
+check("audit warns when the scope has no provenance record",
+      sub.returncode == 0 and "no SCOPE_CHANGED provenance record" in sub.stdout)
+cp_audit2.set_scope(["good.example"], "policy#scope", human_reference="ticket-2")
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(audit_root2)], capture_output=True, text=True)
+check("provenance warning clears after scope-set",
+      sub.returncode == 0 and "no SCOPE_CHANGED provenance record" not in sub.stdout)
+cp_audit2.set_scope(["other.example"], "policy#narrowed", human_reference="ticket-2")
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(audit_root2)], capture_output=True, text=True)
+check("audit downgrades an action recorded under an earlier scope to a warning",
+      sub.returncode == 0 and "was in scope when recorded" in sub.stdout
+      and "targets 'good.example' but the current engagement scope does not include it" not in sub.stdout)
+
+# A host that was never in scope (absent from the SCOPE_CHANGED previous_assets) stays an error.
+outside_root, cp_outside = scope_workspace('scope:\n  assets:\n  - "good.example"\n', "https://evil.example/x")
+cp_outside.set_scope(["other.example"], "policy#narrowed", human_reference="ticket-3")
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(outside_root)], capture_output=True, text=True)
+check("audit still errors for a host outside both scopes",
+      sub.returncode != 0 and "targets 'evil.example'" in sub.stdout)
+
+# request_shape.url is authoritative over payload.target when both are present.
+shape_root, cp_shape = scope_workspace('scope:\n  assets:\n  - "good.example"\n', "https://good.example/")
+shape_payload = {k: v for k, v in base_action.items() if k != "evidence_refs"}
+shape_payload["id"] = "A-SHAPE"
+shape_payload["target"] = "https://good.example/"
+shape_payload["request_shape"] = {"method": "GET", "url": "https://evil.example/x", "principal": "researcher-A"}
+cp_shape.append("ACTION_RECORDED", "action", "A-SHAPE", cycle_id="C-0001", payload=shape_payload)
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(shape_root)], capture_output=True, text=True)
+check("audit re-checks request_shape.url over payload.target",
+      sub.returncode != 0 and "targets 'evil.example'" in sub.stdout
+      and "targets 'good.example'" not in sub.stdout)
+
+# Free-text targets are labels, not hosts: the audit re-checks only URL/host-shaped
+# targets, so "the provided apk (static review, no network)" cannot fail the workspace.
+apk_root, cp_apk = scope_workspace('scope:\n  assets:\n  - "good.example"\n',
+                                   "the provided apk (static review, no network)")
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(apk_root)], capture_output=True, text=True)
+check("audit skips a free-text action target",
+      sub.returncode == 0 and "the provided apk" not in sub.stdout)
+
+# Bare host[:port] targets ARE host-shaped and stay re-checked.
+bare_root, cp_bare = scope_workspace('scope:\n  assets:\n  - "good.example"\n', "evil.example")
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(bare_root)], capture_output=True, text=True)
+check("audit still re-checks bare host-shaped targets",
+      sub.returncode != 0 and "targets 'evil.example'" in sub.stdout)
+
+# 4h. record_action refuses a request_shape whose url is unset/out-of-scope; gate none passes.
+ra_root, cp_ra = scope_workspace('scope:\n  assets:\n  - "good.example"\n', "https://good.example/")
+ra_action = {k: v for k, v in base_action.items() if k != "evidence_refs"}
+ra_action["id"] = "A-SCOPE-1"
+ra_action["request_shape"] = {"method": "GET", "url": "https://evil.example/x", "principal": "researcher-A"}
+try:
+    cp_ra.record_action(ra_action)
+    check("record_action refuses an out-of-scope request_shape url", False)
+except ValueError as exc:
+    check("record_action refuses an out-of-scope request_shape url",
+          "outside the engagement scope" in str(exc))
+legacy_action = {k: v for k, v in base_action.items() if k != "evidence_refs"}
+legacy_action["id"] = "A-LEGACY"
+ev = cp_ra.record_action(legacy_action)
+check("record_action without request_shape keeps working (legacy snapshots)",
+      ev["type"] == "ACTION_RECORDED")
+unset_root, cp_unset = scope_workspace(None, "https://good.example/")
+unset_action = {k: v for k, v in base_action.items() if k != "evidence_refs"}
+unset_action["id"] = "A-UNSET"
+unset_action["request_shape"] = {"method": "GET", "url": "https://good.example/x", "principal": "researcher-A"}
+try:
+    cp_unset.record_action(unset_action)
+    check("record_action refuses an unset scope when request_shape is present", False)
+except ValueError as exc:
+    check("record_action refuses an unset scope when request_shape is present",
+          "no scope configured" in str(exc))
+gate_root, cp_gate = scope_workspace('scope:\n  gate: none\n', "https://any.example/")
+gate_action = {k: v for k, v in base_action.items() if k != "evidence_refs"}
+gate_action["id"] = "A-GATE"
+gate_action["request_shape"] = {"method": "GET", "url": "https://off-target.example/x", "principal": "researcher-A"}
+ev = cp_gate.record_action(gate_action)
+check("record_action passes an explicit gate none", ev["type"] == "ACTION_RECORDED")
 
 # 5. Result transitions validate evidence objects and the results.md artifact contract.
 try:
