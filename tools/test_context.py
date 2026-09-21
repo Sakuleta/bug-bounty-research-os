@@ -50,6 +50,30 @@ check('orphan md is warning', any('orphan.md' in w for w in warnings))
 V6ROOT = TOOLS.parent
 got = top_packs(V6ROOT, 'desync cache proxy smuggling')
 check('top_packs resolved', 0 < len(got) <= 3 and all(p.is_file() for _, ps in got for p in ps))
+
+# 4a. The shared selection seam: one query composer and one cap for the context
+# projection AND the RUNNING coverage guard, so the two can never rank apart.
+from knowledge_index import selection_cap, selection_query  # noqa: E402
+
+sroot = Path(tempfile.mkdtemp())
+(sroot / '11_runtime').mkdir(parents=True)
+(sroot / '10_learning').mkdir()
+(sroot / '11_runtime/active-cycle.yaml').write_text('cycle_id: "C-0001"\n')
+(sroot / '11_runtime/last-result.md').write_text('# Last Result\n')
+(sroot / '10_learning/unknowns.yaml').write_text('unknowns: []\n')
+sq = selection_query(sroot, 'objective-first text')
+check('selection_query puts the objective first', sq.startswith('objective-first text'))
+check('selection_query carries the ledger texts after the objective',
+      sq.index('cycle_id') > 0 and 'Last Result' in sq and 'unknowns' in sq)
+check('selection_query tolerates a missing objective and missing ledgers',
+      selection_query(Path(tempfile.mkdtemp())) == '')
+with mock.patch.dict(os.environ, {'KNOWLEDGE_PACK_CAP': '6'}):
+    check('selection_cap reads the env override', selection_cap() == 6)
+with mock.patch.dict(os.environ, {'KNOWLEDGE_PACK_CAP': 'garbage'}):
+    check('selection_cap falls back to 4 on a non-integer', selection_cap() == 4)
+with mock.patch.dict(os.environ, {}, clear=False):
+    os.environ.pop('KNOWLEDGE_PACK_CAP', None)
+    check('selection_cap defaults to 4', selection_cap() == 4)
 tmp = Path(tempfile.mkdtemp())
 (tmp / 'START.md').write_text('# START — entry contract\n')
 (rt := tmp / '11_runtime').mkdir()

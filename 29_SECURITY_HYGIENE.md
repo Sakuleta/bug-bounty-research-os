@@ -64,6 +64,20 @@ and `tools/ts_claims.py` before any network call; no CLI flag overrides it. Opt 
 after confirming the provider's data-handling terms for the engagement (see the provider
 data boundary above).
 
+## Cost / budget boundary
+
+Live actions burn a finite engagement budget, so capacity is capped in code, not by
+intention: the top-level `budget:` block in `00_control/engagement.yaml`
+(`max_actions_per_cycle`, `max_actions_per_engagement`) is counted by
+`researchctl prepare` as recorded `ACTION_RECORDED` events plus outstanding
+(unconsumed, unexpired) preflight tokens, and the next prepare is refused with the
+count when it would exceed either cap. A malformed block fails closed (no live
+action), and `tools/audit.py` errors on recorded over-cap and warns when a workspace
+recorded actions with no block at all. Raising a cap is a human decision:
+`researchctl budget set` requires a `source_reference` and, once limits exist (or a
+prior `BUDGET_CHANGED` is recorded), a `human_reference`; the rewrite preserves every
+other byte of the engagement file and records the `BUDGET_CHANGED` event.
+
 ## Provider data boundary
 
 Engagement work must run on a model route that does not train on prompts or completions.

@@ -41,7 +41,9 @@ Legacy warnings are expected and legitimate: this ledger predates the v7.3
 version stamp, so its events carry no `os_version`. The two archived review
 packets lack `run_id`/`evidence_quotes`, and action `A-000001` lacks
 `token_nonce`, so the audit reports them as legacy warnings instead of errors.
-New events on a 7.3 workspace are held to the full rules; re-recording reviews,
+The snapshot also predates the budget governor, so its one recorded action
+produces the `recorded actions exist (1) with no budget: block` warning. New
+events on a 7.3 workspace are held to the full rules; re-recording reviews,
 actions or audit declarations here would produce versioned records.
 
 State dirs that are empty in a live workspace (`01_intelligence/`,

@@ -16,9 +16,10 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from control_plane import (CYCLE_EDGES, EVENT_TYPES, HYP_EDGES, METHOD_SELF_ATTACK_ROWS,  # noqa: E402
                            REQUIRED_AUDIT_CLASSES, TECHNIQUE_RESULTS, ControlPlane,
-                           asset_hosts, engagement_assets, evidence_id_ok,
+                           asset_hosts, budget_limits, engagement_assets, evidence_id_ok,
                            host_in_scope, normalize_cycle_state, review_quote_problem,
                            scope_check, secret_pattern_hits, sha256_file)
+from knowledge_index import index_problem, selection_cap, selection_query, top_packs  # noqa: E402
 
 CLOSURE_PROOF_PATH = Path("06_audits") / "CLOSURE-PROOF.md"
 CLOSURE_PROOF_SECTIONS = (
@@ -330,6 +331,14 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
             errors.append(f"event {i} references future/unknown causation {causation}")
 
     # Cycle and hypothesis transition legality + projection agreement.
+    knowledge_problem = index_problem(root)
+    modern_cycle_ids = {e.get("entity_id") for e in events
+                        if e.get("type") == "CYCLE_CREATED" and e.get("os_version")}
+    if modern_cycle_ids and knowledge_problem:
+        errors.append(
+            "knowledge index missing/unparseable — cannot verify triage coverage "
+            f"({knowledge_problem}); restore 12_knowledge/INDEX.yaml"
+        )
     for cid in cp.all_cycle_ids():
         status = None
         created = False
@@ -358,11 +367,72 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
         # Knowledge triage: no cycle runs on vibes. Any cycle past READY must carry an
         # explicit per-pack USE/SKIP disposition (cheap by design; the consideration is
         # the forcing, not the context cost). Without it the agent silently underuses
-        # 12_knowledge/ and current-research capabilities.
+        # 12_knowledge/ and current-research capabilities. Modern cycles (versioned
+        # ledger records) are additionally checked for coverage of the auto-ranked
+        # top-k with the SAME selection seam the context and the write-time guard use —
+        # a miss is an ERROR (the write-time guard refused it; the ledger is the
+        # backstop). Legacy cycles keep the presence check only, so archived workspaces
+        # stay auditable as they were written.
         if status not in {"PLANNED", "READY", None}:
             triage = (cp.cycle_data(cid) or {}).get("knowledge_triage")
+            modern = cid in modern_cycle_ids
             if not triage:
                 errors.append(f"cycle {cid} past READY without knowledge_triage (pack USE/SKIP dispositions required)")
+            elif not (modern and knowledge_problem):
+                cap = selection_cap()
+                ranked = [name for name, _ in top_packs(
+                    root, selection_query(root, str(pdata.get("objective", ""))), k=cap)]
+                covered = {str(entry.get("pack")).strip() for entry in triage
+                           if isinstance(entry, dict) and entry.get("pack")}
+                missing = [name for name in ranked if name not in covered]
+                if missing:
+                    message = (
+                        f"cycle {cid} knowledge_triage misses auto-ranked packs "
+                        f"(relevance-ranked, cap {cap}): {', '.join(missing)} — "
+                        "confirm or override each (USE/SKIP + reason) in the cycle knowledge_triage"
+                    )
+                    (errors if modern else warnings).append(message)
+
+    # Budget governor: recorded actions are capped per cycle and per engagement when
+    # 00_control/engagement.yaml carries a `budget:` block (machine-enforced at prepare
+    # time; this is the re-check). Over-cap is an error; a workspace that recorded
+    # actions with no configured block only warns — caps are opt-in, and archived
+    # workspaces predate them. A malformed block is an error: fail closed, never a
+    # silently unlimited budget.
+    budget = budget_limits(root)
+    recorded_by_cycle: dict[str, int] = {}
+    for e in events:
+        if e.get("type") == "ACTION_RECORDED":
+            cid = str(e.get("cycle_id") or "")
+            recorded_by_cycle[cid] = recorded_by_cycle.get(cid, 0) + 1
+    recorded_total = sum(recorded_by_cycle.values())
+    if isinstance(budget, str):
+        errors.append(
+            "engagement budget block is malformed — max_actions_per_cycle and "
+            "max_actions_per_engagement must be plain non-negative integers; repair it with "
+            "`researchctl budget set`"
+        )
+    elif budget is None:
+        if recorded_total:
+            warnings.append(
+                f"recorded actions exist ({recorded_total}) with no `budget:` block in "
+                "00_control/engagement.yaml — record caps with `researchctl budget set`"
+            )
+    else:
+        cap_cycle = budget.get("max_actions_per_cycle")
+        cap_total = budget.get("max_actions_per_engagement")
+        if cap_cycle is not None:
+            for cid, n in sorted(recorded_by_cycle.items()):
+                if n > cap_cycle:
+                    errors.append(
+                        f"cycle {cid} recorded {n} actions, over its budget cap of {cap_cycle} — "
+                        "record a human-approved raise with `researchctl budget set`"
+                    )
+        if cap_total is not None and recorded_total > cap_total:
+            errors.append(
+                f"engagement recorded {recorded_total} actions, over its budget cap of {cap_total} — "
+                "record a human-approved raise with `researchctl budget set`"
+            )
 
     for hid in cp.all_hypothesis_ids():
         status = None

@@ -9,6 +9,7 @@ TOOLS = Path(__file__).resolve().parent
 CYCLE = TOOLS / 'cycle.py'
 sys.path.insert(0, str(TOOLS))
 from control_plane import ControlPlane
+from knowledge_index import selection_cap, selection_query, top_packs
 passed = []
 
 
@@ -26,7 +27,19 @@ def check(name, cond):
 def fresh_root():
     tmp = Path(tempfile.mkdtemp())
     (tmp / '04_cycles').mkdir()
+    # Minimal knowledge index: the triage entries are computed from it, exactly as the
+    # RUNNING guard's coverage check does, instead of being hard-coded.
+    (tmp / '12_knowledge' / 'fixture').mkdir(parents=True)
+    (tmp / '12_knowledge' / 'fixture' / 'fixture.md').write_text('# Fixture pack\n')
+    (tmp / '12_knowledge' / 'INDEX.yaml').write_text(
+        'packs:\n  fixture:\n    load_when: [test, question, auth]\n    files: [fixture.md]\n')
     return tmp
+
+
+def triage_for(root, objective):
+    ranked = [name for name, _ in top_packs(root, selection_query(root, objective), k=selection_cap())]
+    return [{'pack': name, 'verdict': 'USE', 'reason': 'fixture triage reason covers this pack'}
+            for name in (ranked or ['fixture'])]
 
 
 def prep(root, cid):
@@ -34,7 +47,7 @@ def prep(root, cid):
     cp = ControlPlane(root)
     cp.update_cycle(cid, {'objective': 'test question', 'allowed_scope': ['example.test'],
                           'stop_conditions': ['stop'],
-                          'knowledge_triage': [{'pack': 'access-auth', 'verdict': 'USE', 'reason': 'auth test'}]})
+                          'knowledge_triage': triage_for(root, 'test question')})
     obj = root / '04_cycles' / cid / 'objective.md'
     obj.write_text(obj.read_text().replace('## Question\n', '## Question\nTest question\n')
                                         .replace('## Minimal test\n', '## Minimal test\nMinimal safe test\n'))

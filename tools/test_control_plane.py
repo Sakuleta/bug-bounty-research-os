@@ -42,15 +42,34 @@ def fresh_root() -> Path:
     (root / "11_runtime/events.jsonl").write_text("")
     (root / "11_runtime/tool-registry.yaml").write_text("tools: []\n")
     (root / "11_runtime/lab-status.yaml").write_text("status: UNKNOWN\n")
+    # Minimal knowledge index so the triage-coverage guard is exercised by fixtures
+    # instead of being vacuous; `triage_for` computes the entries from this index.
+    (root / "12_knowledge/fixture").mkdir(parents=True, exist_ok=True)
+    (root / "12_knowledge/fixture/fixture.md").write_text("# Fixture pack\n")
+    (root / "12_knowledge/INDEX.yaml").write_text(
+        "packs:\n"
+        "  fixture:\n"
+        "    load_when: [test, question, placeholder, review, closure, fixture, same-reviewer, gate, deny, close, budget, scope]\n"
+        "    files: [fixture.md]\n")
     return root
 
 
-def cycle_fixture(cid: str, objective: str = "test question") -> dict:
+def triage_for(root: Path, objective: str) -> list[dict]:
+    """Cover the auto-ranked packs exactly as the RUNNING guard computes them."""
+    from knowledge_index import selection_cap, selection_query, top_packs
+    ranked = [name for name, _ in top_packs(root, selection_query(root, objective), k=selection_cap())]
+    return [{"pack": name, "verdict": "SKIP", "reason": "fixture triage reason covers this pack"}
+            for name in (ranked or ["fixture"])]
+
+
+def cycle_fixture(cid: str, objective: str = "test question", root: Path | None = None) -> dict:
     return {
         "id": cid, "type": "DISCOVERY", "objective": objective,
         "allowed_scope": ["example.test"], "stop_conditions": ["stop"], "controls": [],
         "status": "PLANNED",
-        "knowledge_triage": [{"pack": "api", "verdict": "SKIP", "reason": "fixture"}],
+        "knowledge_triage": triage_for(root, objective) if root is not None
+                            else [{"pack": "fixture", "verdict": "SKIP",
+                                   "reason": "fixture triage reason covers this pack"}],
     }
 
 
@@ -68,7 +87,7 @@ def scope_workspace(assets_yaml: str | None, target: str) -> tuple[Path, Control
     if assets_yaml is not None:
         (r / "00_control/engagement.yaml").write_text(assets_yaml)
     c = ControlPlane(r)
-    c.create_cycle("C-0001", cycle_fixture("C-0001"))
+    c.create_cycle("C-0001", cycle_fixture("C-0001", root=r))
     write_objective(r, "C-0001")
     c.transition_cycle("C-0001", "READY", reason="ready")
     c.transition_cycle("C-0001", "RUNNING", reason="run")
@@ -163,7 +182,7 @@ def recording_workspace(cid: str = "C-0001") -> tuple[Path, ControlPlane, str]:
     """RUNNING cycle with registered evidence and a filled results.md at RESULT_READY."""
     r = fresh_root()
     c = ControlPlane(r)
-    c.create_cycle(cid, cycle_fixture(cid, "review binding"))
+    c.create_cycle(cid, cycle_fixture(cid, "review binding", root=r))
     write_objective(r, cid)
     c.transition_cycle(cid, "READY", reason="ready")
     c.transition_cycle(cid, "RUNNING", reason="run")
@@ -180,7 +199,7 @@ def close_workspace(with_action: bool = False, token_nonce: str | None = None) -
     """Minimal CLOSED workspace: one false-positive cycle, auditable evidence, no gates."""
     r = fresh_root()
     c = ControlPlane(r)
-    c.create_cycle("C-0010", cycle_fixture("C-0010", "closure fixture"))
+    c.create_cycle("C-0010", cycle_fixture("C-0010", "closure fixture", root=r))
     write_objective(r, "C-0010")
     c.transition_cycle("C-0010", "READY", reason="ready")
     c.transition_cycle("C-0010", "RUNNING", reason="run")
@@ -264,7 +283,7 @@ root = fresh_root()
 cp = ControlPlane(root)
 
 # 1. Create + canonical update, without allowing status mutation via update.
-ev = cp.create_cycle("C-0001", cycle_fixture("C-0001", "placeholder"))
+ev = cp.create_cycle("C-0001", cycle_fixture("C-0001", "placeholder", root=root))
 check("cycle create event", ev["event_id"] == "EV-000001")
 ev = cp.update_cycle("C-0001", {"objective": "test question", "allowed_scope": ["example.test"], "stop_conditions": ["stop"]})
 check("cycle plan update is canonical", ev["type"] == "CYCLE_UPDATED")
@@ -276,7 +295,7 @@ except ValueError:
 
 # 1b. Cycle type vocabulary is enforced (HUNT/DISCOVERY drift is a defect, not a synonym).
 try:
-    cp.create_cycle("C-0009", {**cycle_fixture("C-0009"), "type": "HUNT"})
+    cp.create_cycle("C-0009", {**cycle_fixture("C-0009", root=root), "type": "HUNT"})
     check("invalid cycle type rejected", False)
 except ValueError:
     check("invalid cycle type rejected", True)
@@ -294,7 +313,7 @@ check("cycle lifecycle reaches RUNNING", cp.cycle_status("C-0001") == "RUNNING")
 
 # 2b. knowledge_triage is a precondition for RUNNING, not a post-hoc audit note.
 root_nt = fresh_root(); cp_nt = ControlPlane(root_nt)
-cp_nt.create_cycle("C-0001", {**cycle_fixture("C-0001"), "knowledge_triage": None})
+cp_nt.create_cycle("C-0001", {**cycle_fixture("C-0001", root=root_nt), "knowledge_triage": None})
 write_objective(root_nt, "C-0001")
 cp_nt.transition_cycle("C-0001", "READY", reason="ready")
 try:
@@ -302,6 +321,216 @@ try:
     check("RUNNING without knowledge_triage rejected", False)
 except ValueError as exc:
     check("RUNNING without knowledge_triage rejected", "knowledge_triage" in str(exc))
+
+# 2c. Triage must cover the auto-ranked packs: the guard refuses RUNNING until each has a
+# USE/SKIP line with a reason.
+def triage_root() -> Path:
+    r = fresh_root()
+    for pack, keyword in [("pack-a", "alpha"), ("pack-b", "beta"), ("pack-c", "gamma")]:
+        (r / "12_knowledge" / pack).mkdir(parents=True, exist_ok=True)
+        (r / "12_knowledge" / pack / f"{pack}.md").write_text(f"# {pack}\n")
+    (r / "12_knowledge" / "INDEX.yaml").write_text(
+        "packs:\n"
+        "  pack-a:\n    load_when: [alpha]\n    files: [pack-a.md]\n"
+        "  pack-b:\n    load_when: [beta]\n    files: [pack-b.md]\n"
+        "  pack-c:\n    load_when: [gamma]\n    files: [pack-c.md]\n")
+    return r
+
+
+tr_root = triage_root()
+cp_tr = ControlPlane(tr_root)
+cp_tr.create_cycle("C-0001", cycle_fixture("C-0001", "alpha beta probe", root=tr_root))
+write_objective(tr_root, "C-0001")
+cp_tr.transition_cycle("C-0001", "READY", reason="ready")
+cp_tr.update_cycle("C-0001", {"knowledge_triage": [{"pack": "pack-a", "verdict": "USE",
+                                                    "reason": "alpha is covered by this triage line"}]})
+try:
+    cp_tr.transition_cycle("C-0001", "RUNNING", reason="missing pack-b")
+    check("RUNNING refused when an auto-ranked pack is missing", False)
+except ValueError as exc:
+    check("RUNNING refused when an auto-ranked pack is missing",
+          "pack-b" in str(exc) and "confirm or override" in str(exc))
+cp_tr.update_cycle("C-0001", {"knowledge_triage": [
+    {"pack": "pack-a", "verdict": "USE", "reason": "alpha is the question"},
+    {"pack": "pack-b", "verdict": "SKIP", "reason": "beta is not relevant here"},
+]})
+cp_tr.transition_cycle("C-0001", "RUNNING", reason="covered")
+check("RUNNING accepted when every auto-ranked pack is covered", cp_tr.cycle_status("C-0001") == "RUNNING")
+# Overriding the auto-ranking in either direction is fine: a reasoned line is the point.
+tr2_root = triage_root()
+cp_tr2 = ControlPlane(tr2_root)
+cp_tr2.create_cycle("C-0001", cycle_fixture("C-0001", "alpha beta probe", root=tr2_root))
+write_objective(tr2_root, "C-0001")
+cp_tr2.transition_cycle("C-0001", "READY", reason="ready")
+cp_tr2.update_cycle("C-0001", {"knowledge_triage": [
+    {"pack": "pack-a", "verdict": "SKIP", "reason": "auto-rank overridden: not applicable"},
+    {"pack": "pack-b", "verdict": "USE", "reason": "auto-rank overridden: beta it is"},
+]})
+cp_tr2.transition_cycle("C-0001", "RUNNING", reason="overridden both ways")
+check("USE/SKIP overrides of the auto-ranking both pass", cp_tr2.cycle_status("C-0001") == "RUNNING")
+
+# 2c-ter. Post-RUNNING plan edits that touch objective or knowledge_triage re-run the
+# coverage guard with the NEW values: a weakening patch is refused, not recorded.
+try:
+    cp_tr2.update_cycle("C-0001", {"objective": "alpha beta gamma coverage"})
+    check("post-RUNNING objective change re-runs the coverage guard", False)
+except ValueError as exc:
+    check("post-RUNNING objective change re-runs the coverage guard",
+          "pack-c" in str(exc) and "confirm or override" in str(exc))
+try:
+    cp_tr2.update_cycle("C-0001", {"knowledge_triage": [
+        {"pack": "pack-a", "verdict": "USE", "reason": "alpha remains the only covered pack"}]})
+    check("post-RUNNING triage weakening is refused", False)
+except ValueError as exc:
+    check("post-RUNNING triage weakening is refused", "pack-b" in str(exc))
+ev_cover = cp_tr2.update_cycle("C-0001", {"knowledge_triage": [
+    {"pack": "pack-a", "verdict": "USE", "reason": "alpha is the question under test"},
+    {"pack": "pack-b", "verdict": "USE", "reason": "beta remains relevant to the probe"},
+    {"pack": "pack-c", "verdict": "SKIP", "reason": "gamma is not implicated by this question"},
+]})
+check("post-RUNNING triage update with full coverage is recorded",
+      ev_cover["type"] == "CYCLE_UPDATED")
+ev_obj = cp_tr2.update_cycle("C-0001", {"objective": "alpha beta gamma refinement"})
+check("post-RUNNING objective update with full coverage is recorded",
+      ev_obj["type"] == "CYCLE_UPDATED")
+
+# 2c-quater. Thin placeholder reasons (x / n/a / none) are not triage decisions.
+thin_root = triage_root()
+cp_thin = ControlPlane(thin_root)
+cp_thin.create_cycle("C-0001", {**cycle_fixture("C-0001", "alpha beta probe", root=thin_root),
+                                "knowledge_triage": [
+                                    {"pack": "pack-a", "verdict": "USE", "reason": "n/a"},
+                                    {"pack": "pack-b", "verdict": "SKIP", "reason": "x"}]})
+write_objective(thin_root, "C-0001")
+cp_thin.transition_cycle("C-0001", "READY", reason="ready")
+try:
+    cp_thin.transition_cycle("C-0001", "RUNNING", reason="thin reasons")
+    check("thin triage reasons are refused", False)
+except ValueError as exc:
+    check("thin triage reasons are refused",
+          "too thin" in str(exc) and "knowledge_triage entry 1" in str(exc))
+
+# 2c-quinquies. Missing or unparseable knowledge INDEX is refused, not vacuously passed:
+# without an index there is no auto-ranking to verify coverage against.
+def index_guard_root(index_text: str | None) -> ControlPlane:
+    r = triage_root()
+    path = r / "12_knowledge/INDEX.yaml"
+    if index_text is None:
+        path.unlink()
+    else:
+        path.write_text(index_text)
+    c = ControlPlane(r)
+    c.create_cycle("C-0001", cycle_fixture("C-0001", "alpha beta probe", root=r))
+    write_objective(r, "C-0001")
+    c.transition_cycle("C-0001", "READY", reason="ready")
+    return c
+
+
+for label, index_text in [("missing", None), ("unparseable", "not a yaml index at all\n"),
+                          ("empty pack list", "packs:\n")]:
+    cp_idx = index_guard_root(index_text)
+    try:
+        cp_idx.transition_cycle("C-0001", "RUNNING", reason=f"{label} index")
+        check(f"RUNNING refused when the knowledge index is {label}", False)
+    except ValueError as exc:
+        check(f"RUNNING refused when the knowledge index is {label}",
+              "knowledge index missing/unparseable" in str(exc)
+              and "cannot verify triage coverage" in str(exc))
+# The audit is the backstop: a MODERN workspace with cycles and no readable index errors;
+# a legacy ledger keeps only the presence checks.
+for label, index_text in [("missing", None), ("unparseable", "not a yaml index at all\n")]:
+    idx_root = triage_root()
+    idx_path = idx_root / "12_knowledge/INDEX.yaml"
+    if index_text is None:
+        idx_path.unlink()
+    else:
+        idx_path.write_text(index_text)
+    cp_idx_audit = ControlPlane(idx_root)
+    cp_idx_audit.create_cycle("C-0001", cycle_fixture("C-0001", "alpha beta probe", root=idx_root))
+    write_objective(idx_root, "C-0001")
+    cp_idx_audit.transition_cycle("C-0001", "READY", reason="ready")
+    sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(idx_root)],
+                         capture_output=True, text=True)
+    check(f"audit errors for a modern workspace whose knowledge index is {label}",
+          sub.returncode != 0 and "knowledge index missing/unparseable" in sub.stdout)
+    downgrade_events_through(idx_root, "C-0001")
+    sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(idx_root)],
+                         capture_output=True, text=True)
+    check(f"audit leaves a legacy workspace's unreadable index as a non-error ({label})",
+          sub.returncode == 0 and "knowledge index missing/unparseable" not in sub.stdout)
+
+# 2c-sexies. The audit re-checks coverage for MODERN cycles as an ERROR; legacy ledgers
+# stay as written. The write-time guard blocks weakening updates, so the fixture models a
+# ledger written by an older tool (the audit is the backstop for exactly that).
+cp_tr._append_locked("CYCLE_UPDATED", "cycle", "C-0001", actor="controller",
+                     reason="simulated older writer weakening the triage",
+                     payload={"knowledge_triage": [{"pack": "pack-a", "verdict": "USE",
+                                                    "reason": "alpha covered by the old writer"}]},
+                     cycle_id="C-0001")
+cp_tr.refresh()
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(tr_root)], capture_output=True, text=True)
+check("audit errors when a modern cycle's triage misses an auto-ranked pack",
+      sub.returncode != 0 and "pack-b" in sub.stdout and "auto-ranked" in sub.stdout)
+downgrade_events_through(tr_root, "C-0001")
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(tr_root)], capture_output=True, text=True)
+check("audit leaves a legacy cycle's triage coverage as a non-error",
+      sub.returncode == 0 and "auto-ranked" in sub.stdout and "ERROR" not in sub.stdout)
+
+# 2c-septies. The context KNOWLEDGE_SELECTION and the RUNNING guard rank through ONE seam:
+# the guard's required pack list must equal the set the context renders, including when
+# the pack is surfaced by the ledger texts (last-result) rather than the objective, and
+# under a KNOWLEDGE_PACK_CAP override.
+def selection_root() -> Path:
+    r = fresh_root()
+    for name in ("pack-a", "pack-b", "pack-c", "pack-d", "pack-e"):
+        (r / "12_knowledge" / name).mkdir(parents=True, exist_ok=True)
+        (r / "12_knowledge" / name / f"{name}.md").write_text(f"# {name}\n")
+    (r / "12_knowledge" / "INDEX.yaml").write_text(
+        "packs:\n"
+        "  pack-a:\n    load_when: [alpha]\n    files: [pack-a.md]\n"
+        "  pack-b:\n    load_when: [beta]\n    files: [pack-b.md]\n"
+        "  pack-c:\n    load_when: [gamma]\n    files: [pack-c.md]\n"
+        "  pack-d:\n    load_when: [delta]\n    files: [pack-d.md]\n"
+        "  pack-e:\n    load_when: [epsilon, zeta]\n    files: [pack-e.md]\n")
+    (r / "11_runtime" / "last-result.md").write_text(
+        "# Last Result\n- learning: epsilon zeta surfaced by the previous cycle\n")
+    return r
+
+
+def rendered_selection(ctx: str) -> list[str]:
+    line = next(l for l in ctx.splitlines() if l.startswith("auto-selected packs"))
+    body = line.split("): ", 1)[1].split(" — confirm", 1)[0]
+    return [p.strip() for p in body.split(",") if p.strip()]
+
+
+def guard_ranked(cp: ControlPlane) -> list[str]:
+    try:
+        cp.transition_cycle("C-0001", "RUNNING", reason="coverage probe")
+    except ValueError as exc:
+        if "auto-ranked for this objective:" in str(exc):
+            body = str(exc).split("auto-ranked for this objective: ", 1)[1]
+            return [p.strip() for p in body.rstrip(")").split(",") if p.strip()]
+        raise
+    raise AssertionError("guard accepted an uncovered triage")
+
+
+sel_root = selection_root()
+cp_sel = ControlPlane(sel_root)
+cp_sel.create_cycle("C-0001", {
+    **cycle_fixture("C-0001", "alpha beta gamma delta", root=sel_root),
+    "knowledge_triage": [{"pack": "pack-a", "verdict": "USE",
+                          "reason": "alpha is the question under test"}]})
+write_objective(sel_root, "C-0001")
+cp_sel.transition_cycle("C-0001", "READY", reason="ready")
+ctx_packs = rendered_selection((sel_root / "11_runtime/current-context.md").read_text())
+check("context KNOWLEDGE_SELECTION equals the guard's auto-ranked list",
+      ctx_packs == guard_ranked(cp_sel) and ctx_packs == ["pack-e", "pack-a", "pack-b", "pack-c"])
+with mock.patch.dict(os.environ, {"KNOWLEDGE_PACK_CAP": "6"}):
+    cp_sel.refresh()
+    ctx_packs6 = rendered_selection((sel_root / "11_runtime/current-context.md").read_text())
+    check("KNOWLEDGE_PACK_CAP=6 widens the context selection to every ranked pack",
+          len(ctx_packs6) == 5 and "cap 6" in (sel_root / "11_runtime/current-context.md").read_text())
+    check("the guard ranks with the same cap override", ctx_packs6 == guard_ranked(cp_sel))
 
 cp.create_hypothesis("H-0001", {
     "cycle_id": "C-0001",
@@ -590,7 +819,7 @@ check("scope_check lowercases scheme and host", sc["in_scope"] is True)
 
 # 4e. Prepare honors the gate modes end to end: disabled allows, assets enforce.
 scope_root = fresh_root(); cp_scope = ControlPlane(scope_root)
-cp_scope.create_cycle("C-0001", cycle_fixture("C-0001"))
+cp_scope.create_cycle("C-0001", cycle_fixture("C-0001", root=scope_root))
 write_objective(scope_root, "C-0001")
 cp_scope.transition_cycle("C-0001", "READY", reason="ready")
 cp_scope.transition_cycle("C-0001", "RUNNING", reason="run")
@@ -1144,6 +1373,232 @@ gate_action["request_shape"] = {"method": "GET", "url": "https://off-target.exam
 ev = cp_gate.record_action(gate_action)
 check("record_action passes an explicit gate none", ev["type"] == "ACTION_RECORDED")
 
+# 4i. Budget governor: machine-enforced caps on live-action capacity. The block is
+# top-level `budget:` with two integer keys; malformed values fail closed.
+from control_plane import BUDGET_MALFORMED, budget_limits  # noqa: E402
+
+budget_root = fresh_root()
+check("budget_limits: absent block -> None (no budget configured)", budget_limits(budget_root) is None)
+(budget_root / "00_control/engagement.yaml").write_text(
+    '# Runtime-only engagement configuration.\n'
+    'budget:\n  max_actions_per_cycle: 5\n  max_actions_per_engagement: 40\n')
+check("budget_limits: valid block parses both ints",
+      budget_limits(budget_root) == {"max_actions_per_cycle": 5, "max_actions_per_engagement": 40})
+(budget_root / "00_control/engagement.yaml").write_text("budget:\n  max_actions_per_cycle: 5\n")
+check("budget_limits: absent key -> None",
+      budget_limits(budget_root) == {"max_actions_per_cycle": 5, "max_actions_per_engagement": None})
+(budget_root / "00_control/engagement.yaml").write_text("budget:\n  max_actions_per_cycle: 5  # cap\n")
+check("budget_limits: trailing comment is fine",
+      budget_limits(budget_root) == {"max_actions_per_cycle": 5, "max_actions_per_engagement": None})
+for label, yaml_text in [
+    ("non-integer value", "budget:\n  max_actions_per_cycle: twenty\n"),
+    ("quoted integer", 'budget:\n  max_actions_per_cycle: "5"\n'),
+    ("negative value", "budget:\n  max_actions_per_engagement: -1\n"),
+    ("nested value", "budget:\n  max_actions_per_cycle:\n    value: 5\n"),
+    ("flow map scalar", "budget: {max_actions_per_cycle: 5, max_actions_per_engagement: 40}\n"),
+    ("plain scalar", "budget: 5\n"),
+    ("block scalar", "budget: |\n  max_actions_per_cycle: 5\n"),
+]:
+    (budget_root / "00_control/engagement.yaml").write_text(yaml_text)
+    check(f"budget_limits: malformed block ({label})",
+          budget_limits(budget_root) == BUDGET_MALFORMED)
+(budget_root / "00_control/engagement.yaml").write_text(
+    "budget:  # caps\n  max_actions_per_cycle: 5\n")
+check("budget_limits: a commented col-0 header still opens the block",
+      budget_limits(budget_root) == {"max_actions_per_cycle": 5, "max_actions_per_engagement": None})
+
+
+def budget_workspace(budget_block: str, recorded: int = 0, cid: str = "C-0001") -> tuple[Path, ControlPlane]:
+    """RUNNING cycle fixture with the requested budget block and N recorded actions."""
+    r = fresh_root()
+    (r / "00_control/engagement.yaml").write_text(
+        'scope:\n  assets:\n  - "example.test"\n' + budget_block)
+    c = ControlPlane(r)
+    c.create_cycle(cid, cycle_fixture(cid, root=r))
+    write_objective(r, cid)
+    c.transition_cycle(cid, "READY", reason="ready")
+    c.transition_cycle(cid, "RUNNING", reason="run")
+    c.create_hypothesis("H-0001", {
+        "cycle_id": cid,
+        "observation": "budget fixture",
+        "hypothesis": "budget fixture",
+        "secure_prediction": "denied",
+        "vulnerable_prediction": "allowed",
+    })
+    shape = {"method": "GET", "url": "https://example.test/api", "principal": "researcher-A"}
+    for i in range(recorded):
+        payload = {k: v for k, v in base_action.items() if k != "evidence_refs"}
+        payload.update({"id": f"A-R{i:04d}", "cycle_id": cid, "request_shape": shape})
+        c.append("ACTION_RECORDED", "action", f"A-R{i:04d}", cycle_id=cid, payload=payload)
+    return r, c
+
+
+bw_root, bw_cp = budget_workspace("budget:\n  max_actions_per_cycle: 2\n  max_actions_per_engagement: 100\n",
+                                  recorded=2)
+try:
+    bw_cp.prepare_action({**base_action, "tool_family": "http", "request_shape": shape,
+                          "cycle_id": "C-0001"})
+    check("prepare refuses at the cycle cap", False)
+except ValueError as exc:
+    check("prepare refuses at the cycle cap",
+          "cycle budget exhausted (2/2)" in str(exc) and "researchctl budget set" in str(exc))
+
+bo_root, bo_cp = budget_workspace("budget:\n  max_actions_per_cycle: 2\n  max_actions_per_engagement: 100\n")
+bo_cp.prepare_action({**base_action, "tool_family": "http", "request_shape": shape, "cycle_id": "C-0001"})
+bo_cp.prepare_action({**base_action, "tool_family": "http", "request_shape": shape, "cycle_id": "C-0001"})
+try:
+    bo_cp.prepare_action({**base_action, "tool_family": "http", "request_shape": shape, "cycle_id": "C-0001"})
+    check("outstanding unconsumed tokens count against the cycle cap", False)
+except ValueError as exc:
+    check("outstanding unconsumed tokens count against the cycle cap",
+          "cycle budget exhausted (2/2)" in str(exc))
+
+be_root, be_cp = budget_workspace("budget:\n  max_actions_per_cycle: 10\n  max_actions_per_engagement: 2\n",
+                                  recorded=1)
+be_cp.prepare_action({**base_action, "tool_family": "http", "request_shape": shape, "cycle_id": "C-0001"})
+try:
+    be_cp.prepare_action({**base_action, "tool_family": "http", "request_shape": shape, "cycle_id": "C-0001"})
+    check("outstanding tokens count against the engagement cap", False)
+except ValueError as exc:
+    check("outstanding tokens count against the engagement cap",
+          "engagement budget exhausted (2/2)" in str(exc))
+
+bm_root, bm_cp = budget_workspace("budget:\n  max_actions_per_cycle: nope\n", recorded=0)
+try:
+    bm_cp.prepare_action({**base_action, "tool_family": "http", "request_shape": shape, "cycle_id": "C-0001"})
+    check("a malformed budget block fails prepare closed", False)
+except ValueError as exc:
+    check("a malformed budget block fails prepare closed", "malformed" in str(exc))
+
+bn_root, bn_cp = budget_workspace("budget:\n  max_actions_per_cycle: 2\n  max_actions_per_engagement: 100\n",
+                                  recorded=1)
+tok_bn = bn_cp.prepare_action({**base_action, "tool_family": "http", "request_shape": shape, "cycle_id": "C-0001"})
+check("a prepare under the cap still issues a token", tok_bn["action_id"].startswith("A-"))
+
+bs_root, bs_cp = budget_workspace("budget:\n  max_actions_per_cycle: 3\n  max_actions_per_engagement: 30\n",
+                                  recorded=1)
+bs_cp.prepare_action({**base_action, "tool_family": "http", "request_shape": shape, "cycle_id": "C-0001"})
+status = bs_cp.budget_status()
+check("budget status reports limits, counts and remaining",
+      status["limits"] == {"max_actions_per_cycle": 3, "max_actions_per_engagement": 30}
+      and status["counts"]["cycles"] == {"C-0001": 2}
+      and status["counts"]["engagement"] == 2
+      and status["remaining"]["cycles"] == {"C-0001": 1}
+      and status["remaining"]["engagement"] == 28)
+sub = subprocess.run([sys.executable, str(TOOLS / "researchctl.py"), str(bs_root), "budget", "status"],
+                     capture_output=True, text=True)
+cli_status = json.loads(sub.stdout)
+check("researchctl budget status prints the same facts",
+      sub.returncode == 0 and cli_status["limits"] == status["limits"]
+      and cli_status["counts"]["engagement"] == 2)
+bstatus = budget_workspace("", recorded=1)[1].budget_status()
+check("budget status with no configured block reports null limits/remaining",
+      bstatus["limits"] is None and bstatus["remaining"]["engagement"] is None
+      and bstatus["counts"]["engagement"] == 1)
+
+set_budget_root = fresh_root()
+(set_budget_root / "00_control/engagement.yaml").write_text(
+    'program:\n  name: "x"\n\nscope:\n  assets: []\n  out_of_scope: []\n\n'
+    'accounts:\n  researcher_controlled: []\n\nconfidence: "VERIFIED"\n')
+cp_budget = ControlPlane(set_budget_root)
+budget_before = (set_budget_root / "00_control/engagement.yaml").read_text()
+try:
+    cp_budget.set_budget({"max_actions_per_cycle": 10, "max_actions_per_engagement": 100})
+    check("budget set rejects an empty source_reference", False)
+except ValueError as exc:
+    check("budget set rejects an empty source_reference", "source_reference" in str(exc))
+for label, payload in [
+    ("non-integer cap", {"max_actions_per_cycle": "10", "max_actions_per_engagement": 100}),
+    ("negative cap", {"max_actions_per_cycle": -1, "max_actions_per_engagement": 100}),
+    ("boolean cap", {"max_actions_per_cycle": True, "max_actions_per_engagement": 100}),
+    ("missing key", {"max_actions_per_cycle": 10}),
+]:
+    try:
+        cp_budget.set_budget({**payload, "source_reference": "policy#budget"})
+        check(f"budget set rejects {label}", False)
+    except ValueError:
+        check(f"budget set rejects {label}", True)
+ev = cp_budget.set_budget({"max_actions_per_cycle": 10, "max_actions_per_engagement": 100,
+                           "source_reference": "policy#budget"})
+check("BUDGET_CHANGED recorded on the engagement entity",
+      ev["type"] == "BUDGET_CHANGED" and ev["entity_type"] == "budget" and ev["entity_id"] == "engagement")
+check("BUDGET_CHANGED carries previous/new/source/human",
+      ev["payload"] == {"previous": None, "new": {"max_actions_per_cycle": 10, "max_actions_per_engagement": 100},
+                        "source_reference": "policy#budget", "human_reference": ""})
+budget_text = (set_budget_root / "00_control/engagement.yaml").read_text()
+check("budget set writes the block and preserves every unrelated byte",
+      budget_text.startswith(budget_before)
+      and "accounts:\n  researcher_controlled: []\n" in budget_text
+      and budget_limits(set_budget_root) == {"max_actions_per_cycle": 10, "max_actions_per_engagement": 100})
+try:
+    cp_budget.set_budget({"max_actions_per_cycle": 11, "max_actions_per_engagement": 100,
+                          "source_reference": "policy#budget"})
+    check("budget set requires human_reference once limits are recorded", False)
+except ValueError as exc:
+    check("budget set requires human_reference once limits are recorded", "human_reference" in str(exc))
+ev2 = cp_budget.set_budget({"max_actions_per_cycle": 10, "max_actions_per_engagement": 100,
+                            "source_reference": "policy#budget", "human_reference": "ticket-1"})
+check("BUDGET_CHANGED carries the human_reference and the previous limits",
+      ev2["payload"]["human_reference"] == "ticket-1"
+      and ev2["payload"]["previous"] == {"max_actions_per_cycle": 10, "max_actions_per_engagement": 100})
+check("budget set is idempotent on re-run",
+      (set_budget_root / "00_control/engagement.yaml").read_text() == budget_text)
+# A shipped template budget block is deliberate configuration: changing it needs a human.
+tpl_root = fresh_root()
+(tpl_root / "00_control/engagement.yaml").write_text(
+    "budget:\n  max_actions_per_cycle: 20\n  max_actions_per_engagement: 200\n")
+try:
+    ControlPlane(tpl_root).set_budget({"max_actions_per_cycle": 5, "max_actions_per_engagement": 50,
+                                       "source_reference": "policy#budget"})
+    check("budget set requires human_reference when a budget block already exists", False)
+except ValueError as exc:
+    check("budget set requires human_reference when a budget block already exists",
+          "human_reference" in str(exc))
+ControlPlane(tpl_root).set_budget({"max_actions_per_cycle": 5, "max_actions_per_engagement": 50,
+                                   "source_reference": "policy#budget", "human_reference": "ticket-2"})
+check("budget set rewrites the shipped block in place",
+      budget_limits(tpl_root) == {"max_actions_per_cycle": 5, "max_actions_per_engagement": 50}
+      and (tpl_root / "00_control/engagement.yaml").read_text().count("budget:") == 1)
+sub = subprocess.run([sys.executable, str(TOOLS / "researchctl.py"), str(tpl_root), "budget", "set",
+                      str(Path(tempfile.mkdtemp()) / "payload.json")], capture_output=True, text=True)
+check("researchctl budget set surfaces a readable error", sub.returncode == 1 and "error:" in sub.stderr)
+
+# Audit: over-cap recorded actions are an error; a missing block warns.
+over_root = budget_workspace("budget:\n  max_actions_per_cycle: 1\n  max_actions_per_engagement: 100\n",
+                             recorded=2)[0]
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(over_root)], capture_output=True, text=True)
+check("audit errors when a cycle's recorded actions exceed the configured cap",
+      sub.returncode != 0 and "budget" in sub.stdout and "C-0001" in sub.stdout)
+under_root = budget_workspace("budget:\n  max_actions_per_cycle: 5\n  max_actions_per_engagement: 100\n",
+                              recorded=2)[0]
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(under_root)], capture_output=True, text=True)
+check("audit is silent about a cycle inside its budget cap",
+      "budget" not in sub.stdout and "no `budget:` block" not in sub.stdout)
+nob_root = budget_workspace("", recorded=1)[0]
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(nob_root)], capture_output=True, text=True)
+check("audit warns when recorded actions exist with no budget block",
+      sub.returncode == 0 and "no `budget:` block" in sub.stdout)
+
+# 4j. Lowering a cap below the current recorded count is allowed but flagged: the event
+# carries below_current_count, the CLI warns, and the audit errors until a raise.
+below_root, below_cp = budget_workspace("", recorded=3)
+ev_below = below_cp.set_budget({"max_actions_per_cycle": 2, "max_actions_per_engagement": 100,
+                                "source_reference": "policy#budget"})
+check("budget set records below_current_count when the cap is under the recorded count",
+      ev_below["payload"].get("below_current_count") is True)
+ev_above = below_cp.set_budget({"max_actions_per_cycle": 4, "max_actions_per_engagement": 100,
+                                "source_reference": "policy#budget", "human_reference": "ticket-3"})
+check("budget set omits below_current_count when the cap covers the recorded count",
+      "below_current_count" not in ev_above["payload"])
+below_payload = Path(tempfile.mkdtemp()) / "budget.json"
+below_payload.write_text(json.dumps({"max_actions_per_cycle": 1, "max_actions_per_engagement": 50,
+                                     "source_reference": "policy#budget", "human_reference": "ticket-4"}))
+sub = subprocess.run([sys.executable, str(TOOLS / "researchctl.py"), str(below_root), "budget", "set",
+                      str(below_payload)], capture_output=True, text=True)
+check("researchctl budget set warns when the new caps are below the recorded count",
+      sub.returncode == 0 and "below the current recorded" in sub.stderr
+      and json.loads(sub.stdout)["payload"]["below_current_count"] is True)
+
 # 5. Result transitions validate evidence objects and the results.md artifact contract.
 try:
     cp.transition_cycle("C-0001", "RESULT_READY", reason="bad ref", evidence_refs=["results.md"])
@@ -1221,7 +1676,7 @@ cp.transition_cycle("C-0001", "REVIEWED", reason="both reviews pass", evidence_r
 check("reviewed after both reviews pass", cp.cycle_status("C-0001") == "REVIEWED")
 
 # 5a-bis. Two axes from one reviewer identity cannot satisfy the claim gate.
-cp.create_cycle("C-0004", cycle_fixture("C-0004", "same-reviewer"))
+cp.create_cycle("C-0004", cycle_fixture("C-0004", "same-reviewer", root=root))
 write_objective(root, "C-0004")
 cp.transition_cycle("C-0004", "READY", reason="ready")
 cp.transition_cycle("C-0004", "RUNNING", reason="run")
@@ -1298,7 +1753,7 @@ check("stale lock reclaimed", ev["type"] == "NOTE" and not lock.exists())
 
 # 6. Human gate is durable and automatically binds to cycle state, without storing secrets.
 root2 = fresh_root(); cp2 = ControlPlane(root2)
-cp2.create_cycle("C-0002", cycle_fixture("C-0002", "gate"))
+cp2.create_cycle("C-0002", cycle_fixture("C-0002", "gate", root=root2))
 write_objective(root2, "C-0002")
 cp2.transition_cycle("C-0002", "READY", reason="ready")
 cp2.transition_cycle("C-0002", "RUNNING", reason="run")
@@ -1310,7 +1765,7 @@ check("gate never stores secret value", "human-confirmation-1" in raw and "otp-1
 
 # A human denial must not strand the cycle in HUMAN_GATE.
 root_denied = fresh_root(); cp_denied = ControlPlane(root_denied)
-cp_denied.create_cycle("C-0003", cycle_fixture("C-0003", "deny"))
+cp_denied.create_cycle("C-0003", cycle_fixture("C-0003", "deny", root=root_denied))
 write_objective(root_denied, "C-0003")
 cp_denied.transition_cycle("C-0003", "READY", reason="ready")
 cp_denied.transition_cycle("C-0003", "RUNNING", reason="run")
@@ -1374,7 +1829,7 @@ check("audit passes after the re-check (UNKNOWN pin gone)", sub.returncode == 0)
 
 # 8. Closure audit declarations must be evidence-backed and stale after new research events.
 root4 = fresh_root(); cp4 = ControlPlane(root4)
-cp4.create_cycle("C-0010", cycle_fixture("C-0010", "close"))
+cp4.create_cycle("C-0010", cycle_fixture("C-0010", "close", root=root4))
 write_objective(root4, "C-0010")
 cp4.transition_cycle("C-0010", "READY", reason="ready")
 cp4.transition_cycle("C-0010", "RUNNING", reason="run")
@@ -1853,5 +2308,69 @@ pp_proof.write_text(filled_text)
 sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pp_root), "--closure"],
                      capture_output=True, text=True)
 check("the pristine filled proof still passes after parser surgery", sub.returncode == 0)
+
+
+# Replay capture-integrity harness: the workspace gate and the no-leak failure output.
+def run_replay(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(TOOLS / "test_replay.py"), *args],
+                          capture_output=True, text=True)
+
+
+def replay_workspace(capture_text: str | None = None,
+                     markers: bool = True) -> Path:
+    r = Path(tempfile.mkdtemp())
+    if markers:
+        (r / "OS_VERSION").write_text("7.5\n")
+        (r / "11_runtime").mkdir(parents=True)
+        (r / "11_runtime/events.jsonl").write_text("")
+        (r / "08_artifacts/raw").mkdir(parents=True)
+    elif capture_text is not None:
+        (r / "08_artifacts/raw").mkdir(parents=True)
+    if capture_text is not None:
+        (r / "08_artifacts/raw/capture.http").write_text(capture_text)
+    return r
+
+
+CAPTURE = (
+    "# research_os_request — GET https://example.test/api\n"
+    "# action: A-0001 | cycle: C-0001\n\n"
+    "--- request\n"
+    "GET https://example.test/api HTTP/1.1\n\n"
+    "--- response\n"
+    "HTTP 200\n"
+    "content-type: application/json\n\n"
+    '{"ok":true}\n')
+
+
+def capture_with(request_line: str) -> str:
+    return CAPTURE.replace("GET https://example.test/api HTTP/1.1", request_line)
+
+
+missing = Path(tempfile.mkdtemp()) / "does-not-exist"
+sub = run_replay(str(missing))
+check("integrity mode refuses a nonexistent path",
+      sub.returncode != 0 and "not a research workspace" in sub.stdout
+      and "OS_VERSION" in sub.stdout)
+plain_dir = Path(tempfile.mkdtemp())
+(plain_dir / "notes").mkdir()
+sub = run_replay(str(plain_dir))
+check("integrity mode refuses a directory without research-workspace markers",
+      sub.returncode != 0 and "not a research workspace" in sub.stdout)
+sub = run_replay(str(replay_workspace(CAPTURE)))
+check("integrity mode accepts a workspace holding a clean capture", sub.returncode == 0)
+secret_value = "glpat-ABCDEFGHIJKLMNOPQRSTUV"
+sub = run_replay(str(replay_workspace(capture_with(f"GET https://example.test/api?x={secret_value} HTTP/1.1"))))
+check("a dirty capture with a secret-shaped value fails",
+      sub.returncode != 0 and "secret-shaped value" in sub.stdout)
+check("the secret-hit failure output never repeats the raw secret",
+      secret_value not in sub.stdout and secret_value not in sub.stderr
+      and "glpat-[A-Za-z0-9_.-]{16,}" in sub.stdout and "line 5" in sub.stdout)
+raw_token = "s3cr3tvalue"
+sub = run_replay(str(replay_workspace(capture_with(
+    f"GET https://example.test/api?token={raw_token} HTTP/1.1"))))
+check("an unmasked token capture fails the idempotence check",
+      sub.returncode != 0 and "not idempotent" in sub.stdout)
+check("the idempotence diff prints the masked form, never the raw token",
+      raw_token not in sub.stdout and raw_token not in sub.stderr and "[REDACTED]" in sub.stdout)
 
 print(f"\n{len(passed)} checks passed")

@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import unquote
 
+from knowledge_index import index_problem, selection_cap, selection_query, top_packs
+
 CYCLE_EDGES = {
     "PLANNED": {"READY", "BLOCKED"},
     "READY": {"RUNNING", "BLOCKED"},
@@ -62,7 +64,7 @@ EVENT_TYPES = {
     "HYPOTHESIS_CREATED", "HYPOTHESIS_UPDATED", "HYPOTHESIS_TRANSITIONED",
     "EVIDENCE_REGISTERED", "ACTION_RECORDED", "TECHNIQUE_EVALUATED", "WORKER_RESULT",
     "HUMAN_GATE_REQUESTED", "HUMAN_GATE_RESOLVED", "AUDIT_RECORDED", "FRESHNESS_RECORDED",
-    "STATE_CHANGE", "NOTE", "SCOPE_CHANGED",
+    "STATE_CHANGE", "NOTE", "SCOPE_CHANGED", "BUDGET_CHANGED",
 }
 HUMAN_GATE_DECISIONS = {"RESUME", "PROVIDED", "APPROVED", "DENIED", "CANCELLED"}
 REQUIRED_AUDIT_CLASSES = {"scope", "coverage", "negative", "open-hypothesis", "novelty-duplicate", "hygiene-cleanup", "method-self-attack"}
@@ -361,6 +363,70 @@ def external_judgment_allowed(root: Path) -> bool:
     # line as the value — fail open).
     match = re.search(r"^external_judgment:[^\S\n]*[\"']?([A-Za-z_-]+)", text, re.M | re.I)
     return bool(match) and match.group(1).strip().upper() == "ALLOWED"
+
+
+BUDGET_MALFORMED = "malformed"
+BUDGET_KEYS = ("max_actions_per_cycle", "max_actions_per_engagement")
+
+
+def budget_limits(root: Path) -> dict[str, int | None] | str | None:
+    """Parse the top-level `budget:` block in 00_control/engagement.yaml.
+
+    Returns None when the block is absent (no cap configured), a dict with one entry
+    per known key (None when the key is absent or carries no value) when it parses
+    cleanly, and the BUDGET_MALFORMED marker when a col-0 `budget:` entry carries a
+    non-comment remainder (flow map, scalar, block scalar — anything that is not the
+    supported block form) or when a present key's value is not a plain non-negative
+    integer. Callers must treat the marker as fail-closed — refuse the live action and
+    demand a human-fixed `researchctl budget set` — never as "no budget": a typo must
+    not raise the effective cap to infinity.
+    """
+    path = root / "00_control" / "engagement.yaml"
+    if not path.exists():
+        return None
+    lines = path.read_text(errors="ignore").splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.startswith((" ", "\t")):
+            continue
+        header = re.match(r"budget\s*:(.*)$", line)
+        if not header:
+            continue
+        remainder = header.group(1).strip()
+        if remainder and not remainder.startswith("#"):
+            return BUDGET_MALFORMED
+        start = i
+        break
+    if start is None:
+        return None
+    end = _scope_block_end(lines, start)
+    indent = _scope_child_indent(lines, start, end)
+    limits: dict[str, int | None] = {}
+    for j in range(start + 1, end):
+        raw = lines[j].rstrip("\r\n")
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if _leading_ws(raw) != indent or ":" not in stripped:
+            continue
+        key, value = stripped.split(":", 1)
+        key = key.strip()
+        if key not in BUDGET_KEYS:
+            continue
+        value = value.split("#", 1)[0].strip()
+        if value == "":
+            # An empty scalar is an unset key; a nested mapping/sequence is not.
+            look = j + 1
+            while look < end and (not lines[look].strip() or lines[look].strip().startswith("#")):
+                look += 1
+            if look < end and len(_leading_ws(lines[look])) > len(indent):
+                return BUDGET_MALFORMED
+            limits[key] = None
+        elif re.fullmatch(r"[0-9]+", value):
+            limits[key] = int(value)
+        else:
+            return BUDGET_MALFORMED
+    return {key: limits.get(key) for key in BUDGET_KEYS}
 
 
 def now() -> str:
@@ -729,7 +795,8 @@ class ControlPlane:
 
     def update_cycle(self, cid: str, patch: dict[str, Any], actor: str = "controller") -> dict[str, Any]:
         with _lock(self.root):
-            if self.cycle_status(cid) is None:
+            status = self.cycle_status(cid)
+            if status is None:
                 raise ValueError(f"unknown cycle: {cid}")
             patch = dict(patch)
             if "status" in patch or "id" in patch:
@@ -737,6 +804,11 @@ class ControlPlane:
             primary = patch.get("primary_hypothesis")
             if primary and str(primary).startswith("H-") and self.hypothesis_status(str(primary)) is None:
                 raise ValueError(f"cycle references unknown primary hypothesis: {primary}")
+            # Past READY the triage was a RUNNING precondition; a later patch that moves
+            # the objective or weakens the triage must clear the same coverage guard with
+            # the NEW values, or the guard would be trivially bypassable after RUNNING.
+            if status not in {"PLANNED", "READY"} and ("objective" in patch or "knowledge_triage" in patch):
+                self._require_triage({**(self.cycle_data(cid) or {}), **patch})
             event = self._append_locked("CYCLE_UPDATED", "cycle", cid, actor=actor,
                                         reason="cycle plan updated", payload=patch, cycle_id=cid)
         self.refresh()
@@ -776,16 +848,47 @@ class ControlPlane:
         if not objective or objective == "<ONE RESEARCH QUESTION>":
             raise ValueError("cycle guard: plan objective is empty or still the template placeholder")
 
-    @staticmethod
-    def _require_triage(plan: dict[str, Any]) -> None:
+    def _require_triage(self, plan: dict[str, Any]) -> None:
+        """The PULL precondition: every auto-ranked pack must be confirmed or overridden.
+
+        Shape checks first (each line carries pack, verdict USE|SKIP and a real reason),
+        then coverage: `knowledge_index.selection_query`/`selection_cap` rank the packs
+        exactly as `current-context.md` renders KNOWLEDGE_SELECTION, and every ranked
+        pack missing from the triage is named in the refusal — silence about a
+        plausibly-relevant pack is the failure mode this guard exists for. Without a
+        readable INDEX there is no ranking to check, so the guard fails closed instead
+        of passing vacuously.
+        """
         triage = plan.get("knowledge_triage")
         if not isinstance(triage, list) or not triage:
             raise ValueError("cycle guard: RUNNING requires knowledge_triage (USE/SKIP per plausibly-relevant pack)")
+        covered: set[str] = set()
         for i, entry in enumerate(triage, 1):
             if (not isinstance(entry, dict) or not entry.get("pack")
                     or str(entry.get("verdict", "")).upper() not in TRIAGE_VERDICTS
                     or not str(entry.get("reason", "")).strip()):
                 raise ValueError(f"cycle guard: knowledge_triage entry {i} needs pack, verdict USE|SKIP, reason")
+            if sentence_too_thin(str(entry.get("reason", ""))):
+                raise ValueError(
+                    f"cycle guard: knowledge_triage entry {i} reason is too thin — state the pack's "
+                    "relevance to this cycle in a real sentence (>= 20 characters, >= 3 words)"
+                )
+            covered.add(str(entry["pack"]).strip())
+        problem = index_problem(self.root)
+        if problem:
+            raise ValueError(
+                "cycle guard: knowledge index missing/unparseable — cannot verify triage coverage "
+                f"({problem}); restore 12_knowledge/INDEX.yaml before RUNNING"
+            )
+        cap = selection_cap()
+        ranked = [name for name, _ in top_packs(self.root, selection_query(self.root, str(plan.get("objective", ""))), k=cap)]
+        missing = [name for name in ranked if name not in covered]
+        if missing:
+            raise ValueError(
+                f"cycle guard: knowledge_triage misses auto-ranked packs (relevance-ranked, cap {cap}): "
+                f"{', '.join(missing)} — confirm or override each in the cycle knowledge_triage "
+                f"(USE/SKIP + reason; auto-ranked for this objective: {', '.join(ranked) or 'none'})"
+            )
 
     def _technique_events(self, cid: str) -> list[dict[str, Any]]:
         return [e for e in self.events_for("technique") if e.get("cycle_id") == cid]
@@ -1419,6 +1522,229 @@ class ControlPlane:
                 "occurrence escaped the rewrite); the previous file was restored and no event was recorded"
             )
 
+    # ---------- budget governor ----------
+    def _outstanding_tokens(self) -> list[dict[str, Any]]:
+        """Latest state per token action_id, keeping only unconsumed, unexpired ones."""
+        path = self._tokens_file()
+        if not path.exists():
+            return []
+        states: dict[str, dict[str, Any]] = {}
+        for line in path.read_text(errors="ignore").splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(rec, dict) and rec.get("action_id"):
+                key = str(rec["action_id"])
+                states[key] = {**states.get(key, {}), **rec}
+        current = now()
+        out: list[dict[str, Any]] = []
+        for rec in states.values():
+            if rec.get("consumed"):
+                continue
+            expires = str(rec.get("expires_at") or "")
+            # Fail closed: an unreadable expiry counts as outstanding.
+            if expires and expires < current:
+                continue
+            out.append(rec)
+        return out
+
+    def action_counts(self) -> dict[str, Any]:
+        """Recorded actions plus outstanding preflight tokens, per cycle and engagement.
+
+        The governor's single counting seam: an issued-but-unconsumed token is capacity
+        already promised, so it counts against the same cap as a recorded action.
+        """
+        cycles: dict[str, int] = {}
+        total = 0
+        for e in self._read_events():
+            if e.get("type") != "ACTION_RECORDED":
+                continue
+            cid = str(e.get("cycle_id") or "")
+            cycles[cid] = cycles.get(cid, 0) + 1
+            total += 1
+        for rec in self._outstanding_tokens():
+            cid = str(rec.get("cycle_id") or "")
+            cycles[cid] = cycles.get(cid, 0) + 1
+            total += 1
+        return {"cycles": cycles, "engagement": total}
+
+    def budget_status(self) -> dict[str, Any]:
+        """Limits, counted actions and remaining capacity — the `budget status` seam."""
+        limits = budget_limits(self.root)
+        if isinstance(limits, str):
+            raise ValueError(
+                "engagement budget block is malformed — max_actions_per_cycle and "
+                "max_actions_per_engagement must be plain non-negative integers; repair it with "
+                "`researchctl budget set` (a human_reference is required once limits exist)"
+            )
+        counts = self.action_counts()
+        cap_cycle = (limits or {}).get("max_actions_per_cycle")
+        cap_total = (limits or {}).get("max_actions_per_engagement")
+
+        def left(limit: int | None, used: int) -> int | None:
+            return None if limit is None else limit - used
+
+        return {
+            "limits": limits if limits else None,
+            "counts": counts,
+            "remaining": {
+                "cycles": {cid: left(cap_cycle, used) for cid, used in counts["cycles"].items()},
+                "engagement": left(cap_total, counts["engagement"]),
+            },
+        }
+
+    def set_budget(self, payload: dict[str, Any], actor: str = "controller") -> dict[str, Any]:
+        """Rewrite the top-level `budget:` block and record its provenance.
+
+        Mirrors `set_scope`: same splice/atomic-replace helpers, same in-lock postcondition
+        re-parse (a failed write restores the previous file and records no event), and a
+        human_reference is required once a prior BUDGET_CHANGED exists or the current
+        limits are non-empty — a malformed block counts as configured (fail closed).
+        A cap below the current recorded action count is legal and recorded with
+        `below_current_count: true`; the audit errs on the over-cap actions until a
+        human-approved raise (the CLI warns on that event).
+        """
+        if not isinstance(payload, dict):
+            raise ValueError("budget set payload must be an object")
+        new: dict[str, int] = {}
+        for key in BUDGET_KEYS:
+            value = payload.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(
+                    f"budget set requires {key} as a non-negative integer (got {value!r}) — "
+                    "the caps are machine-enforced, so a typo must never set them"
+                )
+            new[key] = value
+        reference = str(payload.get("source_reference") or "").strip()
+        if not reference:
+            raise ValueError("budget set requires a non-empty source_reference (policy URL/section; never a secret)")
+        human = str(payload.get("human_reference") or "").strip()
+        with _lock(self.root):
+            previous = budget_limits(self.root)
+            prior = any(e.get("type") == "BUDGET_CHANGED" for e in self._read_events())
+            configured = isinstance(previous, str) or (
+                isinstance(previous, dict) and any(value is not None for value in previous.values()))
+            if not human and (prior or configured):
+                raise ValueError(
+                    "budget set requires human_reference (a ticket/message id from the human who authorized "
+                    "the cap change) — this changes limits that already exist or re-records after a prior "
+                    "BUDGET_CHANGED; only the first record on a pristine template may omit it"
+                )
+            # A cap below the recorded count is legal (the audit will error on the
+            # over-cap actions until a human-approved raise) but it is recorded on the
+            # event so the CLI can warn instead of letting the lower cap pass silently.
+            recorded: dict[str, int] = {}
+            for e in self._read_events():
+                if e.get("type") == "ACTION_RECORDED":
+                    key = str(e.get("cycle_id") or "")
+                    recorded[key] = recorded.get(key, 0) + 1
+            below_current = (
+                new["max_actions_per_cycle"] < max(recorded.values(), default=0)
+                or new["max_actions_per_engagement"] < sum(recorded.values())
+            )
+            event_payload: dict[str, Any] = {
+                "previous": previous if isinstance(previous, dict) else None,
+                "new": new,
+                "source_reference": reference,
+                "human_reference": human,
+            }
+            if below_current:
+                event_payload["below_current_count"] = True
+            # The postcondition re-parse lives inside this lock too, so the checked state
+            # cannot change between the write and the append.
+            self._write_budget_block(new)
+            event = self._append_locked(
+                "BUDGET_CHANGED", "budget", "engagement", actor=actor,
+                reason="engagement action budget set",
+                payload=event_payload,
+            )
+        self.refresh()
+        return event
+
+    def _write_budget_block(self, limits: dict[str, int]) -> None:
+        """Line surgery on the top-level `budget:` block, with a re-parse postcondition.
+
+        Only the two cap entries are rewritten; comments inside and around the block
+        and every other byte survive. Duplicate top-level `budget:` blocks are removed
+        (the parser reads the first). The write is staged and atomically replaced; when
+        the post-write parse does not equal the request the previous content is restored
+        and ValueError is raised — a failed write can never leave a raised cap behind.
+        """
+        path = self.root / "00_control" / "engagement.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        real = Path(os.path.realpath(path))
+        try:
+            real.relative_to(self.root)
+        except ValueError as exc:
+            raise ValueError(
+                "engagement.yaml resolves outside the engagement root — refusing to follow the symlink"
+            ) from exc
+        real.parent.mkdir(parents=True, exist_ok=True)
+        raw = ""
+        mode_bits: int | None = None
+        if real.exists():
+            with real.open("r", encoding="utf-8", newline="") as fh:
+                raw = fh.read()
+            mode_bits = stat.S_IMODE(real.stat().st_mode)
+        nl = "\r\n" if "\r\n" in raw else "\n"
+        lines = raw.splitlines(keepends=True)
+        starts = [i for i, line in enumerate(lines)
+                  if not line.startswith((" ", "\t"))
+                  and re.fullmatch(r"budget:\s*(#.*)?", line.rstrip("\r\n"))]
+        if starts:
+            start = starts[0]
+            end = self._scope_block_end(lines, start)
+            indent = self._scope_child_indent(lines, start, end)
+            entries: list[int] = []
+            j = start + 1
+            while j < end:
+                raw_line = lines[j].rstrip("\r\n")
+                stripped = raw_line.strip()
+                if (stripped and not stripped.startswith("#")
+                        and self._leading_ws(raw_line) == indent
+                        and re.match(r"(max_actions_per_cycle|max_actions_per_engagement):", stripped)):
+                    entries.append(j)
+                j += 1
+            insert_at = entries[0] if entries else start + 1
+            removals = [(e, e + 1) for e in entries]
+            for extra in starts[1:]:
+                removals.append((extra, self._scope_block_end(lines, extra)))
+            new_lines = self._splice(lines, removals, insert_at,
+                                     self._budget_block_lines(limits, indent, nl))
+        else:
+            tail = list(lines)
+            if tail and not tail[-1].endswith(("\n", "\r")):
+                tail[-1] += nl
+            if tail and tail[-1].strip():
+                tail.append(nl)
+            new_lines = [*tail, f"budget:{nl}", *self._budget_block_lines(limits, "  ", nl)]
+        self._atomic_replace(real, "".join(new_lines), mode_bits)
+        try:
+            after = budget_limits(self.root)
+        except Exception:
+            after = None
+        if after != limits:
+            try:
+                self._atomic_replace(real, raw, mode_bits)
+            except OSError as exc:
+                raise ValueError(
+                    "budget-set postcondition failed and the previous engagement.yaml could not be "
+                    f"restored: {exc} — inspect 00_control/engagement.yaml before retrying"
+                ) from exc
+            raise ValueError(
+                "budget-set postcondition failed: after the rewrite budget_limits() does not equal "
+                "the requested caps (a duplicate or shadowed budget: block escaped the rewrite); "
+                "the previous file was restored and no event was recorded"
+            )
+
+    @staticmethod
+    def _budget_block_lines(limits: dict[str, int], indent: str = "  ", nl: str = "\n") -> list[str]:
+        return [f"{indent}max_actions_per_cycle: {limits['max_actions_per_cycle']}{nl}",
+                f"{indent}max_actions_per_engagement: {limits['max_actions_per_engagement']}{nl}"]
+
     # ---------- action + gate ----------
     def record_action(self, action: dict[str, Any], actor: str = "controller") -> dict[str, Any]:
         required = [
@@ -1549,6 +1875,29 @@ class ControlPlane:
             "preflight": redact(dict(normalized)),
         }
         with _lock(self.root):
+            # The budget check shares the critical section with the token write: two
+            # concurrent prepares cannot both slip past the last available slot.
+            limits = budget_limits(self.root)
+            if isinstance(limits, str):
+                raise ValueError(
+                    "engagement budget block is malformed — max_actions_per_cycle and "
+                    "max_actions_per_engagement must be plain non-negative integers; repair it with "
+                    "`researchctl budget set` before any live action"
+                )
+            counts = self.action_counts()
+            used_cycle = counts["cycles"].get(cycle_id, 0)
+            cap_cycle = (limits or {}).get("max_actions_per_cycle")
+            cap_total = (limits or {}).get("max_actions_per_engagement")
+            if cap_cycle is not None and used_cycle >= cap_cycle:
+                raise ValueError(
+                    f"cycle budget exhausted ({used_cycle}/{cap_cycle}) — record a human-approved "
+                    "raise via `researchctl budget set`"
+                )
+            if cap_total is not None and counts["engagement"] >= cap_total:
+                raise ValueError(
+                    f"engagement budget exhausted ({counts['engagement']}/{cap_total}) — record a "
+                    "human-approved raise via `researchctl budget set`"
+                )
             existing = self._read_events()
             prepared = 0
             if self._tokens_file().exists():

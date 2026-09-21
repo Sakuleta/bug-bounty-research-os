@@ -74,6 +74,13 @@ Do not infer identity from the workspace name, email filename, or conversation m
 # External-model judgment (TypeSafe Jev triage/claims seams) — ALLOWED | DENIED; default DENIED.
 external_judgment: "DENIED"
 
+# Live-action budget, machine-enforced by `researchctl prepare` and re-checked by
+# `tools/audit.py`: counted as recorded actions plus outstanding preflight tokens.
+# Change only through `researchctl budget set` (human_reference required once set).
+budget:
+  max_actions_per_cycle: 20
+  max_actions_per_engagement: 200
+
 program:
   name: "<PROGRAM_NAME>"
   platform: "<HACKERONE|BUGCROWD|INTIGRITI|DIRECT|OTHER>"
@@ -276,10 +283,6 @@ auto_exploit: false
 Injection and retrieval:
 
 - Direct prompt injection crossing a trust or capability boundary
-- Indirect prompt injection via ingested third-party content
-- Stored injection via RAG corpus, memory, or shared workspace
-- Retrieval authorization bypass (unauthorized documents returned)
-- RAG corpus poisoning by a lower-privilege contributor
-- Retrieval-layer ACL drift: chunk, citation, or embedding returned where the
+- In
 
 [CONTEXT_TRUNCATED]

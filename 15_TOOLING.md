@@ -415,7 +415,15 @@ executor-side scope re-checks (`researchctl prepare` semantics and the controlle
 executors), the web-fetch gate (an unreadable scope file denies the fetch), and a write
 guard that throws while the call names protected material. Command-line/interpreter
 paths remain advisory interception: a scope decision made inside an interpreter script
-or a bash-invoked CLI is not visible to the plugin. To disable it, delete its row in
+or a bash-invoked CLI is not visible to the plugin.
+Verify the install is present and current with `python3 tools/harness_check.py
+[--repo PATH] [--dsh-home PATH] [--json]`: it hashes
+`<dsh-home>/profiles/*/plugins/research-os-enforcer/index.js` against
+`dsh-plugin/index.js` (OK / MISSING / DRIFT), reads the last `APPLY` line's age from
+`research-os-enforcer.log` and warns when it predates the newest INSTALLED copy that
+reported OK — the repo file's mtime says nothing about what the host loaded (restart
+pending). Exit 0 when at least one profile is OK and none DRIFT, else 1 — a drifted
+install is an unenforced workspace. To disable it, delete its row in
 `~/.dsh/profiles/web/cordis.patch.yml` and restart the host.
 
 ### Residual risks (v1, accepted)
@@ -451,6 +459,67 @@ or a bash-invoked CLI is not visible to the plugin. To disable it, delete its ro
 - The browser gate judges install shape per command segment and only segments that name
   browser tooling: a browser launch hidden inside an interpreter script or a
   non-browser-shaped command segment is not detectable by command scanning.
+
+## Action budget (machine-enforced)
+
+Live-action capacity is capped in `00_control/engagement.yaml`:
+
+```yaml
+budget:
+  max_actions_per_cycle: 20
+  max_actions_per_engagement: 200
+```
+
+`researchctl prepare` counts each cycle's recorded `ACTION_RECORDED` events PLUS its
+outstanding (unconsumed, unexpired) preflight tokens, and the engagement totals; when the
+next action would exceed either cap it refuses with the count —
+`cycle budget exhausted (N/M) — record a human-approved raise via researchctl budget set`
+(or the `engagement` variant). A malformed block (a value that is not a plain
+non-negative integer) fails closed: no live action until it is repaired. An absent block
+or absent key means no cap for that scope.
+
+- `researchctl budget status` — JSON with `limits`, `counts` (per cycle + engagement) and
+  `remaining`.
+- `researchctl budget set payload.json` — `{max_actions_per_cycle,
+  max_actions_per_engagement, source_reference, human_reference?}`. It rewrites only the
+  top-level `budget:` block (same splice/atomic-replace helpers as `scope-set`, every
+  other byte preserved, postcondition re-parsed in-lock) and records `BUDGET_CHANGED`
+with `{previous, new, source_reference, human_reference}`. `source_reference` is always
+required; `human_reference` is required once limits exist or a prior `BUDGET_CHANGED`
+is recorded — raising a cap is a human decision, and the template ships
+`20`/`200`. Lowering a cap below the current recorded action count is allowed (the
+recorded actions already happened) but the event carries `below_current_count: true`
+and the CLI prints a warning: the audit errors on the over-cap actions until a
+human-approved raise.
+- `tools/audit.py` errors when a cycle's or the engagement's recorded action count
+  exceeds the configured cap, and warns when recorded actions exist with no `budget:`
+  block (legacy workspaces stay readable).
+
+## Executor replay + capture integrity
+
+`tools/test_replay.py` is the executor's replay-diff harness:
+
+- Lab mode (no argument): a stdlib HTTP server on `127.0.0.1` serves canned endpoints
+  (`GET /ok`, `POST /echo`, `GET /secret?token=abc`, `GET /redirect`); a temp workspace
+  whose scope is exactly that localhost origin runs a fixture set of canonical shapes
+  through `dsh-plugin/index.js` `runControlledRequest` TWICE with fresh preflight
+  tokens, and each shape's HTTP status, post-redaction header set and body sha256 must
+  replay identically. The `?token=` fixture also proves the capture masks the value.
+  Lab mode needs `node` on PATH; without it the harness prints
+  `SKIP (node unavailable) — replay diff NOT verified` and exits 0 — a green line that
+  verified nothing, so read it, and use integrity mode (pure Python, no node) for
+  capture checks.
+- Integrity mode (`python3 tools/test_replay.py <workspace>`): the path must be a
+  research workspace (`OS_VERSION` plus `08_artifacts/raw` or `11_runtime/events.jsonl`;
+  anything else is refused non-zero so a random directory cannot pass vacuously). For
+  every `08_artifacts/raw/*.http` capture it parses the request/status lines, re-scans
+  the bytes for secret-shaped values (`control_plane.secret_pattern_hits`) and asserts
+  the canonical masker is idempotent on the file (applying it again changes nothing).
+  Every printed failure fragment is routed through `control_plane.redact`; a secret hit
+  prints only the pattern name, file and line number — never the raw line or diff.
+
+No external network; temp workspaces are removed; exits non-zero with a readable
+(masked) diff on any drift.
 
 ## Triage aid (TypeSafe Jev, optional)
 

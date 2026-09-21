@@ -5,8 +5,52 @@ Both tools/build_context.py and tools/validate_workspace.py are thin adapters
 over this module. See 12_knowledge/README.md for the pack contract.
 """
 import math
+import os
 import re
 from pathlib import Path
+
+DEFAULT_PACK_CAP = 4
+
+
+def selection_query(root: Path, objective: str | None = None) -> str:
+    """The ONE query the knowledge ranking runs on: the cycle objective first, then the
+    same active-cycle / last-result / unknowns texts `build_context.py` renders.
+
+    Both the agent-facing KNOWLEDGE_SELECTION block and the RUNNING triage-coverage
+    guard consume this, so the guard demands exactly the set the context shows.
+    Limits mirror the context projection so the two cannot rank different text."""
+    parts = [objective or ""]
+    for rel, limit in (("11_runtime/active-cycle.yaml", 2500),
+                       ("11_runtime/last-result.md", 1800),
+                       ("10_learning/unknowns.yaml", 1800)):
+        try:
+            parts.append((root / rel).read_text(errors="ignore")[:limit])
+        except OSError:
+            parts.append("")
+    return "\n".join(p for p in parts if p)
+
+
+def selection_cap() -> int:
+    """The auto-selection cap both consumers apply: KNOWLEDGE_PACK_CAP env, default 4."""
+    try:
+        return max(1, int(os.getenv("KNOWLEDGE_PACK_CAP", DEFAULT_PACK_CAP)))
+    except ValueError:
+        return DEFAULT_PACK_CAP
+
+
+def index_problem(root: Path) -> str | None:
+    """Why 12_knowledge/INDEX.yaml cannot be parsed for ranking, or None when it is
+    readable and holds at least one pack. Callers fail closed: without an index there
+    is no auto-ranking and a coverage guard would pass vacuously."""
+    idx = root / "12_knowledge" / "INDEX.yaml"
+    if not idx.exists():
+        return "12_knowledge/INDEX.yaml is missing"
+    text = idx.read_text(errors="ignore")
+    if "\t" in text or "packs:" not in text:
+        return "12_knowledge/INDEX.yaml is unparseable (invalid YAML shape)"
+    if not parse_index(idx):
+        return "12_knowledge/INDEX.yaml is unparseable (no packs found)"
+    return None
 
 
 def parse_index(idx: Path):

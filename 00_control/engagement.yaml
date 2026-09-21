@@ -5,6 +5,13 @@
 # External-model judgment (TypeSafe Jev triage/claims seams) — ALLOWED | DENIED; default DENIED.
 external_judgment: "DENIED"
 
+# Live-action budget, machine-enforced by `researchctl prepare` and re-checked by
+# `tools/audit.py`: counted as recorded actions plus outstanding preflight tokens.
+# Change only through `researchctl budget set` (human_reference required once set).
+budget:
+  max_actions_per_cycle: 20
+  max_actions_per_engagement: 200
+
 program:
   name: "<PROGRAM_NAME>"
   platform: "<HACKERONE|BUGCROWD|INTIGRITI|DIRECT|OTHER>"

@@ -81,6 +81,16 @@ def main() -> int:
     frs = fr.add_subparsers(dest="op", required=True)
     x = frs.add_parser("record"); x.add_argument("json"); x.set_defaults(fn="freshness-record")
     x = frs.add_parser("status"); x.set_defaults(fn="freshness-status")
+    bu = sub.add_parser("budget")
+    bus = bu.add_subparsers(dest="op", required=True)
+    x = bus.add_parser("status", help="limits, counted actions (recorded + outstanding tokens) and remaining")
+    x.set_defaults(fn="budget-status")
+    x = bus.add_parser("set", help='{"max_actions_per_cycle": N, "max_actions_per_engagement": N, '
+                                   '"source_reference": "...", "human_reference": "ticket-id (required once limits exist)"}; '
+                                   "a cap below the current recorded action count is recorded as below_current_count "
+                                   "and tools/audit.py errors on the over-cap actions until a human-approved raise")
+    x.add_argument("json")
+    x.set_defaults(fn="budget-set")
     w = sub.add_parser("worker")
     w.add_argument("json")
     w.set_defaults(fn="worker")
@@ -139,6 +149,10 @@ def main() -> int:
             out = cp.record_freshness(load_json(ns.json))
         elif ns.fn == "freshness-status":
             out = cp.freshness_report()
+        elif ns.fn == "budget-status":
+            out = cp.budget_status()
+        elif ns.fn == "budget-set":
+            out = cp.set_budget(load_json(ns.json))
         elif ns.fn == "worker":
             out = cp.merge_worker(load_json(ns.json))
         elif ns.fn == "audit-record":
@@ -148,6 +162,11 @@ def main() -> int:
         else:
             raise ValueError(ns.fn)
         print(json.dumps(out, ensure_ascii=False, indent=2))
+        if (ns.fn == "budget-set" and isinstance(out, dict)
+                and out.get("payload", {}).get("below_current_count")):
+            print("warning: the new caps are below the current recorded action counts — "
+                  "tools/audit.py errors on the over-cap actions until a human-approved raise "
+                  "(`researchctl budget set` with human_reference)", file=sys.stderr)
         if ns.fn == "scope-check" and not out["in_scope"]:
             return 3
         return 0

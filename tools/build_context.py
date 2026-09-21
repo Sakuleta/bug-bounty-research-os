@@ -5,10 +5,9 @@ import json, os, re, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from control_plane import external_judgment_allowed, scope_check
-from knowledge_index import top_packs
+from knowledge_index import selection_cap, selection_query, top_packs
 
 DEFAULT_BUDGET=10000
-DEFAULT_PACK_CAP=4
 
 def read(p:Path, limit:int|None=None)->str:
     try:
@@ -99,8 +98,9 @@ def safety_kernel(root:Path)->str:
         identity,
     ])
 
-def assemble(root:Path,budget:int=DEFAULT_BUDGET,pack_cap:int=DEFAULT_PACK_CAP)->str:
+def assemble(root:Path,budget:int=DEFAULT_BUDGET,pack_cap:int|None=None)->str:
     rt=root/'11_runtime'; out='# Current Context\n\n'
+    pack_cap=max(1,pack_cap) if pack_cap is not None else selection_cap()
     kernel=section('SAFETY KERNEL',safety_kernel(root))
     if kernel: out+=kernel+'\n'
     # The safety kernel is the floor: it outranks the budget. When the budget cannot
@@ -112,8 +112,9 @@ def assemble(root:Path,budget:int=DEFAULT_BUDGET,pack_cap:int=DEFAULT_PACK_CAP)-
     parts.append(section('ENGAGEMENT POLICY',read(root/'00_control/engagement.yaml',2200)))
     parts.append(section('RUN STATUS',read(rt/'run-status.yaml',1000)))
     parts.append(section('FRESHNESS',read(root/'10_learning/freshness.yaml',1200)))
-    query='\n'.join([p for p in [read(rt/'active-cycle.yaml',2500),read(rt/'last-result.md',1800),read(root/'10_learning/unknowns.yaml',1800)] if p])
-    ranked = top_packs(root,query,k=pack_cap)
+    # The shared seam: the RUNNING knowledge-triage guard ranks with the same query and
+    # cap, so the coverage it demands is exactly this rendered set.
+    ranked = top_packs(root,selection_query(root),k=pack_cap)
     # Decision log, placed FIRST so it survives budget truncation: the controller sees
     # WHAT was auto-selected so it can confirm or override per cycle (knowledge triage
     # is enforced by audit.py — this line is its input).
@@ -149,12 +150,9 @@ def rebuild(root, budget=None, pack_cap=None):
     if budget is None:
         try: budget=int(os.getenv('CONTEXT_BUDGET',DEFAULT_BUDGET))
         except ValueError: budget=DEFAULT_BUDGET
-    if pack_cap is None:
-        try: pack_cap=int(os.getenv('KNOWLEDGE_PACK_CAP',DEFAULT_PACK_CAP))
-        except ValueError: pack_cap=DEFAULT_PACK_CAP
     p=root/'11_runtime'; p.mkdir(parents=True,exist_ok=True)
     body_budget=max(1,budget-len(GENERATED_HEADER)-2)
-    out=assemble(root,body_budget,max(1,pack_cap))
+    out=assemble(root,body_budget,pack_cap)
     text=GENERATED_HEADER+'\n\n'+out
     (p/'current-context.md').write_text(text)
     return len(text)

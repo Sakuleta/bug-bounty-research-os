@@ -27,8 +27,11 @@ OBSERVE → MODEL → PULL (knowledge triage + current research) → ASK → HYP
 ```
 
 PULL is mandatory, not decorative: every cycle plan carries `knowledge_triage` — one
-USE/SKIP line per plausibly-relevant `12_knowledge/` pack with a reason (the canonical
-seam refuses RUNNING without it; it is a precondition, not an audit note).
+USE/SKIP line per plausibly-relevant `12_knowledge/` pack with a reason, and the
+canonical seam refuses RUNNING until the list covers every pack the auto-ranking
+(`current-context.md` KNOWLEDGE_SELECTION, `researchctl triage`) puts in the top-k —
+confirm each or override it with a reason; silent omission is the failure the guard
+exists for. It is a precondition, not an audit note.
 `researchctl triage "<cycle question>"` ranks all packs for that line (TypeSafe Jev
 Choice with a `none` option, IDF fallback without `TYPESAFE_API_KEY`). USE means
 loading the pack's skill at `.dsh/skills/<pack>/SKILL.md`, which points at the field
@@ -81,6 +84,15 @@ the audit does not check this; the loop above does.
   (`RESEARCH_OS_MAX_BODY_BYTES`, 5 MiB), with the capture marked truncated and holding
   the bytes actually read; sensitive query values are masked in captures, tool text
   and executor logs.
+- Live actions are budgeted: the top-level `budget:` block in `00_control/engagement.yaml`
+  (`max_actions_per_cycle`, `max_actions_per_engagement`) caps the engagement, counted by
+  `researchctl prepare` as recorded actions plus outstanding (unconsumed, unexpired)
+  preflight tokens; the next prepare refuses with the count when it would exceed either
+  cap, and a malformed block fails closed. `researchctl budget status` shows limits,
+  counts and remaining; raising a cap is a human decision recorded through
+  `researchctl budget set` (source_reference always, human_reference once limits exist).
+  `tools/audit.py` errors on recorded over-cap and warns when actions exist with no
+  block.
 - External-model judgment is default-DENIED per engagement: the TypeSafe seams
   (`researchctl triage`, `researchctl claims-check`) consult the top-level
   `external_judgment` key in `00_control/engagement.yaml` before any network call —
@@ -126,6 +138,10 @@ Inventory everything (`tools/provision.py --check-only` → `11_runtime/` regist
 then use the strongest authorized capability (`15_TOOLING.md`, incl. the BUA browser
 pattern). Missing lab dependencies are provisioning tasks, not human tasks. Isolate
 everything: dedicated browser profiles, containers, volumes, lab-only credentials.
+Verify the machine-level enforcer is actually present and current with
+`python3 tools/harness_check.py` — per profile OK/MISSING/DRIFT against
+`dsh-plugin/index.js`, plus a restart-pending warning when the last `APPLY` predates
+the installed plugin; an absent or drifted install enforces nothing.
 
 ## 5. Browser (BUA) pattern
 
@@ -157,6 +173,11 @@ disclosure, or third-party contact without explicit human approval, ever.
 ## 8. Audits (prove it, don't feel it)
 
 Run `tools/audit.py` regularly; all suites under `tools/test_*.py` must stay green.
+`tools/test_replay.py` replays a fixture set of canonical shapes through the JS executor
+core twice against a local canned server and diffs HTTP status, the post-redaction
+header set and the body hash per capture; with a workspace argument it re-scans every
+`08_artifacts/raw/*.http` capture for secret-shaped values and proves the masker is
+idempotent on the bytes.
 Record scope/hygiene/open-hypothesis (and coverage/negative/novelty-duplicate when
 earned) via `researchctl audit-record` with evidence refs and a sentence summary
 (≥ 20 chars, ≥ 3 words, naming what was audited); scope/coverage/open-hypothesis
