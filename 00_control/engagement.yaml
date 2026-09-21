@@ -2,6 +2,9 @@
 # Populate ONLY from authoritative program sources.
 # Never copy values from another engagement.
 
+# External-model judgment (TypeSafe Jev triage/claims seams) — ALLOWED | DENIED; default DENIED.
+external_judgment: "DENIED"
+
 program:
   name: "<PROGRAM_NAME>"
   platform: "<HACKERONE|BUGCROWD|INTIGRITI|DIRECT|OTHER>"

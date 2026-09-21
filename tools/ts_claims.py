@@ -12,27 +12,41 @@ from __future__ import annotations
 import json
 import os
 import sys
-import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from control_plane import ControlPlane  # noqa: E402
+from control_plane import ControlPlane, external_judgment_allowed  # noqa: E402
+from ts_http import model_name, post_json  # noqa: E402
 
-API = "https://api.typesafe.ai/v1/systemone"
-MODEL = "jev-latest"
 AUTO_ACCEPT = 0.8
 EXCERPT_CAP = 6000
+POLICY_NOTE = "external judgment denied by engagement policy"
+NO_KEY_NOTE = "no TYPESAFE_API_KEY (or live=False): no verdicts were produced"
+
+
+def _unavailable(note: str, auto_accept: float) -> dict:
+    """The one shape of an `unavailable` seam result: no verdicts, no model, a reason."""
+    return {"source": "unavailable", "auto_accept": auto_accept, "results": [],
+            "summary": {"checked": 0, "flagged": 0},
+            "model": None, "usage": {}, "note": note}
 
 
 def evidence_excerpt(root: Path, ref: str, cap: int = EXCERPT_CAP) -> str:
-    """Registered evidence text, bounded. Never guesses a path from a filename."""
+    """Registered evidence text, bounded, read from the content-addressed store copy.
+
+    The store copy under 11_runtime/evidence-store/ is the registered artifact (audits
+    verify it; review quotes must match it); the living path is mutable and must never
+    be what the seam reasons over. A legacy record without a store_path falls back to
+    its readable living path, never a guessed filename.
+    """
     index = ControlPlane(root).evidence_index()
     meta = index.get(ref)
     if not meta:
         raise ValueError(f"unknown evidence ref: {ref}")
-    path = root / str(meta.get("path", ""))
+    store_rel = str(meta.get("store_path") or "")
+    path = (root / store_rel) if store_rel else (root / str(meta.get("path", "")))
     if not path.is_file():
-        raise ValueError(f"evidence file missing: {meta.get('path')}")
+        raise ValueError(f"evidence store copy missing: {store_rel or meta.get('path')}")
     blob = path.read_bytes()
     if b"\x00" in blob[:4096]:
         return f"[binary evidence {ref}, {len(blob)} bytes]"
@@ -43,13 +57,8 @@ def evidence_excerpt(root: Path, ref: str, cap: int = EXCERPT_CAP) -> str:
 
 
 def _http_call(state: dict, questions: dict, timeout: int) -> dict:
-    body = json.dumps({"state": state, "model": MODEL, "questions": questions}).encode()
-    req = urllib.request.Request(API, data=body, headers={
-        "Authorization": f"Bearer {os.environ.get('TYPESAFE_API_KEY', '')}",
-        "Content-Type": "application/json",
-    })
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode())
+    return post_json({"state": state, "model": model_name(), "questions": questions},
+                     api_key=os.environ.get("TYPESAFE_API_KEY", ""), timeout=timeout)
 
 
 def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
@@ -64,11 +73,12 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
     if not isinstance(claims, list) or not claims:
         raise ValueError("claims packet needs a non-empty 'claims' list")
     key = os.environ.get("TYPESAFE_API_KEY", "")
-    if not live or (client is None and not key):
-        return {"source": "unavailable", "auto_accept": auto_accept, "results": [],
-                "summary": {"checked": 0, "flagged": 0},
-                "model": None, "usage": {},
-                "note": "no TYPESAFE_API_KEY (or live=False): no verdicts were produced"}
+    if not live:
+        return _unavailable(NO_KEY_NOTE, auto_accept)
+    if not external_judgment_allowed(root):
+        return _unavailable(POLICY_NOTE, auto_accept)
+    if client is None and not key:
+        return _unavailable(NO_KEY_NOTE, auto_accept)
     call = client or (lambda s, q: _http_call(s, q, timeout))
     results = []
     usage_in = usage_out = 0

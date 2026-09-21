@@ -2,6 +2,15 @@
 
 # Current Context
 
+## SAFETY KERNEL
+
+engagement: BOOTSTRAP
+scope: gate: unset — target traffic denied until scope-set (default deny)
+external judgment: DENIED
+active cycle: none
+human gate: none pending
+identity: handle=UNKNOWN — reference=UNKNOWN
+
 ## ENTRY CONTRACT
 
 # START — Research OS Entry Contract
@@ -61,6 +70,9 @@ Do not infer identity from the workspace name, email filename, or conversation m
 # Runtime-only engagement configuration.
 # Populate ONLY from authoritative program sources.
 # Never copy values from another engagement.
+
+# External-model judgment (TypeSafe Jev triage/claims seams) — ALLOWED | DENIED; default DENIED.
+external_judgment: "DENIED"
 
 program:
   name: "<PROGRAM_NAME>"
@@ -268,7 +280,6 @@ Injection and retrieval:
 - Stored injection via RAG corpus, memory, or shared workspace
 - Retrieval authorization bypass (unauthorized documents returned)
 - RAG corpus poisoning by a lower-privilege contributor
-- Retrieval-layer ACL drift: chunk, citation, or embedding returned where the owning document's ACL denies the requester
-- Embedding inversion and cross-context vector-store leakage
-- Provenance loss: untrusted content (a retrieved page, a ticket, a commit message) re-labeled or treated as an instruction
-- Multimodal injection: instruction hidden in an image / audio / PDF that the model reads — including adversarial perturbations, not only visible hidd
+- Retrieval-layer ACL drift: chunk, citation, or embedding returned where the
+
+[CONTEXT_TRUNCATED]

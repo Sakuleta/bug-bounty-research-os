@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import unquote
 
 CYCLE_EDGES = {
     "PLANNED": {"READY", "BLOCKED"},
@@ -342,6 +343,26 @@ _SECRET_KEYS = {
 }
 
 
+def external_judgment_allowed(root: Path) -> bool:
+    """Does the engagement allow external-model judgment (the TypeSafe seams)?
+
+    Reads the top-level `external_judgment` key in 00_control/engagement.yaml (the
+    key and its value are matched case-insensitively; `ALLOWED` enables). Default
+    DENIED: an absent, unreadable or unrecognized setting denies, so no config gap
+    and no CLI flag can route engagement evidence to an external model service
+    without the researcher's explicit opt-in key.
+    """
+    try:
+        text = (root / "00_control" / "engagement.yaml").read_text(errors="ignore")
+    except OSError:
+        return False
+    # Horizontal whitespace only between key and value: `external_judgment:\n  ALLOWED`
+    # is not a scalar assignment and must stay DENIED (a `\s*` here would read the next
+    # line as the value — fail open).
+    match = re.search(r"^external_judgment:[^\S\n]*[\"']?([A-Za-z_-]+)", text, re.M | re.I)
+    return bool(match) and match.group(1).strip().upper() == "ALLOWED"
+
+
 def now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -412,15 +433,97 @@ def review_quote_problem(root: Path, index: dict[str, dict[str, Any]], item: Any
     return None
 
 
+def canonical_request_shape(shape: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a request_shape to the canonical digest form the executor hashes.
+
+    Canonical form (identical to dsh-plugin `shapeFromArgs` / `browserShapeFromArgs`
+    and their `canonicalDigest`): `{method (uppercased), url, principal[, headers
+    (lowercase keys, values untouched)][, body_sha256]}`; the browser family's
+    `{url, principal}` stays exactly that — keys the caller did not supply are not
+    invented. When `body` is present and `body_sha256` is absent, the digest input
+    computes `body_sha256 = sha256(body.encode("utf-8"))` and drops `body`; an empty or
+    null body contributes nothing. Unknown keys are dropped — the canonical form is
+    closed, so a typo cannot ride along inside the hashed bytes.
+    """
+    out: dict[str, Any] = {}
+    if "method" in shape:
+        out["method"] = str(shape["method"]).upper()
+    if "url" in shape:
+        out["url"] = str(shape["url"])
+    if "principal" in shape:
+        out["principal"] = str(shape["principal"])
+    headers = shape.get("headers")
+    if isinstance(headers, dict):
+        out["headers"] = {str(k).lower(): str(v) for k, v in headers.items()}
+    body = shape.get("body")
+    body_sha = shape.get("body_sha256")
+    if body is not None and body_sha is not None:
+        raise ValueError("request_shape cannot carry both 'body' and 'body_sha256' — the digest input is ambiguous")
+    if body is not None and not isinstance(body, str):
+        raise ValueError("request_shape 'body' must be a string (no implicit stringification of numbers/booleans)")
+    if body is not None and body != "":
+        out["body_sha256"] = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    elif body_sha is not None:
+        out["body_sha256"] = str(body_sha)
+    return out
+
+
 def _json_dump(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+# Query/fragment parameter names whose VALUE is a credential. Matched as a
+# case-insensitive SUBSTRING after percent-decoding (`access_token`, `client_secret`,
+# `X-Amz-Signature`, `token2`, `code`, `session_id` all match). Mirrors the enforcer's
+# `redactUrlSecrets` (dsh-plugin/index.js) so both sides mask the same values.
+_SENSITIVE_QUERY_MARKERS = re.compile(r"token|secret|key|auth|sig|session|code|password|passwd|cookie", re.I)
+# A sensitive assignment nested inside ANOTHER component's decoded value: a double-encoded
+# `next=/cb%26token%3Dxyz` decodes once to `next=/cb&token=xyz`, so a downstream consumer
+# that decodes `next` would see the token. Matched after a `&`/`;` separator or at the
+# value's start; the WHOLE component value is masked when it matches.
+_NESTED_SENSITIVE_ASSIGNMENT = re.compile(
+    r"(^|[&;])\s*[A-Za-z0-9_.-]*(?:token|secret|key|auth|sig|session|code|password|passwd|cookie)"
+    r"[A-Za-z0-9_.-]*\s*=",
+    re.I,
+)
+# A query-or-fragment span inside any string: `?…` or `#…` up to whitespace, a quote
+# (a URL embedded in JSON/Markdown ends at the quote), the next `?`/`#`, or the end of
+# the string. Scheme/host/path bytes are never touched.
+_QUERY_OR_FRAGMENT = re.compile(r"[?#][^\s\"'#?]*")
+
+
+def _redact_query_component(part: str) -> str:
+    """Mask one `name=value` component when its decoded name — or a sensitive
+    assignment nested in its decoded value — is sensitive."""
+    eq = part.find("=")
+    name = part if eq < 0 else part[:eq]
+    try:
+        decoded = unquote(name)
+    except ValueError:  # pragma: no cover - unquote is total on str
+        decoded = name
+    if _SENSITIVE_QUERY_MARKERS.search(decoded):
+        return f"{name}=[REDACTED]"
+    if eq < 0:
+        return part
+    value = part[eq + 1:]
+    if _NESTED_SENSITIVE_ASSIGNMENT.search(unquote(value)):
+        return f"{name}=[REDACTED]"
+    return f"{name}={value}"
+
+
+def _redact_query_span(span: str) -> str:
+    """Split a query/fragment span on `&`/`;` (separators preserved) and mask parts."""
+    return "".join(
+        token if index % 2 else _redact_query_component(token)
+        for index, token in enumerate(re.split(r"([&;])", span))
+    )
 
 
 def _scrub_str(value: str) -> str:
     out = value
     for pattern in _SECRET_PATTERNS:
         out = pattern.sub("[REDACTED]", out)
-    return out
+    return _QUERY_OR_FRAGMENT.sub(lambda m: m.group(0)[0] + _redact_query_span(m.group(0)[1:]), out)
 
 
 def redact(obj: Any) -> Any:
@@ -1379,6 +1482,13 @@ class ControlPlane:
         arrives; the controlled executor records ACTION_RECORDED after the call.
         Tokens live in a transient store (11_runtime/action-tokens.jsonl), never
         the ledger — the ledger stays append-only lifecycle history.
+
+        `request_shape` is normalized to the canonical digest form BEFORE hashing
+        (identical to the executor's `shapeFromArgs`): method uppercased, header keys
+        lowercased (values untouched), and a body without `body_sha256` folded into
+        `body_sha256 = sha256(body)` with `body` dropped — see
+        `canonical_request_shape`. The token's preflight carries the normalized shape,
+        so a hand-built prepare and a tool call cannot disagree about the digest bytes.
         """
         required = [
             "target", "scope_status", "account", "object_owner", "purpose", "hypothesis",
@@ -1402,6 +1512,7 @@ class ControlPlane:
         shape = action.get("request_shape")
         if not isinstance(shape, dict) or not shape:
             raise ValueError("request_shape must be a non-empty object (canonical digest input)")
+        shape = canonical_request_shape(shape)
         scope = scope_check(self.root, str(shape.get("url", "")))
         if scope["gate"] == "unenforceable":
             raise ValueError(
@@ -1419,6 +1530,7 @@ class ControlPlane:
                 f"(00_control/engagement.yaml assets={scope['assets']})"
             )
         digest = hashlib.sha256(_json_dump(shape).encode("utf-8")).hexdigest()
+        normalized = {**action, "request_shape": shape}
         issued = time.time()
         token = {
             "action_id": "",
@@ -1434,7 +1546,7 @@ class ControlPlane:
             "consumed": False,
             # The full validated preflight travels with the token so the controlled
             # executor can write ACTION_RECORDED after the call without re-typing it.
-            "preflight": redact(dict(action)),
+            "preflight": redact(dict(normalized)),
         }
         with _lock(self.root):
             existing = self._read_events()
@@ -1443,6 +1555,11 @@ class ControlPlane:
                 prepared = sum(1 for line in self._tokens_file().read_text(errors="ignore").splitlines() if line.strip())
             aid = f"A-{sum(1 for e in existing if e.get('type') == 'ACTION_RECORDED') + prepared + 1:06d}"
             token["action_id"] = aid
+            # The token store and the prepare output are audit-visible: scrub the same
+            # secret shapes and sensitive query/fragment values the ledger uses, so a
+            # target URL cannot smuggle a credential into either surface. The digest
+            # was computed over the raw shape and is a hex string — unaffected.
+            token = redact(token)
             with self._tokens_file().open("a", encoding="utf-8") as fh:
                 fh.write(_json_dump(token) + "\n")
         self.refresh()

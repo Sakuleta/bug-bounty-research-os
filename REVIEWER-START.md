@@ -18,23 +18,24 @@ are in the request you received.
   on. Do not stall and do not invent evidence.
 - Cite findings as `path:line` (repo-relative) and label each as
   `[code-verified]`, `[inferred]`, or `[assumption]`.
-- Line counts below are exact `wc -l` values for this tree (Sprint-2 review
-  fixes included); re-derive them if the tree moved.
+- Line counts below are exact `wc -l` values for this tree at tag `v7.4`
+  (`OS_VERSION` 7.4; verified programmatically when the tree moved); re-derive them if
+  the tree moved.
 
 ## Tier 1 — the load-bearing seam (read these first)
 
-| Path | ~lines | Why it matters |
+| Path | lines (exact `wc -l`) | Why it matters |
 |---|---|---|
 | `ARCHITECTURE.md` | 102 | The claimed shape: event log → projections → guards |
 | `START.md` | 154 | The engagement entry contract: loop, gates, closure |
-| `AGENTS.md` | 159 | The operational flow an agent must follow |
-| `tools/control_plane.py` | 1922 | **The single policy seam**: event schema (incl. `os_version` stamping), state machine, projections, guards, audit/freshness/evidence/technique records |
+| `AGENTS.md` | 177 | The operational flow an agent must follow |
+| `tools/control_plane.py` | 2024 | **The single policy seam**: event schema (incl. `os_version` stamping), state machine, projections, guards, audit/freshness/evidence/technique records |
 | `tools/audit.py` | 864 | What the machine audit actually checks (and what it does not): reviewed-cycle binding, audit content, closure-proof parsing, `--emit-proof` |
-| `dsh-plugin/index.js` | 1046 | Enforcement R1–R6: write protection, raw-egress gate, single-use preflight tokens, executor-side scope, browser-launch gate, capture redaction |
-| `tools/test_control_plane.py` | 1672 | Executable spec for the seam |
+| `dsh-plugin/index.js` | 1257 | Enforcement R1–R6: write protection, raw-egress gate, single-use preflight tokens, executor-side scope, browser-launch gate, capture redaction |
+| `tools/test_control_plane.py` | 1828 | Executable spec for the seam |
 | `tools/test_scope_parity.py` | 125 | Cross-language scope parity: Python `scope_check` vs the enforcer `scopeReasonFor` (SKIPs when node is unavailable) |
-| `dsh-plugin/conformance.test.mjs` | 529 | Executable spec for the enforcer |
-| `dsh-plugin/executor.integration.test.mjs` | 240 | Executable spec for the executors |
+| `dsh-plugin/conformance.test.mjs` | 620 | Executable spec for the enforcer |
+| `dsh-plugin/executor.integration.test.mjs` | 507 | Executable spec for the executors |
 
 ## Tier 2 — worked run (judge coherence vs ceremony)
 
@@ -51,19 +52,19 @@ check whether the audit's PASS is earned.
 `05_HYPOTHESIS_ENGINE.md` (61) · `06_EVIDENCE_VALIDATION.md` (84) ·
 `07_AUDIT_CLOSURE.md` (150) · `08_human_gates.md` (68) · `09_RESEARCH_PROTOCOL.md` (61) ·
 `10_STATE_MODEL.md` (91) · `11_WORKER_PROTOCOL.md` (111) · `12_REPORT_PROTOCOL.md` (66) ·
-`13_RUNTIME.md` (61) · `15_TOOLING.md` (447) · `16_RESEARCH_LANES.md` (33) ·
+`13_RUNTIME.md` (61) · `15_TOOLING.md` (481) · `16_RESEARCH_LANES.md` (33) ·
 `17_DYNAMIC_TECHNIQUE_ENGINE.md` (101) · `18_MODERN_SURFACES.md` (49) ·
-`19_PROGRAM_LEARNING.md` (26) · `22_CONTEXT_MANIFEST.md` (25) ·
+`19_PROGRAM_LEARNING.md` (26) · `22_CONTEXT_MANIFEST.md` (32) ·
 `24_ADVANCED_TRADECRAFT.md` (39) · `25_MINIMUM_MODEL_OUTPUT.md` (20) ·
 `26_BOOTSTRAP_SEQUENCE.md` (51) · `28_CYCLE_STATE_MACHINE.md` (76) ·
-`29_SECURITY_HYGIENE.md` (54) · `31_FRESHNESS_WATCHTOWER.md` (76) ·
+`29_SECURITY_HYGIENE.md` (76) · `31_FRESHNESS_WATCHTOWER.md` (76) ·
 `32_AGENTIC_PARADIGM.md` (74) · `33_METHOD_SELF_ATTACK.md` (54)
 
 ## Tier 4 — remaining tools, knowledge, skills, schemas
 
-- Tools: `researchctl.py` (160, CLI over the seam), `cycle.py` (159),
-  `build_context.py` (80), `knowledge_index.py` (121), `ts_triage.py` (128),
-  `ts_claims.py` (125), `bua/run.mjs` (173, browser runner), `provision.py` (50),
+- Tools: `researchctl.py` (160), CLI over the seam, `cycle.py` (159),
+  `build_context.py` (166), `knowledge_index.py` (121), `ts_triage.py` (130),
+  `ts_claims.py` (135), `bua/run.mjs` (215), browser runner, `provision.py` (50),
   `validate_workspace.py` (95), `state.py` (45), `new_cycle.py` (16), and the
   other `test_*.py` suites.
 - Knowledge: `12_knowledge/INDEX.yaml` + 17 field-guide packs (~6.3k lines).

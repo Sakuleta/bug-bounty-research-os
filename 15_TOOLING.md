@@ -337,10 +337,14 @@ when an action lacks the nonce and closure (`actions_have_token_provenance`) fai
 versioned action does — legacy records stay tolerated. The enforcer denies raw
 browser-automation launches (playwright/puppeteer/selenium, `--headless`,
 remote-debugging) in OS workspaces outside this path; install-shaped commands and
-explicit-localhost work stay allowed. Known limit: a browser launch hidden inside an
-arbitrary interpreter script is not detectable by command scanning — the runner + token
-remains the sanctioned path. Interactive or state-changing flows extend the runner with a
-dedicated task script carrying its documented precondition.
+explicit-localhost work stay allowed. Install shape is judged **per command segment**:
+the gate stands down only when every `&&`/`||`/`;`/`|` segment that mentions browser
+tooling is install-shaped, so `npx playwright install chromium && npx playwright test
+<url>` and `npm install … && npx playwright test <url>` stay denied. Known limit: a
+browser launch hidden inside an arbitrary interpreter script is not detectable by
+command scanning — the runner + token remains the sanctioned path. Interactive or
+state-changing flows extend the runner with a dedicated task script carrying its
+documented precondition.
 
 ## Machine-level enforcement (DSH plugin, optional install)
 
@@ -364,12 +368,29 @@ and documents the gaps.
   php) and bash-invoked CLIs bypass it (documented v1 limit). Target traffic goes
   through the **`research_os_request` controlled executor**, which consumes the
   single-use preflight token from `python3 tools/researchctl.py <ROOT> prepare payload.json`
-  (canonical digest over `{method,url,principal[,headers][,body_sha256]}`), re-checks the
+  (canonical digest over `{method,url,principal[,headers][,body_sha256]}`; prepare
+  normalizes BEFORE hashing — method uppercased, header keys lowercased, values
+  untouched, a `body` without `body_sha256` folded into `sha256(body)` — so the
+  prepare-side digest always equals the executor's `shapeFromArgs` digest), re-checks the
   request host against the engagement asset list (`00_control/engagement.yaml`, same
   semantics as `prepare`) and refuses out-of-scope targets before any network I/O,
   captures the exchange under `08_artifacts/raw/`, registers it as evidence and records
   the action; localhost/lab traffic is never blocked. The token store
   (`11_runtime/action-tokens.jsonl`) is control-plane-owned and write-protected.
+  Executor robustness (v7.4): requests time out after `RESEARCH_OS_HTTP_TIMEOUT_MS`
+  (default 30000 ms) via AbortController; response bodies stop at
+  `RESEARCH_OS_MAX_BODY_BYTES` (default 5 MiB) — the capture holds the bytes read up to
+  the display cap and is marked when truncated (a mid-body abort is flagged
+  `partial: true` on the result). Capture request lines, tool text, the token store and
+  `DENY(executor)` log lines mask sensitive query/fragment values (`?token=…` →
+  `?token=[REDACTED]`, `#code=…` → `#code=[REDACTED]`; the name is matched as a
+  case-insensitive substring after percent-decoding, so `access_token`, `client_secret`
+  and `X-Amz-Signature` are covered; scheme/host/port/path are kept). Receipts are
+  transactional: if capture
+  registration or the `ACTION_RECORDED` write fails after the request was sent, the
+  tool returns `ok: false` and states that the request WAS executed but the receipt
+  could not be recorded — do not rely on that action as receipted (re-record it before
+  citing it).
 - **web-fetch tools are gated** for hosts in the engagement scope: fetch-shaped tools
   (scrape/crawl/map/parse/extract/read/fetch/browser/navigate/automation/computer;
   `_search` excluded; JSON-escaped URLs are decoded first) must not retrieve an in-scope
@@ -424,16 +445,26 @@ or a bash-invoked CLI is not visible to the plugin. To disable it, delete its ro
 - Host matching is literal `host[:port]` plus `*.domain` — no CIDR, no DNS resolution.
 - The browser arm is read-only (navigate + capture).
 - `source_reference` is only pattern-redacted, never guaranteed secret-free.
+- URL **path segments are not masked** by the capture/query masker (by design: scheme,
+  host, port and path stay byte-for-byte). Never put a credential in a path; query and
+  fragment values and sensitive headers are the covered surfaces.
+- The browser gate judges install shape per command segment and only segments that name
+  browser tooling: a browser launch hidden inside an interpreter script or a
+  non-browser-shaped command segment is not detectable by command scanning.
 
 ## Triage aid (TypeSafe Jev, optional)
 
 `researchctl triage "<question>"` ranks all knowledge packs for a cycle question with one
 TypeSafe `Choice` call over the 17 packs plus a `none` option (skill_suggestion pattern;
 2026-09-21 experiment on a 20-question labeled set: top-1 20/20 vs the IDF baseline
-17/20, no regressions; the naive per-pack Noul rerank lost and is not used). The seam
+17/20, no regressions; the naive per-pack Noul rerank lost (7/20) and is not used; raw
+artifacts committed under `tools/ts-eval/`). The seam
 lives in `tools/ts_triage.py`, reads `TYPESAFE_API_KEY` from the environment, and falls
 back to the deterministic `knowledge_index` IDF order when the key is absent — triage is
-an aid for authoring `knowledge_triage`, never a hard dependency. External service calls
+an aid for authoring `knowledge_triage`, never a hard dependency. The engagement's
+top-level `external_judgment` key (default DENIED; `ALLOWED` opts in) gates the external
+call: when it is not allowed, triage falls back to IDF and the result carries the note
+`external judgment denied by engagement policy`. External service calls
 are research/provisioning traffic, not target traffic: the executor and scope rules are
 unchanged.
 
@@ -441,7 +472,10 @@ unchanged.
 registered evidence (`{id, claim, evidence_ref}`) and returns a `Choice` verdict —
 supports / contradicts / says_nothing — with confidence; below 0.8 the verdict is flagged
 for a reasoning model or human, and the seam reports `unavailable` (never a verdict)
-without `TYPESAFE_API_KEY`. Live check on real rig evidence (2026-09-21, 10 planted claims
-across three evidence files): 10/10 verdict accuracy with the deliberately unanswerable
-claim flagged at 0.45 confidence. Reviewers use it to corroborate claims; the two
+without `TYPESAFE_API_KEY` or when `external_judgment` is not `ALLOWED` (then with the
+policy note and `model: null`). Live check on real rig evidence (2026-09-21, 10 planted
+claims across three evidence files): 10/10 verdict accuracy with the deliberately
+unanswerable claim flagged at 0.45 confidence; the script and raw output are committed
+under `tools/ts-eval/` (rerun needs `TS_EVAL_ROOT` on a workspace holding the three
+registered captures — see its README). Reviewers use it to corroborate claims; the two
 independent review packets remain the gate.

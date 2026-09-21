@@ -35,7 +35,13 @@
  *       `argument_digest` matches the call's canonical shape
  *       ({method, url, principal[, headers][, body_sha256]}), then executes, stores a
  *       request/response capture under 08_artifacts/raw/, registers it as evidence and
- *       records the action through the control plane.
+ *       records the action through the control plane. Requests time out
+ *       (RESEARCH_OS_HTTP_TIMEOUT_MS, default 30s), response bodies stop at
+ *       RESEARCH_OS_MAX_BODY_BYTES (default 5 MB) with the capture marked truncated,
+ *       sensitive query-parameter values are masked in capture lines, tool text and
+ *       DENY(executor) log lines, and the receipt is transactional: a failed
+ *       registration/record after the request was sent returns ok:false with the
+ *       "do not rely on this action as receipted" warning.
  *   R5  The executor reads per-host scope from `00_control/engagement.yaml` assets
  *       (same semantics as `researchctl prepare`: simple string list, `*.domain`
  *       wildcards, host[:port] compared exactly) and refuses out-of-scope targets
@@ -49,9 +55,13 @@
  *       browser executor: prepare with tool_family "browser" and call
  *       `research_os_browser`, which runs the canonical read-only runner
  *       (tools/bua/run.mjs — dedicated profile, scope guard, capture) and records the
- *       action. Install-shaped commands and explicit-localhost work stay allowed.
+ *       action. Install-shaped commands and explicit-localhost work stay allowed;
+ *       install shape is judged per command segment (`&&`/`||`/`;`/`|`), so an install
+ *       segment cannot stand the gate down for a later browser segment.
  *
- * v1 limits (documented, deliberate): digest covers lowercase header keys; the
+ * v1 limits (documented, deliberate): the digest canonicalizes the shape (method
+ * uppercased, lowercase header keys, body folded into body_sha256) exactly as the
+ * Python prepare side does; the
  * controlled executor speaks HTTP(S) only; the browser arm is read-only (navigate +
  * capture) — interactive or state-changing flows use a dedicated task script with its
  * documented precondition; command-pattern gating cannot see a browser launch or a
@@ -123,7 +133,11 @@ const NET_CMD = /(^|[;&|(]\s*|\s)(curl|wget|http|httpie|nc|ncat|nmap|socat|dig|n
 const LOCAL_HOST = /(^|[\s/@:.])(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0|::1|\.local|\.internal)([\s/:'"]|$)/i
 const WRITE_TOKEN = /(>>?|\btee\b|sed\s+-i|\btruncate\b|\bcp\b|\bmv\b|\bdd\b|\binstall\b|python3?\s+-\s*<<|cat\s*<<)/
 const BROWSER_LAUNCH = /\b(playwright|puppeteer|selenium|selenium-webdriver|chromedriver|geckodriver)\b|--headless\b|--remote-debugging-port\b|chrome-headless-shell/
-const PM_QUERY = /(^|[\s;&|(])(npm|pnpm|yarn|bun)\s+(i|install|add|ls|list|view|info|why|audit|outdated)\b|\bpip3?\s+install\b|--version\b/
+// Install-shaped package queries (provisioning, not target access). `npx` is special:
+// the package name sits between `npx` and the install verb (`npx playwright install
+// chromium` is the browser runner's own provisioning instruction), so only an explicit
+// install/query verb after the package counts — `npx playwright test <url>` stays gated.
+const PM_QUERY = /(^|[\s;&|(])(npm|pnpm|yarn|bun)\s+(i|install|add|ls|list|view|info|why|audit|outdated)\b|\bpip3?\s+install\b|\bnpx(\s+-{1,2}[\w=-]+)*\s+[A-Za-z0-9@][\w@./-]*\s+(i|install|add|ls|list|view|info|why|audit|outdated)\b|--version\b/
 
 // Capture hygiene (29_SECURITY_HYGIENE: RAW -> SANITIZE -> REFERENCE). Values in these
 // headers never reach a capture; secret-shaped strings in any text are redacted on write.
@@ -376,7 +390,13 @@ function browserGateReason(exec) {
     if (typeof args.command !== 'string') return undefined
     const cmd = args.command
     if (!BROWSER_LAUNCH.test(cmd)) return undefined
-    if (PM_QUERY.test(cmd)) return undefined
+    // Judge install shape per COMMAND SEGMENT: one install-shaped segment must not stand
+    // the gate down for a later browser segment (`npx playwright install chromium &&
+    // npx playwright test <remote>`). The gate stands down only when every segment that
+    // mentions browser tooling is install-shaped; a compound command with a non-install
+    // browser segment (or an install segment plus a bare `npx playwright test`) is denied.
+    const browserSegments = cmd.split(/\s*(?:&&|\|\||;|\|)\s*/).filter((seg) => BROWSER_LAUNCH.test(seg))
+    if (browserSegments.length > 0 && browserSegments.every((seg) => PM_QUERY.test(seg))) return undefined
     const root = findOsRoot(sessionCwd(exec))
     if (!root) return undefined
     const urls = cmd.match(/https?:\/\/[^\s'"]+/g) || []
@@ -551,6 +571,25 @@ function hostFromUrl(url) {
   return normalizeHost(s.slice(s.indexOf('://') + 3).split('/')[0].split('?')[0].split('#')[0])
 }
 
+/** R4/R5 — the cycle must still be RUNNING at dispatch, not just at prepare time.
+ *
+ *  `prepare` proved the cycle RUNNING when the token was minted, but the token can sit
+ *  in the store while a human gate, close or block moves the cycle on. This re-reads
+ *  the runtime status at the same point the scope re-check runs — same defensive
+ *  intent — and refuses dispatch unless the current cycle is the token's cycle and is
+ *  still RUNNING. Fail closed when the status cannot be read. */
+function cycleLiveReason(root, token) {
+  const st = osStatus(root)
+  if (!st) {
+    return 'research-os-enforcer: runtime status could not be read at dispatch — refusing the request; restore 11_runtime/run-status.yaml and prepare a fresh preflight.'
+  }
+  if (st.cycle !== token.cycle_id || st.cycleState !== 'RUNNING') {
+    return `research-os-enforcer: the cycle moved to ${st.cycleState || 'none'} after the token was minted ` +
+      `(current cycle: ${st.cycle || 'none'}, token cycle: ${token.cycle_id}) — prepare a fresh preflight.`
+  }
+  return undefined
+}
+
 /** R5 — per-host scope gate, mirroring `researchctl prepare`. Fail closed on scope errors. */
 function scopeReasonFor(root, url) {
   try {
@@ -696,7 +735,18 @@ function canonicalDigest(shape) {
   return createHash('sha256').update(JSON.stringify(canon(shape))).digest('hex')
 }
 
-/** Build the canonical request shape from tool args (lowercase header keys). */
+/** A plain object literal — not an array, `Headers`, Map or class instance. */
+function isPlainObject(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const proto = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
+
+/** Build the canonical request shape from tool args (lowercase header keys).
+ *
+ *  Headers must be a plain object: an array, a `Headers` instance or a string would
+ *  otherwise digest as an empty/mangled shape and the token could never match for a
+ *  reason the model cannot see. Reject loudly instead. */
 function shapeFromArgs(args) {
   const shape = {
     method: String((args && args.method) || '').toUpperCase(),
@@ -706,7 +756,11 @@ function shapeFromArgs(args) {
   if (args && args.body !== undefined && args.body !== null && String(args.body).length > 0) {
     shape.body_sha256 = createHash('sha256').update(String(args.body)).digest('hex')
   }
-  if (args && args.headers && typeof args.headers === 'object') {
+  if (args && args.headers !== undefined && args.headers !== null) {
+    if (!isPlainObject(args.headers)) {
+      throw new TypeError('headers must be a plain object mapping header names to string values (got '
+        + (Array.isArray(args.headers) ? 'an array' : typeof args.headers === 'object' ? 'a non-plain object' : typeof args.headers) + ')')
+    }
     const h = {}
     for (const k of Object.keys(args.headers)) h[String(k).toLowerCase()] = String(args.headers[k])
     shape.headers = h
@@ -773,6 +827,134 @@ function redactHeaderLine(line) {
   return `${headerName}: ${redactSecrets(raw.slice(idx + 1).replace(/^\s+/, ''))}`
 }
 
+// Query/fragment parameters whose VALUE is a credential: a parameter NAME containing
+// any of these substrings (case-insensitive, after percent-decoding) marks the value
+// sensitive. Substrings on purpose — `access-token`, `client_secret`, `token2`,
+// `X-Amz-Signature`, `code`, `session_id` all match, not just the exact names.
+const SENSITIVE_QUERY_MARKERS = /(token|secret|key|auth|sig|session|code|password|passwd|cookie)/i
+
+// A sensitive assignment nested inside ANOTHER component's decoded value: a
+// double-encoded `next=/cb%26token%3Dxyz` decodes once to `next=/cb&token=xyz`, so a
+// downstream consumer that decodes `next` would see the token. Matched after a `&`/`;`
+// separator or at the value's start.
+const NESTED_SENSITIVE_ASSIGNMENT = /(^|[&;])\s*[A-Za-z0-9_.-]*(token|secret|key|auth|sig|session|code|password|passwd|cookie)[A-Za-z0-9_.-]*\s*=/i
+
+/** Percent-decode tolerantly: valid escapes decode, malformed escapes and invalid
+ *  UTF-8 stay as replacement-safe text (mirrors Python's `urllib.parse.unquote`). */
+function decodeTolerant(text) {
+  const bytes = []
+  for (let i = 0; i < text.length; i++) {
+    const esc = text[i] === '%' ? text.slice(i + 1, i + 3) : ''
+    if (/^[0-9A-Fa-f]{2}$/.test(esc)) {
+      bytes.push(parseInt(esc, 16))
+      i += 2
+    } else {
+      for (const b of Buffer.from(text[i], 'utf8')) bytes.push(b)
+    }
+  }
+  return Buffer.from(bytes).toString('utf8')
+}
+
+/** Mask one query/fragment component (`name=value`) when its decoded name — or a
+ *  sensitive assignment nested in its decoded value — is sensitive. */
+function redactQueryPart(part) {
+  const eq = part.indexOf('=')
+  const name = eq < 0 ? part : part.slice(0, eq)
+  let decoded = name
+  try { decoded = decodeURIComponent(name) } catch {}
+  if (SENSITIVE_QUERY_MARKERS.test(decoded)) return `${name}=[REDACTED]`
+  if (eq < 0) return part
+  const value = part.slice(eq + 1)
+  if (NESTED_SENSITIVE_ASSIGNMENT.test(decodeTolerant(value))) return `${name}=[REDACTED]`
+  return `${name}=${redactSecrets(value)}`
+}
+
+/** Mask sensitive parameter values in one query-or-fragment span (no leading ?/#). */
+function redactQuerySpan(span) {
+  return span.split(/([&;])/).map((tok, i) => (i % 2 ? tok : redactQueryPart(tok))).join('')
+}
+
+/** Mask sensitive query AND fragment parameter values in a URL (`?token=…`, `#code=…`).
+ *  Scheme, host, port and path stay untouched; a component separator (`&`/`;`) is
+ *  preserved, and only the name is percent-decoded before matching. */
+function redactUrlSecrets(url) {
+  const raw = String(url == null ? '' : url)
+  return raw.replace(/[?#][^\s#?]*/g, (seg) => seg[0] + redactQuerySpan(seg.slice(1)))
+}
+
+/** Redact a header VALUE by name: sensitive header names become [REDACTED] wholesale,
+ *  other values are scrubbed for secret shapes (the same rules captures use). */
+function redactHeaderValue(name, value) {
+  if (SENSITIVE_HEADERS.test(String(name))) return '[REDACTED]'
+  return redactSecrets(String(value == null ? '' : value))
+}
+
+/** A request shape safe to echo in tool text: URL query/fragment secrets and sensitive
+ *  header values are redacted, everything else (digest-relevant facts) stays visible. */
+function redactShapeForText(shape) {
+  const out = { ...shape, url: redactUrlSecrets(shape.url) }
+  if (out.headers && typeof out.headers === 'object') {
+    const headers = {}
+    for (const [k, v] of Object.entries(out.headers)) headers[k] = redactHeaderValue(k, v)
+    out.headers = headers
+  }
+  return out
+}
+
+/** Executor HTTP limits, read from the environment at call time (defaults 30s / 5 MB). */
+function httpLimits() {
+  const timeoutMs = Number(process.env.RESEARCH_OS_HTTP_TIMEOUT_MS)
+  const maxBytes = Number(process.env.RESEARCH_OS_MAX_BODY_BYTES)
+  return {
+    timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 30000,
+    maxBytes: Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : 5 * 1024 * 1024,
+  }
+}
+
+/** Read a response body up to `maxBytes`, cancelling the stream once the cap is hit.
+ *  A read failure (abort/timeout mid-body) returns the bytes already received plus the
+ *  error, so the caller can record the partial capture and say what happened. */
+async function readBodyCapped(resp, maxBytes) {
+  if (resp.body && typeof resp.body.getReader === 'function') {
+    const reader = resp.body.getReader()
+    const chunks = []
+    let bytes = 0
+    let truncated = false
+    try {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        const chunk = value instanceof Uint8Array ? value : new Uint8Array(value)
+        if (bytes + chunk.length > maxBytes) {
+          chunks.push(chunk.subarray(0, maxBytes - bytes))
+          bytes = maxBytes
+          truncated = true
+          try { await reader.cancel() } catch {}
+          break
+        }
+        chunks.push(chunk)
+        bytes += chunk.length
+      }
+    } catch (e) {
+      return { text: Buffer.concat(chunks).toString('utf8'), bytes, truncated,
+        error: String(e && e.message ? e.message : e) }
+    }
+    return { text: Buffer.concat(chunks).toString('utf8'), bytes, truncated, error: '' }
+  }
+  try {
+    const text = await resp.text()
+    const blob = Buffer.from(text)
+    if (blob.length > maxBytes) {
+      return { text: blob.subarray(0, maxBytes).toString('utf8'), bytes: maxBytes, truncated: true, error: '' }
+    }
+    return { text, bytes: blob.length, truncated: false, error: '' }
+  } catch (e) {
+    return { text: '', bytes: 0, truncated: false, error: String(e && e.message ? e.message : e) }
+  }
+}
+
+const RECEIPT_FAILURE_WARNING = 'the request WAS executed but the receipt could not be recorded — do not rely on this action as receipted'
+
 /** Register a capture as evidence and record ACTION_RECORDED through the control plane. */
 function registerCapture({ root, relPath, token, source }) {
   let evidence = ''
@@ -806,66 +988,106 @@ function registerCapture({ root, relPath, token, source }) {
  */
 async function runControlledRequest({ root, args, fetchImpl }) {
   const fetchFn = fetchImpl || globalThis.fetch
-  const shape = shapeFromArgs(args)
+  let shape
+  try {
+    shape = shapeFromArgs(args)
+  } catch (e) {
+    return { ok: false, text: 'research_os_request: ' + String(e && e.message ? e.message : e) }
+  }
   if (!shape.method || !shape.url || !shape.principal) {
     return { ok: false, text: 'research_os_request requires method, url and principal (the account label used in the preflight).' }
   }
   const digest = canonicalDigest(shape)
+  const safeUrl = redactUrlSecrets(shape.url)
   const token = selectToken(loadTokenStates(root), digest, Date.now())
   if (!token) {
-    return { ok: false, text: 'research_os_request: no matching unconsumed preflight token (tokens are single-use and expire). Prepare one first:\n  python3 tools/researchctl.py . prepare payload.json\nwith request_shape:\n  ' + JSON.stringify(shape) }
+    return { ok: false, text: 'research_os_request: no matching unconsumed preflight token (tokens are single-use and expire). Prepare one first:\n  python3 tools/researchctl.py . prepare payload.json\nwith request_shape:\n  ' + JSON.stringify(redactShapeForText(shape)) }
   }
   consumeToken(root, token)
   const scopeDenied = scopeReasonFor(root, shape.url)
   if (scopeDenied) {
-    log('DENY(executor) ' + shape.method + ' ' + shape.url + ' :: ' + scopeDenied)
-    return { ok: false, text: scopeDenied }
+    log('DENY(executor) ' + shape.method + ' ' + safeUrl + ' :: ' + scopeDenied)
+    return { ok: false, text: redactUrlSecrets(scopeDenied) }
+  }
+  const lifecycleDenied = cycleLiveReason(root, token)
+  if (lifecycleDenied) {
+    log('DENY(executor) lifecycle ' + shape.method + ' ' + safeUrl + ' :: ' + lifecycleDenied)
+    return { ok: false, text: lifecycleDenied }
   }
   let status = null
   let respHeaders = []
   let bodyText = ''
+  let truncated = false
+  let partial = false
   let error = ''
+  const { timeoutMs, maxBytes } = httpLimits()
+  const controller = new AbortController()
+  let timedOut = false
+  let dispatched = false
+  const timer = setTimeout(() => { timedOut = true; controller.abort() }, timeoutMs)
   try {
-    const init = { method: shape.method, redirect: 'manual' }
+    const init = { method: shape.method, redirect: 'manual', signal: controller.signal }
     if (shape.headers) init.headers = shape.headers
     if (args && args.body !== undefined && args.body !== null && String(args.body).length > 0) init.body = String(args.body)
+    dispatched = true
     const resp = await fetchFn(shape.url, init)
     status = resp.status
     resp.headers.forEach((v, k) => { respHeaders.push(redactHeaderLine(`${k}: ${v}`)) })
-    bodyText = await resp.text()
+    const read = await readBodyCapped(resp, maxBytes)
+    bodyText = read.text
+    truncated = read.truncated
+    if (read.error) {
+      // Headers arrived, the body read stopped early: the capture holds a partial body.
+      partial = true
+      error = timedOut
+        ? `body read timed out after ${timeoutMs}ms with ${read.bytes} bytes captured`
+        : `body read failed after ${read.bytes} bytes: ${read.error}`
+    }
   } catch (e) {
-    error = String(e && e.message ? e.message : e)
+    error = timedOut ? `request timeout after ${timeoutMs}ms` : String(e && e.message ? e.message : e)
+  } finally {
+    clearTimeout(timer)
   }
   const rel = join('08_artifacts', 'raw', `${token.action_id}-${new Date().toISOString().replace(/[:.]/g, '-')}.http`)
   const abs = join(root, rel)
+  let captureWritten = false
   try {
     mkdirSync(join(root, '08_artifacts', 'raw'), { recursive: true })
     writeFileSync(abs, [
-      `# research_os_request — ${shape.method} ${shape.url}`,
+      `# research_os_request — ${shape.method} ${safeUrl}`,
       `# action: ${token.action_id} | cycle: ${token.cycle_id} | principal: ${shape.principal} | time: ${new Date().toISOString()}`,
       '',
       '--- request',
-      `${shape.method} ${shape.url}`,
+      `${shape.method} ${safeUrl}`,
       ...(shape.headers ? Object.entries(shape.headers).map(([k, v]) => redactHeaderLine(`${k}: ${v}`)) : []),
       '',
       trunc(redactSecrets(args && args.body), 4000),
       '',
       '--- response',
-      status === null ? `ERROR: ${redactSecrets(error)}` : `HTTP ${status}`,
+      status === null ? `ERROR: ${redactSecrets(error)}` : `HTTP ${status}${truncated ? ` (truncated at ${maxBytes} bytes)` : ''}${error ? ` — ${redactSecrets(error)}` : ''}`,
       ...respHeaders,
       '',
       trunc(redactSecrets(bodyText), 40000),
     ].join('\n') + '\n')
+    captureWritten = true
   } catch (e) {
     log('executor-capture-error ' + e)
   }
   const relPath = rel.split(sep).join('/')
   const { evidence, recorded } = registerCapture({ root, relPath, token, source: 'controlled-executor' })
-  const summary = status === null ? `error: ${error}` : `HTTP ${status}`
-  return {
-    ok: status !== null,
-    text: `research_os_request ${shape.method} ${shape.url} → ${summary}\n- action: ${token.action_id} (token consumed)\n- evidence: ${recorded && evidence ? evidence : (evidence || 'NOT REGISTERED')}\n- capture: ${relPath}\n\n${trunc(redactSecrets(bodyText), 4000)}`,
+  const receipted = captureWritten && recorded && Boolean(evidence)
+  const summary = status === null
+    ? `error: ${error}`
+    : (truncated
+        ? `HTTP ${status} (body truncated at ${maxBytes} bytes)`
+        : (error ? `HTTP ${status} — ${error}` : `HTTP ${status}`))
+  const base = `research_os_request ${shape.method} ${safeUrl} → ${summary}\n- action: ${token.action_id} (token consumed)\n- evidence: ${recorded && evidence ? evidence : (evidence || 'NOT REGISTERED')}\n- capture: ${relPath}`
+  // The warning is about DISPATCH, not success: once the request was sent, a failed
+  // receipt must surface even when the request itself errored before any response.
+  if (dispatched && !receipted) {
+    return { ok: false, text: `${base}\n\nWARNING: ${RECEIPT_FAILURE_WARNING}`, ...(partial ? { partial: true } : {}) }
   }
+  return { ok: status !== null, text: `${base}\n\n${trunc(redactSecrets(bodyText), 4000)}`, ...(partial ? { partial: true } : {}) }
 }
 
 /** Canonical browser request shape (digest input): {url, principal}. */
@@ -889,27 +1111,36 @@ async function runControlledBrowser({ root, args }) {
     return { ok: false, text: 'research_os_browser requires url and principal (the account label used in the preflight).' }
   }
   const digest = canonicalDigest(shape)
+  const safeUrl = redactUrlSecrets(shape.url)
   const token = selectToken(loadTokenStates(root), digest, Date.now(), 'browser')
   if (!token) {
-    return { ok: false, text: 'research_os_browser: no matching unconsumed browser preflight token (tokens are single-use and expire). Prepare one first:\n  python3 tools/researchctl.py . prepare payload.json\nwith "tool_family": "browser" and request_shape:\n  ' + JSON.stringify(shape) }
+    return { ok: false, text: 'research_os_browser: no matching unconsumed browser preflight token (tokens are single-use and expire). Prepare one first:\n  python3 tools/researchctl.py . prepare payload.json\nwith "tool_family": "browser" and request_shape:\n  ' + JSON.stringify(redactShapeForText(shape)) }
   }
   consumeToken(root, token)
   const scopeDenied = scopeReasonFor(root, shape.url)
   if (scopeDenied) {
-    log('DENY(executor) browser ' + shape.url + ' :: ' + scopeDenied)
-    return { ok: false, text: scopeDenied }
+    log('DENY(executor) browser ' + safeUrl + ' :: ' + scopeDenied)
+    return { ok: false, text: redactUrlSecrets(scopeDenied) }
+  }
+  const lifecycleDenied = cycleLiveReason(root, token)
+  if (lifecycleDenied) {
+    log('DENY(executor) lifecycle browser ' + safeUrl + ' :: ' + lifecycleDenied)
+    return { ok: false, text: lifecycleDenied }
   }
   const runner = join(root, 'tools', 'bua', 'run.mjs')
   const rel = join('08_artifacts', 'raw', `${token.action_id}-${new Date().toISOString().replace(/[:.]/g, '-')}.browser.log`)
   const abs = join(root, rel)
+  let captureWritten = false
   let exitCode = null
   let stdout = ''
   let stderr = ''
   let error = ''
+  let dispatched = false
   if (!existsSync(runner)) {
     error = 'BUA runner missing: tools/bua/run.mjs (copy the OS template — provisioning task)'
   } else {
     try {
+      dispatched = true
       stdout = execFileSync('node', [runner, '--url', shape.url, '--principal', shape.principal,
         '--out-dir', '08_artifacts/raw', '--action', token.action_id],
       { cwd: root, encoding: 'utf8', timeout: 180000 })
@@ -928,7 +1159,7 @@ async function runControlledBrowser({ root, args }) {
       `# action: ${token.action_id} | cycle: ${token.cycle_id} | principal: ${shape.principal} | time: ${new Date().toISOString()}`,
       '',
       '--- runner',
-      `node tools/bua/run.mjs --url ${shape.url} --principal ${shape.principal} --out-dir 08_artifacts/raw --action ${token.action_id}`,
+      `node tools/bua/run.mjs --url ${safeUrl} --principal ${shape.principal} --out-dir 08_artifacts/raw --action ${token.action_id}`,
       `exit: ${exitCode === null ? 'not started' : exitCode}`,
       ...(error ? ['error: ' + error] : []),
       '',
@@ -938,18 +1169,22 @@ async function runControlledBrowser({ root, args }) {
       '--- stderr',
       trunc(redactSecrets(stderr), 8000),
     ].join('\n') + '\n')
+    captureWritten = true
   } catch (e) {
     log('executor-capture-error ' + e)
   }
   const relPath = rel.split(sep).join('/')
   const { evidence, recorded } = registerCapture({ root, relPath, token, source: 'browser-executor' })
+  const receipted = captureWritten && recorded && Boolean(evidence)
   const summary = exitCode === 0
     ? 'runner exit 0'
     : `runner ${exitCode === null ? 'not started' : 'exit ' + exitCode}${error ? ' — ' + error : ''}`
-  return {
-    ok: exitCode === 0,
-    text: `research_os_browser ${shape.url} → ${summary}\n- action: ${token.action_id} (token consumed)\n- evidence: ${recorded && evidence ? evidence : (evidence || 'NOT REGISTERED')}\n- capture: ${relPath}\n\n${trunc(stdout, 4000)}`,
+  const base = `research_os_browser ${safeUrl} → ${summary}\n- action: ${token.action_id} (token consumed)\n- evidence: ${recorded && evidence ? evidence : (evidence || 'NOT REGISTERED')}\n- capture: ${relPath}`
+  // Once the runner was started, a failed receipt must surface even on a non-zero exit.
+  if (dispatched && !receipted) {
+    return { ok: false, text: `${base}\n\nWARNING: ${RECEIPT_FAILURE_WARNING}` }
   }
+  return { ok: exitCode === 0, text: `${base}\n\n${trunc(stdout, 4000)}` }
 }
 
 // ---------- plugin ----------
@@ -1043,4 +1278,4 @@ function apply(ctx) {
 
 export { name, inject, apply }
 // Test surface (pure helpers + executor core): conformance and integration suites.
-export { canonicalDigest, shapeFromArgs, browserShapeFromArgs, loadTokenStates, selectToken, runControlledRequest, runControlledBrowser, scopeReasonFor, redactSecrets, redactHeaderLine, mentionsProtected }
+export { canonicalDigest, shapeFromArgs, browserShapeFromArgs, loadTokenStates, selectToken, runControlledRequest, runControlledBrowser, scopeReasonFor, redactSecrets, redactHeaderLine, redactUrlSecrets, redactShapeForText, mentionsProtected }

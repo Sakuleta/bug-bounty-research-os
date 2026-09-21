@@ -1,0 +1,148 @@
+{
+  "source": "typesafe",
+  "auto_accept": 0.8,
+  "results": [
+    {
+      "id": "c1",
+      "claim": "The browser run completed with HTTP 200 against example.com.",
+      "evidence_ref": "E-000004",
+      "verdict": "supports",
+      "confidence": 1.0,
+      "auto": true,
+      "probabilities": {
+        "says_nothing": 0.0,
+        "supports": 1.0,
+        "contradicts": 0.0
+      }
+    },
+    {
+      "id": "c2",
+      "claim": "Before navigating, the runner reported a scope check against the engagement asset list.",
+      "evidence_ref": "E-000004",
+      "verdict": "supports",
+      "confidence": 1.0,
+      "auto": true,
+      "probabilities": {
+        "says_nothing": 0.0,
+        "supports": 1.0,
+        "contradicts": 0.0
+      }
+    },
+    {
+      "id": "c3",
+      "claim": "The runner did not start because of a provisioning error.",
+      "evidence_ref": "E-000004",
+      "verdict": "contradicts",
+      "confidence": 0.89,
+      "auto": true,
+      "probabilities": {
+        "contradicts": 0.92,
+        "says_nothing": 0.02,
+        "supports": 0.06
+      }
+    },
+    {
+      "id": "c4",
+      "claim": "The final page title was Login.",
+      "evidence_ref": "E-000004",
+      "verdict": "contradicts",
+      "confidence": 1.0,
+      "auto": true,
+      "probabilities": {
+        "supports": 0.0,
+        "contradicts": 1.0,
+        "says_nothing": 0.0
+      }
+    },
+    {
+      "id": "c5",
+      "claim": "The run validated a negative control.",
+      "evidence_ref": "E-000004",
+      "verdict": "says_nothing",
+      "confidence": 0.95,
+      "auto": true,
+      "probabilities": {
+        "says_nothing": 0.97,
+        "contradicts": 0.03,
+        "supports": 0.0
+      }
+    },
+    {
+      "id": "c6",
+      "claim": "The controlled HTTP request returned status 200.",
+      "evidence_ref": "E-000001",
+      "verdict": "supports",
+      "confidence": 1.0,
+      "auto": true,
+      "probabilities": {
+        "says_nothing": 0.0,
+        "contradicts": 0.0,
+        "supports": 1.0
+      }
+    },
+    {
+      "id": "c7",
+      "claim": "The response carried Cloudflare headers.",
+      "evidence_ref": "E-000001",
+      "verdict": "supports",
+      "confidence": 1.0,
+      "auto": true,
+      "probabilities": {
+        "says_nothing": 0.0,
+        "contradicts": 0.0,
+        "supports": 1.0
+      }
+    },
+    {
+      "id": "c8",
+      "claim": "The response body contained a login form.",
+      "evidence_ref": "E-000001",
+      "verdict": "contradicts",
+      "confidence": 0.99,
+      "auto": true,
+      "probabilities": {
+        "contradicts": 1.0,
+        "says_nothing": 0.0,
+        "supports": 0.0
+      }
+    },
+    {
+      "id": "c9",
+      "claim": "The browser attempt A-000007 was recorded although the runner never started.",
+      "evidence_ref": "E-000002",
+      "verdict": "supports",
+      "confidence": 0.98,
+      "auto": true,
+      "probabilities": {
+        "supports": 0.99,
+        "says_nothing": 0.0,
+        "contradicts": 0.01
+      }
+    },
+    {
+      "id": "c10",
+      "claim": "The token for A-000007 was consumed twice.",
+      "evidence_ref": "E-000002",
+      "verdict": "says_nothing",
+      "confidence": 0.45,
+      "auto": false,
+      "probabilities": {
+        "contradicts": 0.36,
+        "supports": 0.0,
+        "says_nothing": 0.64
+      }
+    }
+  ],
+  "summary": {
+    "checked": 10,
+    "flagged": 1,
+    "supports": 5,
+    "contradicts": 3,
+    "says_nothing": 2
+  },
+  "model": "jev-1.13.0",
+  "usage": {
+    "input_tokens": 9614,
+    "output_tokens": 454
+  }
+}

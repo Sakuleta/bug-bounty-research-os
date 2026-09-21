@@ -2,6 +2,15 @@
 
 # Current Context
 
+## SAFETY KERNEL
+
+engagement: CLOSED
+scope: gate: assets — assets: example.com
+external judgment: DENIED
+active cycle: none
+human gate: none pending
+identity: handle=UNKNOWN — reference=local shadow run
+
 
 ## ENGAGEMENT POLICY
 
@@ -11,6 +20,9 @@ program:
   url: "https://example.com"
   policy_source: "IANA example domain — reserved for documentation; harmless GETs only"
   policy_retrieved_at: "2026-09-21"
+
+# External-model judgment (TypeSafe seams): the archival run predates the key; default posture is DENIED.
+external_judgment: "DENIED"
 
 researcher:
   public_handle: "NONE"

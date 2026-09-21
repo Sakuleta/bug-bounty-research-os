@@ -2,13 +2,15 @@
 """TypeSafe (Jev) triage seam: rank knowledge packs for a research question.
 
 Design chosen by the 2026-09-21 experiment over a 20-question labeled set
-(scratch: ts-eval/): one Choice question over ALL packs plus a `none` option
+(committed: tools/ts-eval/): one Choice question over ALL packs plus a `none` option
 (skill_suggestion pattern) scored top-1 20/20 vs the IDF baseline 17/20, with
 no regressions. The naive per-pack Noul rerank lost (7/20) and is not used.
 
 `TYPESAFE_API_KEY` comes from the environment. Without a key (or with
 `live=False`) the seam falls back to the deterministic knowledge_index IDF
-ranking, so triage never hard-depends on an external service.
+ranking, so triage never hard-depends on an external service. The engagement's
+top-level `external_judgment` key (default DENIED) gates the external call: when
+it is not "ALLOWED" the seam falls back to IDF with a policy note.
 """
 from __future__ import annotations
 
@@ -16,16 +18,15 @@ import json
 import os
 import re
 import sys
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from control_plane import external_judgment_allowed  # noqa: E402
 from knowledge_index import parse_index, rank_packs  # noqa: E402
+from ts_http import model_name, post_json  # noqa: E402
 
-API = "https://api.typesafe.ai/v1/systemone"
-MODEL = "jev-latest"
 NONE = "none"
+POLICY_NOTE = "external judgment denied by engagement policy"
 
 
 def pack_cards(root: Path) -> dict[str, dict]:
@@ -63,13 +64,8 @@ def idf_order(root: Path, question: str) -> list[str]:
 
 
 def _http_call(state: dict, questions: dict, timeout: int) -> dict:
-    body = json.dumps({"state": state, "model": MODEL, "questions": questions}).encode()
-    req = urllib.request.Request(API, data=body, headers={
-        "Authorization": f"Bearer {os.environ.get('TYPESAFE_API_KEY', '')}",
-        "Content-Type": "application/json",
-    })
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode())
+    return post_json({"state": state, "model": model_name(), "questions": questions},
+                     api_key=os.environ.get("TYPESAFE_API_KEY", ""), timeout=timeout)
 
 
 def suggest(root: Path, question: str, *, client=None, live: bool = True, timeout: int = 60) -> dict:
@@ -81,7 +77,13 @@ def suggest(root: Path, question: str, *, client=None, live: bool = True, timeou
     forces the deterministic IDF fallback.
     """
     order = idf_order(root, question)
-    if not live or (client is None and not os.environ.get("TYPESAFE_API_KEY")):
+    if not live or not external_judgment_allowed(root):
+        result = {"source": "idf", "suggested": order[0] if order else None, "ranked": order,
+                  "probabilities": {}, "confidence": None, "model": None, "usage": {}}
+        if live:
+            result["note"] = POLICY_NOTE
+        return result
+    if client is None and not os.environ.get("TYPESAFE_API_KEY"):
         return {"source": "idf", "suggested": order[0] if order else None, "ranked": order,
                 "probabilities": {}, "confidence": None, "model": None, "usage": {}}
     cards = pack_cards(root)

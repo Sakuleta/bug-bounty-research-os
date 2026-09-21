@@ -1,0 +1,22 @@
+[
+  {"id":"q01","gold":"web-browser","question":"A sanitizer runs on user HTML, but a mutation-XSS payload survives when the output is re-parsed inside an xmp wrapper. Which pack covers the browser-side sanitizer parsing differential?"},
+  {"id":"q02","gold":"parsers-injection","question":"The same multipart body is interpreted differently by a WAF and the backend, and a filename parameter containing CR becomes a separate part upstream. Which pack covers this?"},
+  {"id":"q03","gold":"data-layer","question":"A search endpoint filters on a text field; sending the integer 0 in the filter returns every row. Which pack covers query-engine filter coercion and pagination leaks?"},
+  {"id":"q04","gold":"file-media","question":"An upload accepts a polyglot that passes extension and magic-byte checks, and an ImageMagick pipeline renders it later. Which pack covers upload validation and image processing surfaces?"},
+  {"id":"q05","gold":"mobile","question":"An exported Android activity forwards an attacker Intent into an internal WebView that exposes a JavaScript bridge. Which pack covers deep links, intents and WebView bridges?"},
+  {"id":"q06","gold":"cloud-cicd","question":"A serverless function URL with auth set to NONE is reachable and the function assumes a role that can hit the instance metadata service. Which pack covers serverless and IAM surface?"},
+  {"id":"q07","gold":"supply-chain","question":"A GitLab webhook uses a signing token, the pipeline caches artifacts between branches, and OIDC tokens are issued to pull requests. Which pack covers CI/CD trust boundaries?"},
+  {"id":"q08","gold":"email-dns","question":"A dangling SPF include lets an attacker send mail as the domain, and the password-reset email silently strips a plus-suffix. Which pack covers email and DNS takeover surfaces?"},
+  {"id":"q09","gold":"ai-agentic","question":"An MCP server changes its tool descriptions after approval (rug-pull) and a spawned subagent inherits the parent's full tool scopes. Which pack covers agentic and MCP trust boundaries?"},
+  {"id":"q10","gold":"realtime","question":"A WebSocket handshake accepts a cross-site Origin and a channel is authorized only at connect time, not per message. Which pack covers realtime transports and subscription ACLs?"},
+  {"id":"q11","gold":"frameworks","question":"A Next.js Server Action is reachable through a middleware rewrite from an unauthenticated path. Which pack covers framework-generated surfaces and router manifests?"},
+  {"id":"q12","gold":"access-auth","question":"The JWKS still serves a previous key, an id_token arrives via an OIDC hybrid flow, and a magic link is reusable after login. Which pack covers token-library behavior and session lifecycle?"},
+  {"id":"q13","gold":"api-protocols","question":"A GraphQL endpoint accepts a GET mutation when persisted queries are enabled, and gRPC metadata is transcoded by an Envoy gateway. Which pack covers API protocols and gateway translation?"},
+  {"id":"q14","gold":"http-edge-cache","question":"A CDN normalizes the path before cache rules run, and a dangling-byte delta between two requests desynchronizes the origin parser. Which pack covers desync and cache-key behavior?"},
+  {"id":"q15","gold":"business-logic","question":"A refund race abuses HTTP/2 single-packet concurrency and the payment gateway's idempotency key is omitted on retry. Which pack covers workflow, race windows and payment semantics?"},
+  {"id":"q16","gold":"emerging","question":"You observe a behavior no pack explains: a clean request mutates a previous response, and the spec is silent about it. Where do you record and harden a novel primitive?"},
+  {"id":"q17","gold":"web3-emerging","question":"An EIP-712 signature is replayable on a forked chain and a bridge accepts a message twice. Which pack covers wallet signatures, bridges and on-chain state?"},
+  {"id":"q18","gold":"frameworks","question":"A SvelteKit __data.json endpoint returns protected data when the route is requested with a case-variant path. Which pack covers the framework's generated data routes?"},
+  {"id":"q19","gold":"access-auth","question":"A reset link is not invalidated after use and an attacker pre-registers the victim's email to hijack the account merge. Which pack covers recovery chains and pre-hijacking?"},
+  {"id":"q20","gold":"web-browser","question":"A cross-origin page detects whether the victim is logged in by probing the HTTP cache with fetch and a timing oracle. Which pack covers XS-Leaks and cache probing?"}
+]

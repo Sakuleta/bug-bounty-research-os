@@ -12,7 +12,7 @@ Source of truth lives here; the live install is a copy under the DSH profile.
 | R3 — raw network egress closed | `tools/pre-execute` (allow/deny) | Network-capable `bash` (curl/wget/ssh/...) to a non-local host is denied in OS workspaces. Target traffic goes through `research_os_request`; research material goes through the web tools; localhost/lab is never blocked. The web-fetch gate also denies fetch-shaped tools (scrape/crawl/map/parse/extract/read/fetch/browser/navigate/automation/computer; `_search` excluded) when the call references an in-scope asset host — raw or JSON-escaped URLs after userinfo/trailing-dot normalization, or schemeless host references like `t.example`; path-typed arguments (`file_path`, `path`, `cwd`, `workdir`, `out_dir`, `profile`, `*_path`) are not host references, and a plain file read is never denied. In-scope hosts are live targets, so prepare and use `research_os_request`/`research_os_browser`; out-of-scope URLs stay allowed as research material. **Egress gating is intercepted (advisory), not a boundary**: commands that do not name a NET_CMD binary — python/node/php/git/npm and bash-invoked CLIs — bypass it. |
 | R4 — single-use preflight binding | `research_os_request` tool | The executor consumes the token issued by `researchctl prepare` (canonical `argument_digest` over `{method,url,principal[,headers][,body_sha256]}`), executes the HTTP request, writes the capture under `08_artifacts/raw/`, registers it as evidence and records `ACTION_RECORDED`. Tokens expire (default 300 s) and are consumed before dispatch. |
 | R5 — per-host scope at the executor | both executor tools | The executor re-reads `00_control/engagement.yaml` assets and refuses a host that is out of scope before any network I/O — a hand-crafted or stale token cannot widen scope. Same semantics as `prepare`: simple string list, `*.domain` wildcards, `host[:port]` compared exactly; absent/empty assets deny (scope unset — record it with `researchctl scope-set`, or set an explicit `gate: none` inside the `scope:` block for non-target work, which disables the executor gate, the web-fetch gate and the audit's historical host re-check); unparseable asset lists deny as unenforceable. The token store `11_runtime/action-tokens.jsonl` is write-protected like a projection (mint tokens only through `researchctl prepare`). |
-| R6 — browser arm | `tools/pre-execute` + `research_os_browser` tool | Raw browser-automation launches (playwright/puppeteer/selenium, `--headless`, remote-debugging) in an OS workspace are denied outside the sanctioned path: prepare with `"tool_family": "browser"` (`request_shape {"url": …, "principal": …}`) → `research_os_browser` consumes the token, re-checks scope and runs the canonical read-only runner `tools/bua/run.mjs` (dedicated profile under `lab/`, scope guard, navigate + screenshot), whose run log is registered as evidence and recorded as `ACTION_RECORDED`. Install-shaped commands and explicit-localhost work stay allowed. |
+| R6 — browser arm | `tools/pre-execute` + `research_os_browser` tool | Raw browser-automation launches (playwright/puppeteer/selenium, `--headless`, remote-debugging) in an OS workspace are denied outside the sanctioned path: prepare with `"tool_family": "browser"` (`request_shape {"url": …, "principal": …}`) → `research_os_browser` consumes the token, re-checks scope and runs the canonical read-only runner `tools/bua/run.mjs` (dedicated profile under `lab/`, scope guard, navigate + screenshot), whose run log is registered as evidence and recorded as `ACTION_RECORDED`. Install shape is judged **per command segment** (`&&`, `||`, `;`, `|`): the gate stands down only when every segment that mentions browser tooling is install-shaped, so `npx playwright install chromium` stays allowed while `npx playwright install chromium && npx playwright test <url>` and `npm install … && npx playwright test <url>` are denied. Explicit-localhost work stays allowed. |
 
 Live flow: `researchctl prepare payload.json` → `research_os_request` (http family) or
 `research_os_browser` (browser family) with the same shape → scope re-check → capture +
@@ -20,10 +20,25 @@ evidence + action recorded. The token store is transient
 (`11_runtime/action-tokens.jsonl`), never the ledger; a consumed or mismatched token cannot
 authorize a second call.
 
+Executor robustness: requests time out after `RESEARCH_OS_HTTP_TIMEOUT_MS` (default 30000 ms)
+via AbortController and response bodies stop at `RESEARCH_OS_MAX_BODY_BYTES` (default 5 MiB)
+— the capture holds the bytes read up to the display cap and is marked when truncated
+(a mid-body abort is flagged `partial: true` on the result). Receipts are
+transactional: once the request was DISPATCHED (sent, even if it errored before headers)
+or the runner was started (even with a non-zero exit), a failed capture registration or
+`ACTION_RECORDED` write makes the tool return `ok: false` stating the request WAS executed
+but the receipt could not be recorded — do not rely on that action as receipted.
+
 Capture hygiene (29_SECURITY_HYGIENE: RAW → SANITIZE → REFERENCE): sensitive headers
 (`set-cookie`, `cookie`, `authorization`, API-key headers) are redacted to `[REDACTED]` at
-write time, and secret-shaped strings in bodies/logs (GitLab/GitHub tokens, AWS keys, JWTs,
-private-key blocks) are scrubbed from both the capture and the tool output. `tools/audit.py`
+write time; sensitive query AND fragment values are masked (`?token=…` → `?token=[REDACTED]`,
+`#code=…` → `#code=[REDACTED]`; the parameter name is matched as a case-insensitive
+substring after percent-decoding, so `access_token`, `client_secret`, `X-Amz-Signature`
+and `token2` are covered) in capture request lines, tool text, the token store, the
+`bua/run.mjs` summary and `DENY(executor)` log lines; and secret-shaped
+strings in bodies/logs (GitLab/GitHub tokens, AWS keys, JWTs, private-key blocks) are
+scrubbed from both the capture and the tool output. **Path segments are not masked by
+design** — never put a credential in a URL path. `tools/audit.py`
 re-scans registered evidence and fails a workspace whose evidence still carries secret-shaped
 values.
 

@@ -37,10 +37,32 @@ RAW
 
 Keep raw evidence isolated. Feed sanitized excerpts into reasoning whenever possible.
 The controlled executors perform the SANITIZE step at write time: sensitive headers
-(`set-cookie`, `cookie`, `authorization`, API-key headers) become `[REDACTED]` and
+(`set-cookie`, `cookie`, `authorization`, API-key headers) become `[REDACTED]`,
+sensitive query AND fragment values are masked in captures, tool text, executor logs,
+the token store, the ledger payload and the `tools/bua/run.mjs` summary — a parameter
+name containing `token`/`secret`/`key`/`auth`/`sig`/`session`/`code`/`password`/
+`passwd`/`cookie` (case-insensitive, percent-decoded) marks its value sensitive, so
+`?access_token=…`, `#code=…` and `X-Amz-Signature=…` are all covered — and
 secret-shaped strings in bodies/logs are scrubbed from captures and tool output.
 `tools/audit.py` fails a workspace whose registered evidence still carries a
 secret-shaped value.
+
+Residual (deliberate): **path segments are NOT masked** — the masker keeps scheme,
+host, port and path byte-for-byte. Never put a credential in a URL path; a secret in a
+path reaches captures, tool text and logs verbatim (`?`/`#` values and sensitive
+headers are the covered surfaces).
+
+## External-model judgment boundary
+
+The TypeSafe (Jev) triage/claims seams send engagement-derived text (pack descriptions,
+registered evidence excerpts) to an external API. The engagement gates this with the
+top-level `external_judgment:` key in `00_control/engagement.yaml` — `"ALLOWED"` opts in;
+anything else, including an absent or unreadable file, means DENIED (the template ships
+`external_judgment: "DENIED"`). Denial is enforced in
+`tools/control_plane.py:external_judgment_allowed` and consulted by `tools/ts_triage.py`
+and `tools/ts_claims.py` before any network call; no CLI flag overrides it. Opt in only
+after confirming the provider's data-handling terms for the engagement (see the provider
+data boundary above).
 
 ## Provider data boundary
 

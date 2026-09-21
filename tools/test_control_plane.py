@@ -17,7 +17,7 @@ import audit as _audit  # noqa: E402
 import control_plane as _control_plane  # noqa: E402
 from control_plane import (CYCLE_EDGES, ControlPlane, METHOD_SELF_ATTACK_ROWS,  # noqa: E402
                            REQUIRED_AUDIT_CLASSES, asset_hosts, engagement_assets,
-                           host_in_scope, scope_check)
+                           external_judgment_allowed, host_in_scope, redact, scope_check)
 
 passed: list[str] = []
 
@@ -378,6 +378,155 @@ check("in-scope prepare passes", tok3["action_id"].startswith("A-"))
 tok4 = cp.prepare_action({**base_action, "request_shape": {"method": "GET", "url": "https://sub.wild.example/y", "principal": "researcher-A"}})
 check("wildcard asset matches a subdomain", tok4["action_id"].startswith("A-"))
 
+# 4c-bis. Canonical digest: prepare normalizes request_shape to the executor's canonical
+# form (method uppercased, header keys lowercased, body -> body_sha256) BEFORE hashing,
+# and the token carries the normalized shape. The expected digests are the executor-side
+# values (dsh-plugin canonicalDigest over shapeFromArgs) — cross-language parity.
+import hashlib as _hashlib  # noqa: E402
+
+mixed_shape = {"method": "get", "url": "https://example.test/h", "principal": "researcher-A",
+               "headers": {"X-Custom": "Value-1", "X-Trace-Id": "TRACE-1"}}
+tok5 = cp.prepare_action({**base_action, "tool_family": "http", "request_shape": mixed_shape})
+mixed_canonical = {"method": "GET", "url": "https://example.test/h", "principal": "researcher-A",
+                   "headers": {"x-custom": "Value-1", "x-trace-id": "TRACE-1"}}
+check("prepare normalizes a lowercase method and mixed-case header keys",
+      tok5["preflight"]["request_shape"] == mixed_canonical)
+# Digest parity vector: the executor-side digest over shapeFromArgs for
+# {headers: {x-custom: Value-1, authorization: Bearer x}} (dsh-plugin canonicalDigest).
+secret_header_shape = {"method": "get", "url": "https://example.test/h", "principal": "researcher-A",
+                       "headers": {"X-Custom": "Value-1", "AUTHORIZATION": "Bearer x"}}
+tok5b = cp.prepare_action({**base_action, "tool_family": "http", "request_shape": secret_header_shape})
+check("prepare digest equals the executor-side digest for method+header normalization",
+      tok5b["argument_digest"] == "73582a995dc3e49b19d6f579798cacc7ba1d131f73cb5ac76563cf96a081df3a")
+
+body_text = '{"probe": "x"}'
+body_shape = {"method": "POST", "url": "https://example.test/b", "principal": "researcher-A",
+              "body": body_text}
+tok6 = cp.prepare_action({**base_action, "tool_family": "http", "request_shape": body_shape})
+body_canonical = {"method": "POST", "url": "https://example.test/b", "principal": "researcher-A",
+                  "body_sha256": _hashlib.sha256(body_text.encode("utf-8")).hexdigest()}
+check("prepare folds a body without body_sha256 into body_sha256 and drops body",
+      tok6["preflight"]["request_shape"] == body_canonical)
+check("prepare digest equals the executor-side digest for a body without body_sha256",
+      tok6["argument_digest"] == "9ca3f0956193b433cc35f73b1bd5ff07a07c83abc6ca242797627e34f93c1c0d")
+explicit_shape = {**body_canonical}
+tok7 = cp.prepare_action({**base_action, "tool_family": "http", "request_shape": explicit_shape})
+check("an already-canonical shape digests identically",
+      tok7["argument_digest"] == tok6["argument_digest"])
+
+# 4c-quater. Canonical shape strictness: a shape that names the body twice, or a
+# non-string body, is rejected instead of silently stringified / double-defined.
+for label, bad_shape in [
+    ("body and body_sha256 both present",
+     {"method": "POST", "url": "https://example.test/b", "principal": "researcher-A",
+      "body": "x", "body_sha256": "a" * 64}),
+    ("numeric body",
+     {"method": "POST", "url": "https://example.test/b", "principal": "researcher-A", "body": 123}),
+    ("boolean body",
+     {"method": "POST", "url": "https://example.test/b", "principal": "researcher-A", "body": True}),
+]:
+    try:
+        cp.prepare_action({**base_action, "tool_family": "http", "request_shape": bad_shape})
+        check(f"canonical shape rejects {label}", False)
+    except ValueError as exc:
+        check(f"canonical shape rejects {label}", "body" in str(exc))
+tok_empty = cp.prepare_action({**base_action, "tool_family": "http", "request_shape":
+    {"method": "POST", "url": "https://example.test/e", "principal": "researcher-A", "body": ""}})
+check("an empty string body contributes nothing",
+      "body_sha256" not in tok_empty["preflight"]["request_shape"])
+tok_null = cp.prepare_action({**base_action, "tool_family": "http", "request_shape":
+    {"method": "POST", "url": "https://example.test/e", "principal": "researcher-A", "body": None}})
+check("a null body contributes nothing",
+      "body_sha256" not in tok_null["preflight"]["request_shape"])
+browser_shape = {"url": "https://example.test/app", "principal": "researcher-A"}
+tok8 = cp.prepare_action({**base_action, "tool_family": "browser", "request_shape": browser_shape})
+check("a browser shape keeps the executor's {url,principal} canonical form and digest",
+      tok8["preflight"]["request_shape"] == browser_shape
+      and tok8["argument_digest"] == "19ceac0be794e368aad5a6d317acae62af51c936797b51d9244f853b25298ecb")
+
+# 4c-ter. Secret hygiene: sensitive query/fragment values and sensitive header values
+# never persist — not in the token store, not in the ACTION_RECORDED payload, not in
+# the returned prepare object researchctl prints. Redaction runs BEFORE the payload is
+# stored; the digest still hashes the same canonical shape (redaction cannot mask it).
+secret_url = ("https://example.test/cb?access_token=TOPSECRET&client_secret=ANOTHERSECRET"
+              "&page=2#code=FRAGSECRET")
+secret_shape = {"method": "GET", "url": secret_url, "principal": "researcher-A",
+                "headers": {"Authorization": "Bearer PREPAREHEADERSECRET"}}
+tok_secret = cp.prepare_action({**base_action, "tool_family": "http", "target": secret_url,
+                                "request_shape": secret_shape})
+store_text = (root / "11_runtime/action-tokens.jsonl").read_text()
+check("token store masks query and fragment secrets",
+      "TOPSECRET" not in store_text and "ANOTHERSECRET" not in store_text
+      and "FRAGSECRET" not in store_text
+      and "access_token=[REDACTED]" in store_text and "code=[REDACTED]" in store_text)
+check("token store masks sensitive header values",
+      "PREPAREHEADERSECRET" not in store_text and '"authorization":"[REDACTED]"' in store_text)
+check("a benign query parameter and the path survive in the token store",
+      "page=2" in store_text and "https://example.test/cb" in store_text)
+check("prepare output (the returned token) is masked too",
+      "TOPSECRET" not in json.dumps(tok_secret) and "PREPAREHEADERSECRET" not in json.dumps(tok_secret))
+check("the digest still covers the raw canonical shape",
+      tok_secret["argument_digest"] == _hashlib.sha256(
+          _control_plane._json_dump(_control_plane.canonical_request_shape(secret_shape)).encode()).hexdigest())
+
+secret_action = {k: v for k, v in base_action.items() if k != "evidence_refs"}
+secret_action["target"] = secret_url
+secret_action["request_shape"] = {"method": "GET", "url": secret_url, "principal": "researcher-A"}
+cp.record_action(secret_action)
+ledger_text = (root / "11_runtime/events.jsonl").read_text()
+check("ACTION_RECORDED payload masks query secrets in url and target",
+      "TOPSECRET" not in ledger_text and "FRAGSECRET" not in ledger_text
+      and "access_token=[REDACTED]" in ledger_text and "code=[REDACTED]" in ledger_text
+      and '"target":"https://example.test/cb?access_token=[REDACTED]' in ledger_text)
+
+# Direct scrubber vectors: sensitive SUBSTRINGS, percent-decoding, separators.
+check("redact masks a substring parameter name",
+      redact({"u": "https://t.example/x?X-Amz-Signature=abc123"})["u"]
+      == "https://t.example/x?X-Amz-Signature=[REDACTED]")
+check("redact masks a percent-encoded parameter name",
+      redact({"u": "https://t.example/x?t%6Fken=abc"})["u"] == "https://t.example/x?t%6Fken=[REDACTED]")
+check("redact handles semicolons and fragments",
+      redact("GET https://t.example/x?token=a;page=2#client_secret=b")
+      == "GET https://t.example/x?token=[REDACTED];page=2#client_secret=[REDACTED]")
+check("redact leaves non-sensitive query values and the path alone",
+      redact("https://t.example/secret-looking/path?page=2&sort=name")
+      == "https://t.example/secret-looking/path?page=2&sort=name")
+check("redact masks a URL embedded in JSON without swallowing the rest of the string",
+      redact('{"u":"https://t.example/x?token=abc","ok":true}')
+      == '{"u":"https://t.example/x?token=[REDACTED]","ok":true}')
+check("redact masks a URL embedded in prose",
+      redact("see https://t.example/x?access_token=abc now")
+      == "see https://t.example/x?access_token=[REDACTED] now")
+
+# Nested (double-encoded) sensitive assignments inside a component value: a value that
+# decodes once to `next=/cb&token=xyz` leaks the token to a downstream consumer that
+# decodes `next`, so the WHOLE component value is masked. Malformed escapes never throw.
+check("redact masks a nested sensitive assignment in a component value",
+      redact("https://t.example/reset/abc?next=/cb%26token%3Dxyz")
+      == "https://t.example/reset/abc?next=[REDACTED]")
+check("redact leaves a nested non-sensitive assignment readable",
+      redact("https://t.example/reset/abc?next=/cb%26page%3D2")
+      == "https://t.example/reset/abc?next=/cb%26page%3D2")
+check("redact masks a nested sensitive assignment in a fragment value",
+      redact("https://t.example/a#frag=a%26client_secret%3Dx")
+      == "https://t.example/a#frag=[REDACTED]")
+check("redact masks the whole value when a nested assignment is followed by benign pairs",
+      redact("https://t.example/a?next=a%26token%3Dx%26b=1")
+      == "https://t.example/a?next=[REDACTED]")
+check("redact tolerates malformed percent escapes without hiding a nested assignment",
+      redact("https://t.example/a?next=%zz%26token%3Dx")
+      == "https://t.example/a?next=[REDACTED]")
+nested_shape = {"method": "GET", "url": "https://example.test/reset?next=/cb%26token%3Dxyz",
+                "principal": "researcher-A"}
+nested_digest = _hashlib.sha256(
+    _control_plane._json_dump(_control_plane.canonical_request_shape(nested_shape)).encode()).hexdigest()
+tok_nested = cp.prepare_action({**base_action, "tool_family": "http",
+                                "target": nested_shape["url"], "request_shape": nested_shape})
+check("the digest covers the unmasked nested URL while the stored token is masked",
+      tok_nested["argument_digest"] == nested_digest
+      and "next=[REDACTED]" in json.dumps(tok_nested)
+      and "token%3Dxyz" not in json.dumps(tok_nested))
+
 # 4d. scope_check is the single seam the BUA runner and harnesses share.
 sc = scope_check(root, "https://sub.wild.example/y")
 check("scope_check seam reports in-scope", sc["gate"] == "assets" and sc["in_scope"] is True)
@@ -463,6 +612,42 @@ try:
     check("prepare enforces assets mode", False)
 except ValueError as exc:
     check("prepare enforces assets mode", "outside the engagement scope" in str(exc))
+
+# 4e-bis. External-judgment policy: top-level key, case-insensitive value, default DENIED.
+jroot = Path(tempfile.mkdtemp())
+(jroot / "00_control").mkdir(parents=True)
+check("external judgment defaults to denied when the key is absent",
+      external_judgment_allowed(jroot) is False)
+check("external judgment defaults to denied when engagement.yaml is missing",
+      external_judgment_allowed(Path(tempfile.mkdtemp())) is False)
+(jroot / "00_control/engagement.yaml").write_text('external_judgment: "ALLOWED"\n')
+check("explicit ALLOWED enables external judgment", external_judgment_allowed(jroot) is True)
+(jroot / "00_control/engagement.yaml").write_text('external_judgment: allowed  # researcher opt-in\n')
+check("value match is case-insensitive with a trailing comment",
+      external_judgment_allowed(jroot) is True)
+(jroot / "00_control/engagement.yaml").write_text('external_judgment: "DENIED"\n')
+check("explicit DENIED denies external judgment", external_judgment_allowed(jroot) is False)
+(jroot / "00_control/engagement.yaml").write_text('program:\n  external_judgment: "ALLOWED"\n')
+check("a nested key does not enable external judgment", external_judgment_allowed(jroot) is False)
+# The value must sit on the SAME line as the key: a newline after the colon is not a
+# scalar, and no other line may be read as the value (fail closed, not fail open).
+for label, text in [
+    ("value on the next line", 'external_judgment:\n  ALLOWED\n'),
+    ("value after a blank line", 'external_judgment:\n\nALLOWED\n'),
+    ("commented value, next line ALLOWED", 'external_judgment:  # pending\nALLOWED\n'),
+    ("value nested under the key", 'external_judgment:\n  mode: ALLOWED\n'),
+    ("quoted value on the next line", 'external_judgment:\n  "ALLOWED"\n'),
+]:
+    (jroot / "00_control/engagement.yaml").write_text(text)
+    check(f"external judgment: {label} stays denied", external_judgment_allowed(jroot) is False)
+(jroot / "00_control/engagement.yaml").write_text('external_judgment:    "ALLOWED"\n')
+check("horizontal whitespace between key and value is fine", external_judgment_allowed(jroot) is True)
+(jroot / "00_control/engagement.yaml").write_text('external_judgment: "ALLOWED"  # researcher opt-in\n')
+check("an inline comment after the value stays fine", external_judgment_allowed(jroot) is True)
+(jroot / "00_control/engagement.yaml").unlink()
+(jroot / "00_control/engagement.yaml").mkdir()
+check("unreadable engagement.yaml (a directory) defaults to denied",
+      external_judgment_allowed(jroot) is False)
 
 # 4f. scope-set: provenance-backed mutation that preserves every unrelated byte.
 set_root = fresh_root()

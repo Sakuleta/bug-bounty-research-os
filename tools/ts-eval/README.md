@@ -1,0 +1,81 @@
+# TypeSafe evaluation artifacts (2026-09-21)
+
+Provenance for the two TypeSafe (Jev) seams in this repo. The committed JSON artifacts
+(`eval_set.json`, `results.json`, `results_choice.json`, `claims_results.json`) are the
+authoritative records of the experiments below. The original scratch directory the runs
+were executed from no longer exists — nothing outside this directory is needed to read
+or cite the results. The scripts are historical runnable runners, not a test suite;
+`test_guards.py` pins their live-run guards offline.
+
+## What was measured
+
+### 1. Knowledge triage design — `eval_set.json` + `rerank_eval.py`
+
+A 20-question labeled set over all 17 knowledge packs (`eval_set.json`; each item names
+the gold pack). Two designs were measured against the deterministic IDF baseline
+(`knowledge_index.rank_packs`):
+
+| Variant | How | top-1 | top-3 | Verdict |
+|---|---|---|---|---|
+| Baseline | IDF over `load_when` | 17/20 | 20/20 | fallback |
+| A — per-pack Noul rerank | one Jev `noul` call per shortlisted pack (`main`) | 7/20 | 11/20 | lost, **not used** |
+| B — one Choice over all packs + `none` (`main_choice`) | one Jev `choice` call, skill_suggestion pattern | **20/20** | **20/20** | shipped as `tools/ts_triage.py` |
+
+The top-1 count that ships in `tools/ts_triage.py`'s docstring (20/20 vs 17/20) comes
+from the variant-B run. Raw outputs: `results.json` (variant A), `results_choice.json`
+(variant B); both embed per-item probabilities/orders and token usage.
+
+### 2. Claims relation seam — `claims_eval.py` + `claims_results.json`
+
+10 planted claims over three registered evidence captures of a live shadow workspace
+(E-000001, E-000002, E-000004) with known expectations: supports / contradicts /
+says_nothing. Result: 10/10 verdict accuracy; the deliberately unanswerable claim was
+flagged at 0.45 confidence. `claims_results.json` is the recorded seam output
+(verdicts, confidences, probabilities, model id, usage).
+
+## How to rerun
+
+Both scripts are stdlib-only Python 3 and read `TYPESAFE_API_KEY` from the environment.
+Both are **guarded against accidental live runs**: they refuse to call the external API
+unless `--force` is passed AND the `external_judgment` policy of the `--root` workspace
+is `ALLOWED` (the repo template ships `DENIED`, so a bare `--force` is not enough).
+Results go through a temp file + `os.replace`; the committed artifacts are never
+overwritten without `--force`.
+
+```sh
+export TYPESAFE_API_KEY=...
+cd tools/ts-eval
+python3 rerank_eval.py --force                     # variant B (the shipped design)
+python3 rerank_eval.py --force --variant a         # variant A (Noul rerank, historical)
+python3 claims_eval.py --force --root /path/to/workspace
+```
+
+Flags:
+
+| Flag | Meaning |
+|---|---|
+| `--force` | required for any live run; also allows replacing the committed result artifact |
+| `--root PATH` | workspace to read `12_knowledge/` (rerank), the evidence index and the `external_judgment` policy from; defaults to `RESEARCH_OS_ROOT` / `TS_EVAL_ROOT`, else this repository |
+| `--variant a\|b` | `rerank_eval` only: `a` = per-pack Noul rerank (`results.json`), `b` = one Choice over all packs (`results_choice.json`, shipped design) |
+
+- `rerank_eval.py` needs a checkout containing `12_knowledge/INDEX.yaml` and
+  `.dsh/skills/<pack>/SKILL.md` — this repository by default.
+- `claims_eval.py` **cannot run against this repository as-is**: it needs `--root`
+  (or `TS_EVAL_ROOT`) pointing at a live workspace whose evidence index carries the
+  three registered captures above (the original scratch workspace is not committed).
+  That workspace must also carry `external_judgment: "ALLOWED"` in
+  `00_control/engagement.yaml` — since v7.4 the claims seam consults the engagement
+  policy before any network call.
+- `test_guards.py` verifies all of the above offline (no network, no key needed).
+
+## Sanitization applied when committing (2026-09-22)
+
+- Personal absolute paths were removed from both scripts: each resolves its own repo via
+  `Path(__file__).resolve()` and the claims workspace through `TS_EVAL_ROOT` / `--root`
+  (with an explicit exit message when unset or invalid).
+- Live-run guards were added (2026-09-22 review): `--force` + `external_judgment: "ALLOWED"`
+  policy + `TYPESAFE_API_KEY`, atomic result writes, and no overwrite of the committed
+  artifacts without `--force`.
+- `eval_set.json`, `results.json`, `results_choice.json`, `claims_results.json` were
+  copied byte-identical: scanned for secret shapes (PATs, tokens, JWTs, private keys),
+  personal paths, emails and hostnames — none found.

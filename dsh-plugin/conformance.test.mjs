@@ -8,7 +8,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { apply, canonicalDigest, mentionsProtected, redactHeaderLine, redactSecrets, scopeReasonFor, selectToken, shapeFromArgs } from './index.js'
+import { apply, canonicalDigest, mentionsProtected, redactHeaderLine, redactSecrets, redactUrlSecrets, scopeReasonFor, selectToken, shapeFromArgs } from './index.js'
 
 let passed = 0
 const failures = []
@@ -228,8 +228,32 @@ check('playwright install allowed (provisioning)',
   (await h.preExecute(exec('bash', { command: 'npm install playwright-core' }, osRoot))).kind === 'allow')
 check('playwright version check allowed',
   (await h.preExecute(exec('bash', { command: 'npx playwright --version' }, osRoot))).kind === 'allow')
+check('npx playwright install chromium allowed (the runner provisioning instruction)',
+  (await h.preExecute(exec('bash', { command: 'npx playwright install chromium' }, osRoot))).kind === 'allow')
+check('npx with flags before the package is still install-shaped',
+  (await h.preExecute(exec('bash', { command: 'npx -y playwright install chromium' }, osRoot))).kind === 'allow')
+check('npx playwright test with a remote URL still hits the browser gate',
+  (await h.preExecute(exec('bash', { command: 'npx playwright test https://target.example/app' }, osRoot))).kind === 'deny')
 check('explicit localhost browser work allowed',
   (await h.preExecute(exec('bash', { command: 'npx playwright codegen http://127.0.0.1:3000' }, osRoot))).kind === 'allow')
+
+// ---- R6 compound commands: install shape is judged per SEGMENT, not per string ------
+check('install && remote playwright test denied (compound bypass closed)',
+  (await h.preExecute(exec('bash', { command: 'npx playwright install chromium && npx playwright test https://target.example' }, osRoot))).kind === 'deny')
+check('npm install && remote playwright test denied (pre-existing hole)',
+  (await h.preExecute(exec('bash', { command: 'npm install left-pad && npx playwright test https://target.example' }, osRoot))).kind === 'deny')
+check('install with || and remote codegen denied',
+  (await h.preExecute(exec('bash', { command: 'npx playwright install chromium || npx playwright codegen https://target.example' }, osRoot))).kind === 'deny')
+check('install with ; and remote test denied',
+  (await h.preExecute(exec('bash', { command: 'npx playwright install chromium; npx playwright test https://target.example' }, osRoot))).kind === 'deny')
+check('install with | and remote test denied',
+  (await h.preExecute(exec('bash', { command: 'npx playwright install chromium | npx playwright test https://target.example' }, osRoot))).kind === 'deny')
+check('two install-shaped segments stay allowed',
+  (await h.preExecute(exec('bash', { command: 'npx playwright install chromium && npx playwright install firefox' }, osRoot))).kind === 'allow')
+check('install && localhost browser work still allowed',
+  (await h.preExecute(exec('bash', { command: 'npx playwright install chromium && npx playwright codegen http://127.0.0.1:3000' }, osRoot))).kind === 'allow')
+check('install && version check stays allowed',
+  (await h.preExecute(exec('bash', { command: 'npx playwright install chromium && npx playwright --version' }, osRoot))).kind === 'allow')
 check('browser launch in a non-OS workspace allowed',
   (await h.preExecute(exec('bash', { command: 'npx playwright test' }, plain))).kind === 'allow')
 
@@ -284,6 +308,21 @@ check('guard internal error without protected marker fails open',
 // ---- R4: preflight token selection (pure helpers) ---------------------------
 const shape1 = shapeFromArgs({ method: 'get', url: 'https://t.example/x', principal: 'A', headers: { 'X-A': '1' } })
 check('shape normalizes method and header keys', shape1.method === 'GET' && shape1.headers['x-a'] === '1')
+
+// ---- headers shape validation: non-plain objects are rejected, never mis-hashed ----
+let headerReject = null
+try { shapeFromArgs({ method: 'GET', url: 'https://t.example/x', principal: 'A', headers: ['authorization'] }) } catch (e) { headerReject = String(e.message) }
+check('array headers rejected with a clear error', !!headerReject && /plain object/i.test(headerReject))
+headerReject = null
+try { shapeFromArgs({ method: 'GET', url: 'https://t.example/x', principal: 'A', headers: new Headers({ 'x-a': '1' }) }) } catch (e) { headerReject = String(e.message) }
+check('Headers instance rejected with a clear error', !!headerReject && /plain object/i.test(headerReject))
+headerReject = null
+try { shapeFromArgs({ method: 'GET', url: 'https://t.example/x', principal: 'A', headers: 'x-a: 1' }) } catch (e) { headerReject = String(e.message) }
+check('string headers rejected with a clear error', !!headerReject && /plain object/i.test(headerReject))
+check('empty object headers still accepted',
+  JSON.stringify(shapeFromArgs({ method: 'GET', url: 'https://t.example/x', principal: 'A', headers: {} }).headers) === '{}')
+check('absent headers stay absent',
+  shapeFromArgs({ method: 'GET', url: 'https://t.example/x', principal: 'A' }).headers === undefined)
 check('digest is key-order independent',
   canonicalDigest(shape1) === canonicalDigest({ headers: { 'x-a': '1' }, principal: 'A', url: 'https://t.example/x', method: 'GET' }))
 const nowMs = Date.now()
@@ -296,6 +335,17 @@ check('browser family token not selected for http',
   !selectToken(new Map([['A-2', mk({ tool_family: 'browser' })]]), 'd', nowMs))
 check('browser family token selected for browser',
   !!selectToken(new Map([['A-2', mk({ tool_family: 'browser' })]]), 'd', nowMs, 'browser'))
+
+// ---- canonical `request_shape` digest parity vectors (tools/control_plane.py) ---------
+// prepare_action normalizes to the shape below BEFORE hashing; these literals are the
+// executor-side digests the Python suite asserts, so the two languages cannot drift.
+const parityA = shapeFromArgs({ method: 'get', url: 'https://example.test/h', principal: 'researcher-A',
+  headers: { 'X-Custom': 'Value-1', AUTHORIZATION: 'Bearer x' } })
+check('canonical digest vector A matches the Python prepare literal',
+  canonicalDigest(parityA) === '73582a995dc3e49b19d6f579798cacc7ba1d131f73cb5ac76563cf96a081df3a')
+const parityB = shapeFromArgs({ method: 'POST', url: 'https://example.test/b', principal: 'researcher-A', body: '{"probe": "x"}' })
+check('canonical digest vector B matches the Python prepare literal',
+  canonicalDigest(parityB) === '9ca3f0956193b433cc35f73b1bd5ff07a07c83abc6ca242797627e34f93c1c0d')
 
 // ---- capture hygiene: sensitive headers and secret shapes never persist ---------
 check('set-cookie value redacted',
@@ -311,6 +361,66 @@ check('JWT redacted in free text',
   !redactSecrets('x eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJl').includes('eyJhbGciOiJIUzI1NiJ9'))
 check('private key block redacted',
   !redactSecrets('-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----').includes('MIIEow'))
+
+// ---- query-secret redaction: sensitive parameter VALUES never reach text or captures ----
+check('sensitive query value redacted, host and path kept',
+  redactUrlSecrets('https://t.example/a?token=abc&x=1') === 'https://t.example/a?token=[REDACTED]&x=1')
+check('parameter names match case-insensitively across the family',
+  redactUrlSecrets('https://t.example/?API_KEY=abc&Signature=xyz&Password=pw&foo=bar')
+  === 'https://t.example/?API_KEY=[REDACTED]&Signature=[REDACTED]&Password=[REDACTED]&foo=bar')
+check('benign query values untouched',
+  redactUrlSecrets('https://t.example/a?page=2&sort=name') === 'https://t.example/a?page=2&sort=name')
+check('url without a query is unchanged',
+  redactUrlSecrets('https://t.example/a#frag') === 'https://t.example/a#frag')
+check('fragment after the query is preserved',
+  redactUrlSecrets('https://t.example/a?token=abc#frag') === 'https://t.example/a?token=[REDACTED]#frag')
+check('value containing = is redacted whole',
+  redactUrlSecrets('https://t.example/?token=a=b=c') === 'https://t.example/?token=[REDACTED]')
+check('secret-shaped value redacted even under a benign parameter name',
+  !redactUrlSecrets('https://t.example/?q=glpat-ABCDEFGHIJKLMNOPQRST').includes('glpat-'))
+check('bare query flag without = is kept',
+  redactUrlSecrets('https://t.example/?debug&token=abc') === 'https://t.example/?debug&token=[REDACTED]')
+
+// ---- hardened query/fragment redaction: substrings, decoding, separators ----
+check('fragment values are masked too',
+  redactUrlSecrets('https://t.example/a#access_token=FRAGSECRET') === 'https://t.example/a#access_token=[REDACTED]')
+check('query and fragment are both masked in one URL',
+  redactUrlSecrets('https://t.example/a?token=QUERYSECRET#session=FRAGSECRET')
+  === 'https://t.example/a?token=[REDACTED]#session=[REDACTED]')
+check('semicolon-separated parameters are split',
+  redactUrlSecrets('https://t.example/?token=abc;x=1') === 'https://t.example/?token=[REDACTED];x=1')
+check('percent-encoded separator stays inside the value',
+  redactUrlSecrets('https://t.example/?token=a%26b') === 'https://t.example/?token=[REDACTED]')
+check('percent-encoded parameter name is decoded before matching',
+  redactUrlSecrets('https://t.example/?t%6Fken=abc') === 'https://t.example/?t%6Fken=[REDACTED]')
+check('sensitive substrings match the whole family',
+  redactUrlSecrets('https://t.example/?access-token=a&client_secret=b&code=c&X-Amz-Signature=d&token2=e')
+  === 'https://t.example/?access-token=[REDACTED]&client_secret=[REDACTED]&code=[REDACTED]&X-Amz-Signature=[REDACTED]&token2=[REDACTED]')
+check('sensitive parameter with an empty value becomes [REDACTED]',
+  redactUrlSecrets('https://t.example/?token=') === 'https://t.example/?token=[REDACTED]')
+check('sensitive bare flag without = becomes [REDACTED]',
+  redactUrlSecrets('https://t.example/?token') === 'https://t.example/?token=[REDACTED]')
+check('non-sensitive parameter keeps its value and the path stays untouched',
+  redactUrlSecrets('https://t.example/path?page=2') === 'https://t.example/path?page=2')
+
+// ---- nested (double-encoded) sensitive assignments inside a component value ----
+// A value that decodes once to `next=/cb&token=xyz` leaks the token to any downstream
+// consumer that decodes `next`: the whole component value is masked.
+check('double-encoded nested sensitive assignment masks the whole value',
+  redactUrlSecrets('https://t.example/reset/abc?next=/cb%26token%3Dxyz')
+  === 'https://t.example/reset/abc?next=[REDACTED]')
+check('nested non-sensitive assignment stays readable',
+  redactUrlSecrets('https://t.example/reset/abc?next=/cb%26page%3D2')
+  === 'https://t.example/reset/abc?next=/cb%26page%3D2')
+check('nested sensitive assignment in a fragment value is masked',
+  redactUrlSecrets('https://t.example/a#frag=a%26client_secret%3Dx')
+  === 'https://t.example/a#frag=[REDACTED]')
+check('nested sensitive assignment followed by benign pairs masks the whole value',
+  redactUrlSecrets('https://t.example/a?next=a%26token%3Dx%26b=1')
+  === 'https://t.example/a?next=[REDACTED]')
+check('malformed percent escapes neither throw nor hide a nested assignment',
+  redactUrlSecrets('https://t.example/a?next=%zz%26token%3Dx')
+  === 'https://t.example/a?next=[REDACTED]')
 
 // ---- R5: per-host scope gate (mirrors `researchctl prepare`) ----------------
 mkdirSync(join(osRoot, '00_control'), { recursive: true })

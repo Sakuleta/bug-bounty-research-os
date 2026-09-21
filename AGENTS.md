@@ -61,7 +61,10 @@ the audit does not check this; the loop above does.
 - Before ANY live target action, prepare a preflight token (`researchctl prepare`):
   target, scope status, account, object owner, purpose, hypothesis, expected
   secure/vulnerable behavior, side effect, stop condition, and the canonical
-  `request_shape` (method/url/principal[, headers][, body]) — the target must match
+  `request_shape` (method/url/principal[, headers][, body]) — normalize-before-hash:
+  method uppercased, header keys lowercased (values untouched), a `body` without
+  `body_sha256` folded into `sha256(body)`; the prepare digest always equals the
+  executor's `shapeFromArgs` digest — the target must match
   the engagement's listed assets. The enforcer plugin consumes the token for exactly
   one matching call: `research_os_request` for `tool_family` "http", or
   `research_os_browser` for `tool_family` "browser" (`request_shape` `{url, principal}`)
@@ -69,7 +72,22 @@ the audit does not check this; the loop above does.
   controlled executors record the consumed nonce as `token_nonce` on every
   `ACTION_RECORDED`, so the action ledger links each call back to the token that
   authorized it (`tools/audit.py` warns on legacy records and closure requires the
-  nonce on versioned actions).
+  nonce on versioned actions). Executor receipts are transactional: if capture
+  registration or the `ACTION_RECORDED` write fails after the request was sent, the
+  tool returns `ok: false` with an explicit "the request WAS executed but the receipt
+  could not be recorded — do not rely on this action as receipted" warning; treat the
+  action as unproven and re-register/re-record before citing it. Requests time out
+  (`RESEARCH_OS_HTTP_TIMEOUT_MS`, 30 s) and bodies stop at the cap
+  (`RESEARCH_OS_MAX_BODY_BYTES`, 5 MiB), with the capture marked truncated and holding
+  the bytes actually read; sensitive query values are masked in captures, tool text
+  and executor logs.
+- External-model judgment is default-DENIED per engagement: the TypeSafe seams
+  (`researchctl triage`, `researchctl claims-check`) consult the top-level
+  `external_judgment` key in `00_control/engagement.yaml` before any network call —
+  `"ALLOWED"` opts in, absent/unreadable/other values mean DENIED (IDF fallback, or
+  `source: "unavailable"` for claims, with the note
+  `external judgment denied by engagement policy`). No CLI flag overrides it, and
+  template engagements ship DENIED.
 - Scope is default-deny: record it with `researchctl scope-set` before target traffic —
   the first record carries a `source_reference` from the program policy; re-records,
   widenings, and any file that already carries an explicit depth-1 `gate:` line
