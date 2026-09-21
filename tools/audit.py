@@ -363,7 +363,10 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
     cred_dir = root / "lab" / "credentials"
     if cred_dir.is_dir():
         for p in sorted(cred_dir.iterdir()):
-            if p.is_file() and (p.stat().st_mode & 0o777) != 0o600:
+            # `.gitkeep` keeps the empty directory in the template clone; git cannot
+            # carry the 0600 bit, so the placeholder is exempt. Real credential files
+            # and any other file (including dotfiles) must still be 0600.
+            if p.is_file() and p.name != ".gitkeep" and (p.stat().st_mode & 0o777) != 0o600:
                 errors.append(f"credential file without 0600: {p.relative_to(root)}")
     stray_env = [
         p for p in root.rglob("*.env")
