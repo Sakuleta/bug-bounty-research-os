@@ -1,0 +1,29 @@
+# Engagement identity binding.
+# This file is a non-secret contract. Never store passwords, OTPs, cookies,
+# API tokens, private keys, session tokens, or mailbox credentials here.
+
+binding_version: 1
+engagement: "<PROGRAM_SLUG>"
+platform: "<HACKERONE|BUGCROWD|INTIGRITI|DIRECT|OTHER>"
+program: "<PROGRAM_NAME>"
+
+expected_identity:
+  public_handle: "<RESEARCHER_HANDLE>"
+  email: "<PROGRAM_SPECIFIC_RESEARCH_EMAIL>"
+  account_reference: "<NON_SECRET_ACCOUNT_REFERENCE>"
+
+session:
+  browser_profile: "<DEDICATED_BROWSER_PROFILE>"
+  network_context: "<DEDICATED_NETWORK_CONTEXT_OR_NONE>"
+  session_must_match_identity: true
+  cross_engagement_session_reuse: false
+
+rules:
+  credential_mixing: false
+  artifact_mixing: false
+  evidence_mixing: false
+  state_mixing: false
+
+verification:
+  method: "Compare the expected identity above with the authenticated identity observable in the active authorized session. Do not infer identity from the folder name alone."
+  human_fallback: "Ask the researcher only when the session cannot be established or verified autonomously and a genuinely human-owned authentication factor is required."

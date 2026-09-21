@@ -1,0 +1,2 @@
+# GENERATED — do not edit by hand; rebuild via tools/researchctl.py (control plane)
+components: [{"action": "pinned today; two-week cadence noted", "last_checked": "2026-09-21", "new_primitives": [], "pinned_version": "v153", "sources": ["release-feed"], "target_component": "chrome"}, {"action": "no new primitives", "last_checked": "2026-09-21", "new_primitives": [], "pinned_version": "observed 2026-09-21", "sources": ["executor capture headers"], "target_component": "example.com edge (Cloudflare)"}]

@@ -1,0 +1,11 @@
+# GENERATED — do not edit by hand; rebuild via tools/researchctl.py (control plane)
+cycle_id: "C-0001"
+hypothesis: "Cache normalization differences could expose a desync path on this edge"
+observation: "Edge headers present on the scoped host"
+secure_prediction: "Cache key includes the raw path; variant requests hit the same key"
+status: "CLOSED"
+vulnerable_prediction: "A normalized variant serves a cached body under a different key"
+id: "H-0001"
+test_plan: "One controlled GET to the raw path; compare response headers and a variant probe via the executor."
+test_question: "Does a raw vs normalized path variant on the scoped edge produce different cache keys?"
+learning: "Edge cache-key differential needs the variant pair; a single GET cannot decide it."

@@ -1,0 +1,4 @@
+# Endpoint ledger — fill during OBSERVE/MODEL (bootstrap steps 13-16).
+# tools/audit.py requires this file to exist once research has started (any cycle).
+# One entry per observed endpoint; keep it a living inventory, not a promise.
+endpoints: []

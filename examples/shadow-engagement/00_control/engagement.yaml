@@ -1,0 +1,44 @@
+program:
+  name: "Shadow rehearsal (example.com)"
+  platform: "DIRECT"
+  url: "https://example.com"
+  policy_source: "IANA example domain — reserved for documentation; harmless GETs only"
+  policy_retrieved_at: "2026-09-21"
+
+researcher:
+  public_handle: "NONE"
+  identity_reference: "local shadow run"
+  profile: "00_control/researcher-profile.yaml"
+
+scope:
+  assets:
+  - "example.com"
+  out_of_scope: []
+  allowed_functionality: ["read-only GET"]
+  prohibited_functionality: ["any state-changing request"]
+  asset_specific_rules: []
+
+accounts:
+  researcher_controlled: []
+  roles_available: []
+  account_creation_rules: "none — no accounts created"
+  data_ownership_rules: "researcher-owned only"
+
+traffic:
+  required_headers: []
+  rate_limits: "one request per action; no automation beyond the controlled executor"
+  auth_traffic_policy: "anonymous only"
+  automation_policy: "controlled executor only"
+
+reporting:
+  rules: "shadow run — nothing to report"
+  severity_method: "n/a"
+  disclosure: "n/a"
+  human_approval_required: true
+
+environment:
+  workspace_path: "/Users/mardinli/Desktop/shadow-engagement"
+  browser_profile: "none"
+  network_context: "researcher workstation"
+
+confidence: "VERIFIED"

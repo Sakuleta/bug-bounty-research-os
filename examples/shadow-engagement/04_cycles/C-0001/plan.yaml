@@ -1,0 +1,9 @@
+# GENERATED — do not edit by hand; rebuild via tools/researchctl.py (control plane)
+allowed_scope: ["example.com"]
+id: "C-0001"
+knowledge_triage: [{"pack": "http-edge-cache", "reason": "TypeSafe triage top pick (p=0.99)", "verdict": "USE"}, {"pack": "web-browser", "reason": "no browser-side sink in this question", "verdict": "SKIP"}]
+objective: "Shadow rehearsal: does the controlled executor reach the scoped target and record the chain end to end?"
+status: "CLOSED"
+stop_conditions: ["one controlled GET"]
+type: "DISCOVERY"
+result_summary: "Controlled GET returned 200; no differential claimed."

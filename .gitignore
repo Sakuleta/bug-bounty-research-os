@@ -11,15 +11,17 @@ __pycache__/
 # Node (profile-level tooling lives outside this repo)
 node_modules/
 
-# Runtime churn that must not travel between engagements
-11_runtime/action-tokens.jsonl
-11_runtime/human-gates/*.yaml
-11_runtime/evidence-store/
-08_artifacts/raw/*
-08_artifacts/sanitized/*
-08_artifacts/screenshots/*
-lab/credentials/*
-!lab/credentials/.gitkeep
+# Runtime churn that must not travel between engagements.
+# Root-anchored on purpose: archival snapshots under examples/ keep their own
+# runtime state so reviewers can read a complete worked run.
+/11_runtime/action-tokens.jsonl
+/11_runtime/human-gates/*.yaml
+/11_runtime/evidence-store/
+/08_artifacts/raw/*
+/08_artifacts/sanitized/*
+/08_artifacts/screenshots/*
+/lab/credentials/*
+!/lab/credentials/.gitkeep
 
 # Local archives
 *.zip
