@@ -1,0 +1,11 @@
+{
+  "name": "dsh-profile-research-os-enforcer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  }
+}

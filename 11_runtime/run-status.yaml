@@ -1,0 +1,8 @@
+engagement_status: "BOOTSTRAP"
+current_cycle: null
+last_state_update: null
+last_audit: null
+open_high_value_hypotheses: "0"
+open_unknowns: "0"
+pending_human_gate: false
+lab_ready: false

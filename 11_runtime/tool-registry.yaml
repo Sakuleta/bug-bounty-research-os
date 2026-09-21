@@ -1,0 +1,46 @@
+# Tool registry
+tools:
+  - name: adb
+    state: "MISSING"
+    purpose: "Android SDK platform-tools"
+    detail: ""
+  - name: emulator
+    state: "MISSING"
+    purpose: "Android Emulator"
+    detail: ""
+  - name: docker
+    state: "READY"
+    purpose: "Docker"
+    detail: "Docker version 29.4.0, build 9d7ad9f"
+  - name: node
+    state: "READY"
+    purpose: "Node.js"
+    detail: "v25.9.0"
+  - name: python3
+    state: "READY"
+    purpose: "Python 3"
+    detail: "Python 3.14.6"
+  - name: nuclei
+    state: "MISSING"
+    purpose: "ProjectDiscovery nuclei"
+    detail: ""
+  - name: ffuf
+    state: "MISSING"
+    purpose: "ffuf"
+    detail: ""
+  - name: mitmproxy
+    state: "MISSING"
+    purpose: "mitmproxy"
+    detail: ""
+  - name: jadx
+    state: "READY"
+    purpose: "jadx"
+    detail: "1.5.6"
+  - name: frida
+    state: "MISSING"
+    purpose: "Frida tools"
+    detail: ""
+  - name: ios-simulator
+    state: "FAILED"
+    purpose: "Xcode simulator (macOS only)"
+    detail: "xcrun: error: sh -c '/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -sdk /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Dev"

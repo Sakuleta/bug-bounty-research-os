@@ -1,0 +1,52 @@
+packs:
+  access-auth:
+    load_when: [auth, session, role, tenant, object, account, identity, JWT, OAuth, OIDC, SAML, MFA, passkey, WebAuthn, magic-link, reset, recovery, BOLA, BFLA, IDOR, mass-assignment, PKCE, id_token, refresh-token, session-fixation, session-regeneration, account-linking, email-change, consent, DPoP, recovery-chain, alg-confusion, kid, jwks, key-rotation, pre-hijacking, at_hash, c_hash, azp, nonce, step-up, AAL, OTP, device-binding, email-verification, token-replay, logout, revocation]
+    files: [authentication-authorization.md]
+  api-protocols:
+    load_when: [REST, GraphQL, gRPC, SSE, WebTransport, BFF, gateway, version, introspection, batching, aliasing, persisted-query, metadata, stream, method-override, origin, APQ, subscription, reflection, grpc-web, transcoding, schema, source-map, token-handler, federation, _service, _entities, api-key, pagination, cursor, safelist, protobuf, bearer, webhook]
+    files: [api.md]
+  web-browser:
+    load_when: [browser, XSS, mXSS, DOM-clobber, CORS, CORB, COOP, CSRF, postMessage, ServiceWorker, SW, CSS, XS-Leak, redirect, navigation, storage, CORP, COEP, CHIPS, partitioned-cookie, storage-partitioning, Storage-Access-API, Trusted-Types, Sanitizer-API, DOM-clobbering, referrer-policy, Origin-null, XS-Search, cache-probing, frame-counting, connection-pool, CSS-injection, window.name, SameSite, redirect-chain, CORS-misconfiguration]
+    files: [browser.md]
+  http-edge-cache:
+    load_when: [HTTP/1.1, HTTP/2, HTTP/3, QUIC, cache, CDN, proxy, desync, smuggling, poisoning, deception, dangling-byte, queue-poisoning, 0-RTT, CONTINUATION, edge, WAF, cache-key, hop-by-hop, header-injection, CL.0, 0.CL, Expect, tunnelling, Cloudflare, Fastly, Akamai, CloudFront]
+    files: [http-desync-cache.md]
+  parsers-injection:
+    load_when: [parser, normalization, Unicode, multipart, XML, XXE, JSON, SQL, NoSQL, ORM, SSTI, deserialization, prototype-pollution, header-injection, SMTP, request-smuggling, CL.TE, TE.CL, Transfer-Encoding, Content-Length, HTTP/2, obs-fold, SMTP-smuggling, JWT, YAML, phar, JEP-290, IDN, punycode, confusables, filename*]
+    files: [parsers.md]
+  business-logic:
+    load_when: [workflow, payment, order, state, replay, race, TOCTOU, permission, coupon, refund, invariant, idempotency, referral, linking, webhook, HMAC, signature, chargeback, dispute, currency, rounding, minor-unit, gateway, subscription, loyalty, gift-card, merge, unlink, state-machine]
+    files: [state.md]
+  data-layer:
+    load_when: [ORM, query, search, filter, pagination, aggregation, NoSQL, operator-injection, MongoDB, Elasticsearch, OpenSearch, Solr, cursor, projection, sort, collation, GraphQL, PostgREST, RLS, export]
+    files: [data.md]
+  file-media:
+    load_when: [upload, download, preview, archive, signed-url, media, upload-validation, polyglot, magic-bytes, content-type, disposition, sniffing, zip-slip, archive-extraction, symlink, tarfile, image-processing, imagemagick, libvips, sharp, thumbnail, pdfjs, presigned-url, signed-cookie, sas, cdn, image-cdn, transformation, imgproxy, exiftool, ghostscript, ffmpeg]
+    files: [file-media.md]
+  mobile:
+    load_when: [iOS, Android, APK, IPA, WebView, deep-link, app-link, universal-link, intent-redirection, exported-component, keychain, keystore, backup, pasteboard, clipboard, certificate-pinning, root-detection, jailbreak, IPC, Play Integrity, App Attest]
+    files: [mobile.md]
+  cloud-cicd:
+    load_when: [cloud, Kubernetes, serverless, IAM, metadata, service-mesh, IMDS, workload-identity, OIDC, RBAC, admission, secret-manager, signed-URL, AWS, GCP, Azure, ECS, EKS, Lambda, Cloud Run, Azure Functions, Istio, SAS, Key Vault]
+    files: [cloud.md]
+  supply-chain:
+    load_when: [CI/CD, dependency, build, artifact, webhook, IaC, OIDC, provenance, cache-poisoning, typosquatting, webhook-signature, lockfile]
+    files: [supply-chain.md]
+  email-dns:
+    load_when: [email, SMTP, DNS, recovery, takeover, CDN-origin, SPF, SPF-include, DKIM, DKIM-selector, DMARC, local-part, alias, plus-addressing, Gmail-dots, password-reset, magic-link, Safe-Links, MX, NSEC, NSEC3, zone-walk, origin-IP, SubdoMailing, 0.0.0.0, DNS-rebinding, BDAT, header-injection, MTA-STS, ARC]
+    files: [email-dns.md]
+  ai-agentic:
+    load_when: [LLM, agent, RAG, tool, connector, memory, MCP, prompt-injection, excessive-agency, goal-hijack, escalation, delegation, retrieval, indirect-injection, multimodal, A2A, tool-poisoning, rug-pull, state-handle, Mcp-Session-Id, CIMD, toxic-flow, memory-poisoning, Agent-Card, header-mismatch, cacheScope]
+    files: [ai-agentic.md]
+  frameworks:
+    load_when: [Next.js, React, Django, Rails, Spring, Spring Boot, Laravel, Nuxt, Remix, SvelteKit, Astro, Express, Node, middleware, data route, server action, loader, action, route, manifest, build manifest, schema, debug, proxy, rewrite, redirect, page router, app router, Turbopack, getServerSideProps, RSC, useFetch, useAsyncData, Nitro, payload, route rules, server island, server islands, endpoint, DRF, DRF schema, django rest framework, debug toolbar, actuator, heapdump, Whitelabel, SpEL, gateway routes, Telescope, Horizon, Ignition, debugbar, mass assignment, strong parameters, method-override, trust proxy, signed cookie, session secret, _payload.json, __data.json, _server-islands, _buildManifest, x-middleware-subrequest, __nuxt_island, island props, _actions, Active Storage, libvips, path-to-regexp, multer, morgan, body-parser, health group, cache middleware, WebSocket upgrade, AVIF, email rule]
+    files: [frameworks.md, js-nextjs.md, js-nuxt.md, js-sveltekit.md, js-remix.md, js-astro.md, backend-django.md, backend-rails.md, backend-spring.md, backend-laravel.md, backend-express.md]
+  realtime:
+    load_when: [WebSocket, SSE, WebTransport, realtime, CSWSH, Origin, cookie, ticket, Socket.IO, Pusher, Ably, broker, channel, room, subscription, resume, recovery, reconnect, Last-Event-ID, EventSource, withCredentials, service-worker, datagram, subprotocol, backpressure, ordering, fan-out]
+    files: [realtime.md]
+  emerging:
+    load_when: [new research, unfamiliar behavior, novel technique, novelty discovery, protocol differential, spec ambiguity, protocol state fuzzing, cascade]
+    files: [emerging.md, ../novelty-research.md]
+  web3-emerging:
+    load_when: [web3, wallet, transaction, signature, EIP-712, bridge, contract, on-chain, indexer, permit, permit2, ERC-1271, ERC-4337, EIP-7702, SIWE, EIP-4361, eth_call, rpc, reorg, nonce, replay, origin, multisig]
+    files: [emerging.md]

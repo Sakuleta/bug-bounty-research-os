@@ -1,0 +1,20 @@
+# Researcher profile — write once, reference from every engagement.
+# PUBLIC identity only. NEVER store passwords, API tokens, session cookies,
+# private keys, or mailbox credentials in this or any repo file.
+# Engagement copy: keep this file identical; per-program overrides (if any)
+# belong in engagement.yaml, never here.
+handle: "mardinli47"
+platforms:
+  hackerone: "mardinli47"
+  bugcrowd: "mardinli"
+  intigriti: "mardinli"
+contact:
+  # Platform alias scheme (forwarding addresses, derived from username):
+  # H1: <user>@wearehackerone.com | BC: <user>@bugcrowdninja.com
+  # (https://docs.bugcrowd.com/researchers/participating-in-program/your-bugcrowdninja-email-address/)
+  # Intigriti: <nickname>@intigriti.me (http://kb.intigriti.com/en/articles/2642598-intigriti-me-email-alias)
+  hackerone_email: "mardinli47@wearehackerone.com"
+  bugcrowd_email: "mardinli@bugcrowdninja.com"
+  intigriti_email: "mardinli@intigriti.me"
+  pgp_reference: "<PGP_KEY_REFERENCE_OR_NONE>"
+notes: "<ANYTHING_STABLE_ABOUT_IDENTITY>"

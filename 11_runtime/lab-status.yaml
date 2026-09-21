@@ -1,0 +1,5 @@
+status: FAILED
+provisioner: tools/provision.py
+isolated_lab: lab/
+installation_policy: ai-runtime-managed
+auto_exploit: false

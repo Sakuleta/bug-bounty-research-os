@@ -1,0 +1,13 @@
+{
+  "description": "Canonical Research OS event envelope.",
+  "required": ["event_id", "time", "actor", "type", "entity_type", "entity_id", "evidence_refs", "payload", "prev_hash", "event_hash"],
+  "event_id_pattern": "^EV-[0-9]{6,}$",
+  "evidence_ref_pattern": "^E-[0-9]{6,}$",
+  "event_types": [
+    "CYCLE_CREATED", "CYCLE_UPDATED", "CYCLE_TRANSITIONED",
+    "HYPOTHESIS_CREATED", "HYPOTHESIS_UPDATED", "HYPOTHESIS_TRANSITIONED",
+    "EVIDENCE_REGISTERED", "ACTION_RECORDED", "TECHNIQUE_EVALUATED", "WORKER_RESULT",
+    "HUMAN_GATE_REQUESTED", "HUMAN_GATE_RESOLVED", "AUDIT_RECORDED", "STATE_CHANGE", "NOTE"
+  ],
+  "integrity": "Each event stores prev_hash and event_hash; the ledger is append-only and hash-chained."
+}

@@ -1,0 +1,16 @@
+id: "T-000000"
+cycle_id: "C-0000"
+technique_family: "<FAMILY>"
+source: "<WHERE THE TECHNIQUE CAME FROM>"
+target_surface: "<SURFACE>"
+preconditions: []
+expected_oracle: "<EXPECTED OBSERVABLE DELTA>"
+negative_control: "<NEAR-IDENTICAL RUN EXPECTED CLEAN>"
+result: "CONFIRMED|FALSE_POSITIVE|NOT_APPLICABLE|INCONCLUSIVE|NEGATIVE"
+interpretation: "<WHAT IT MEANS>"
+learning: "<WHAT WE KNOW NOW THAT WE DID NOT BEFORE>"
+next_hypothesis: "<OPTIONAL H-* ID>"
+evidence_refs: []
+# Recorded via: python3 tools/researchctl.py <ROOT> technique evaluate <payload.json>
+# 10_learning/technique-discoveries.md and 11_runtime/last-result.md are projections
+# of these events — never hand-edited. CLOSED requires >=1 evaluation per cycle.

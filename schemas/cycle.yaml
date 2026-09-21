@@ -1,0 +1,27 @@
+id: "C-0000"
+type: "DISCOVERY|HYPOTHESIS|VALIDATION|AUDIT|RESEARCH"
+objective: "<ONE RESEARCH QUESTION>"
+primary_hypothesis: "H-0000"
+priority_reason: "<WHY NOW>"
+allowed_scope: []
+accounts: []
+knowledge_packs: []
+knowledge_triage: []
+# knowledge_triage: REQUIRED before RUNNING (enforced by tools/control_plane.py).
+# One entry per plausibly-relevant 12_knowledge/ pack:
+# - {pack: "<dirname>", verdict: "USE|SKIP", reason: "<why>"}
+# The PULL step is mandatory: triage first, then read only USE packs + record
+# current-research references. USE means: load the pack's skill
+# (.dsh/skills/<pack>/SKILL.md) and open the field guide it points to.
+# Auto-selection in current-context.md is input, not a substitute — confirm
+# or override it here.
+preconditions: []
+controls: []
+stop_conditions: []
+evidence_expected: []
+result_summary: ""
+# result_summary: filled at a terminal transition; derived from results.md
+# ## Interpretation when not set explicitly.
+status: "PLANNED"
+# CLOSED additionally requires a TECHNIQUE_EVALUATED event for the cycle
+# (researchctl technique evaluate) — learning is an event, not a file edit.

@@ -1,0 +1,8 @@
+id: "H-0000"
+observation: ""
+hypothesis: ""
+secure_prediction: ""
+vulnerable_prediction: ""
+importance: "LOW|MEDIUM|HIGH"
+novelty: "LOW|MEDIUM|HIGH|UNKNOWN"
+status: "CANDIDATE"

@@ -1,0 +1,47 @@
+# Runtime-only engagement configuration.
+# Populate ONLY from authoritative program sources.
+# Never copy values from another engagement.
+
+program:
+  name: "<PROGRAM_NAME>"
+  platform: "<HACKERONE|BUGCROWD|INTIGRITI|DIRECT|OTHER>"
+  url: "<PROGRAM_URL>"
+  policy_source: "<AUTHORITATIVE_POLICY_REFERENCE>"
+  policy_retrieved_at: "<TIMESTAMP>"
+
+researcher:
+  public_handle: "<RESEARCHER_HANDLE_OR_NONE>"
+  identity_reference: "<SECURE_IDENTITY_REFERENCE>"
+  profile: "00_control/researcher-profile.yaml"
+
+scope:
+  assets: []
+  out_of_scope: []
+  allowed_functionality: []
+  prohibited_functionality: []
+  asset_specific_rules: []
+
+accounts:
+  researcher_controlled: []
+  roles_available: []
+  account_creation_rules: "<RULES>"
+  data_ownership_rules: "<RULES>"
+
+traffic:
+  required_headers: []
+  rate_limits: "<PROGRAM_LIMITS_OR_SAFE_DEFAULT>"
+  auth_traffic_policy: "<RULES>"
+  automation_policy: "<RULES>"
+
+reporting:
+  rules: "<RULES>"
+  severity_method: "<PROGRAM_RULES>"
+  disclosure: "<PROGRAM_RULES>"
+  human_approval_required: true
+
+environment:
+  workspace_path: "<WORKSPACE_PATH>"
+  browser_profile: "<DEDICATED_PROFILE_REFERENCE>"
+  network_context: "<RESEARCH_NETWORK_CONTEXT>"
+
+confidence: "VERIFIED|PARTIAL|UNKNOWN"

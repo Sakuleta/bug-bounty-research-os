@@ -1,0 +1,26 @@
+status: "NOT_READY"
+audits:
+  - class: "coverage"
+    status: "MISSING"
+    time: null
+    event_id: null
+  - class: "hygiene-cleanup"
+    status: "MISSING"
+    time: null
+    event_id: null
+  - class: "negative"
+    status: "MISSING"
+    time: null
+    event_id: null
+  - class: "novelty-duplicate"
+    status: "MISSING"
+    time: null
+    event_id: null
+  - class: "open-hypothesis"
+    status: "MISSING"
+    time: null
+    event_id: null
+  - class: "scope"
+    status: "MISSING"
+    time: null
+    event_id: null
