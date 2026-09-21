@@ -788,7 +788,7 @@ function registerCapture({ root, relPath, token, source }) {
   let recorded = false
   try {
     const preflight = (token.preflight && typeof token.preflight === 'object') ? token.preflight : {}
-    const payload = { ...preflight, id: token.action_id, ...(evidence ? { evidence_refs: [evidence] } : {}) }
+    const payload = { ...preflight, id: token.action_id, token_nonce: token.nonce, ...(evidence ? { evidence_refs: [evidence] } : {}) }
     const payloadPath = join(tmpdir(), `research-os-action-${token.nonce}.json`)
     writeFileSync(payloadPath, JSON.stringify(payload))
     execFileSync(python, [cli, root, 'action', payloadPath], { encoding: 'utf8', timeout: 60000 })

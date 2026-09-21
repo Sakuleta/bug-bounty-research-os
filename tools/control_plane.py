@@ -29,12 +29,22 @@ CYCLE_EDGES = {
     "HUMAN_GATE": {"RUNNING", "BLOCKED"},
     "BLOCKED": {"READY"},
     "NEEDS_PIVOT": {"READY"},
-    "RESULT_READY": {"VERIFIED", "FALSE_POSITIVE", "NOT_APPLICABLE"},
-    "VERIFIED": {"CLOSED"},
+    "RESULT_READY": {"REVIEWED", "FALSE_POSITIVE", "NOT_APPLICABLE", "RUNNING", "BLOCKED"},
+    "REVIEWED": {"CLOSED"},
     "FALSE_POSITIVE": {"CLOSED"},
     "NOT_APPLICABLE": {"CLOSED"},
     "CLOSED": set(),
 }
+# Cycle terminal rename (v7.3): a cycle is REVIEWED (both review axes pass + instrument
+# validation); VERIFIED is the hypothesis/finding state. Historical ledgers recorded the
+# cycle transition as VERIFIED, so every read-side derivation normalizes it to REVIEWED.
+CYCLE_LEGACY_STATES = {"VERIFIED": "REVIEWED"}
+
+
+def normalize_cycle_state(value: Any) -> Any:
+    return CYCLE_LEGACY_STATES.get(value, value)
+
+
 HYP_EDGES = {
     "CANDIDATE": {"QUEUED", "BLOCKED", "NOT_APPLICABLE", "CLOSED"},
     "QUEUED": {"TESTING", "BLOCKED", "NOT_APPLICABLE", "CLOSED"},
@@ -352,6 +362,56 @@ def evidence_id_ok(value: str) -> bool:
     return bool(re.fullmatch(r"E-[0-9]{6,}", value or ""))
 
 
+def sentence_too_thin(value: str) -> bool:
+    """The shared sentence rule: >= 20 characters and >= 3 words after stripping.
+
+    Used by audit summaries and by the NOT_APPLICABLE `precondition_absence` guard so
+    placeholder text (`n/a`, `none`, `x`, `TODO`, `<...>`) cannot stand in for a real
+    statement of what was audited or what precondition was absent.
+    """
+    stripped = str(value or "").strip()
+    return len(stripped) < 20 or len(stripped.split()) < 3
+
+
+def review_quote_problem(root: Path, index: dict[str, dict[str, Any]], item: Any, i: int,
+                         allowed_refs: list[str] | None = None) -> str | None:
+    """Why `evidence_quotes[i]` is not a quote of the registered store copy, or None.
+
+    Shared by the write-side guard (`merge_worker`) and the integrity audit so both
+    sides answer the same question; the check reads the content-addressed store copy
+    (`11_runtime/evidence-store/<sha256><suffix>`), never the mutable living file.
+    `allowed_refs`, when given, is the packet's own `evidence_refs`: a verdict may only
+    quote evidence the packet itself cites.
+    """
+    if not isinstance(item, dict):
+        return f"review.evidence_quotes[{i}] must be an object {{evidence_ref, quote}}"
+    ref = str(item.get("evidence_ref", "")).strip()
+    quote = str(item.get("quote", "")).strip()
+    if not evidence_id_ok(ref):
+        return f"review.evidence_quotes[{i}].evidence_ref must be a registered E-* id, got {ref!r}"
+    meta = index.get(ref)
+    if meta is None:
+        return f"review.evidence_quotes[{i}].evidence_ref {ref} is not registered evidence"
+    if allowed_refs is not None and ref not in allowed_refs:
+        cited = ", ".join(str(r) for r in allowed_refs) or "none"
+        return (f"review.evidence_quotes[{i}].evidence_ref {ref} is not one of the packet's evidence_refs "
+                f"({cited}) — add the artifact to packet.evidence_refs before quoting it, so the verdict's "
+                "grounding stays inside the evidence the packet submitted")
+    if len(quote) < 20:
+        return (f"review.evidence_quotes[{i}].quote is shorter than 20 characters after stripping — "
+                "quote a real line of the registered capture")
+    store_rel = str(meta.get("store_path") or "")
+    store_path = (root / store_rel) if store_rel else None
+    text = ""
+    if store_path is not None and store_path.is_file():
+        text = store_path.read_text(errors="ignore")
+    if quote not in text:
+        return (f"review.evidence_quotes[{i}].quote not found in the registered store copy of {ref} "
+                f"({store_rel or 'no stored copy'}) — quote the registered snapshot, not the living file "
+                "(re-register the artifact if it changed)")
+    return None
+
+
 def _json_dump(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -434,6 +494,14 @@ class ControlPlane:
         self.root = Path(root).resolve()
         self.rt = self.root / "11_runtime"
         self.events = self.rt / "events.jsonl"
+        # Version stamp: every event appended by this control plane records the
+        # workspace's OS_VERSION, read once here. Audit treats events without the
+        # field as legacy (pre-7.3) and grades their findings as warnings instead
+        # of errors; write-side guards always apply to new events.
+        try:
+            self.os_version = (self.root / "OS_VERSION").read_text(errors="ignore").strip() or "unknown"
+        except OSError:
+            self.os_version = "unknown"
         self.rt.mkdir(parents=True, exist_ok=True)
 
     # ---------- ledger primitives ----------
@@ -484,6 +552,7 @@ class ControlPlane:
             "event_id": f"EV-{seq:06d}",
             "time": now(),
             "actor": actor,
+            "os_version": self.os_version,
             "type": event_type,
             "entity_type": entity_type,
             "entity_id": entity_id,
@@ -552,7 +621,7 @@ class ControlPlane:
             if e["type"] == "CYCLE_CREATED":
                 status = "PLANNED"
             elif e["type"] == "CYCLE_TRANSITIONED":
-                status = e.get("payload", {}).get("to")
+                status = normalize_cycle_state(e.get("payload", {}).get("to"))
         return status
 
     def update_cycle(self, cid: str, patch: dict[str, Any], actor: str = "controller") -> dict[str, Any]:
@@ -618,9 +687,9 @@ class ControlPlane:
     def _technique_events(self, cid: str) -> list[dict[str, Any]]:
         return [e for e in self.events_for("technique") if e.get("cycle_id") == cid]
 
-    def _review_axes(self, cid: str) -> dict[str, dict[str, str]]:
-        """Latest review packet per axis: {axis: {"verdict": ..., "reviewer": ...}}."""
-        axes: dict[str, dict[str, str]] = {}
+    def _review_axes(self, cid: str) -> dict[str, dict[str, Any]]:
+        """Latest review packet per axis: verdict, reviewer, run_id, evidence_quotes."""
+        axes: dict[str, dict[str, Any]] = {}
         for e in self.events_for("worker_result"):
             if e.get("cycle_id") != cid:
                 continue
@@ -630,6 +699,8 @@ class ControlPlane:
                 axes[axis] = {
                     "verdict": str(review.get("verdict", "")).lower(),
                     "reviewer": str(review.get("reviewer", "")).strip(),
+                    "run_id": str(review.get("run_id", "")).strip(),
+                    "evidence_quotes": review.get("evidence_quotes"),
                 }
         return axes
 
@@ -639,7 +710,7 @@ class ControlPlane:
         if missing:
             current = {a: latest.get(a, {}).get("verdict", "none") for a in ("objective", "method")}
             raise ValueError(
-                "cycle guard: VERIFIED requires independent review packets — researchctl worker "
+                "cycle guard: REVIEWED requires independent review packets — researchctl worker "
                 "with review.axis=objective and review.axis=method, latest verdict=pass "
                 f"(current: {current}; missing/not-pass: {', '.join(missing)})"
             )
@@ -654,6 +725,26 @@ class ControlPlane:
                 "cycle guard: the two review axes must come from distinct reviewers — "
                 f"both came from '{reviewers['objective']}'. Dispatch the second axis as a separate run."
             )
+        run_ids = {a: str(latest[a].get("run_id", "")).strip() for a in ("objective", "method")}
+        if not all(run_ids.values()):
+            raise ValueError(
+                "cycle guard: review packets need a review.run_id — the identity of the reviewing run "
+                f"(objective={run_ids['objective'] or 'missing'}, method={run_ids['method'] or 'missing'}); "
+                "a review by the same run as the work is not independent"
+            )
+        if run_ids["objective"] == run_ids["method"]:
+            raise ValueError(
+                "cycle guard: the two review axes must come from distinct runs — "
+                f"both carry run_id '{run_ids['objective']}'. Dispatch the second axis in a separate run."
+            )
+
+    def _validate_review_quotes(self, quotes: list[Any], packet_refs: list[str]) -> None:
+        """Every quote must be a substring of the registered store copy — never the living file."""
+        index = self.evidence_index()
+        for i, item in enumerate(quotes, 1):
+            problem = review_quote_problem(self.root, index, item, i, allowed_refs=packet_refs)
+            if problem:
+                raise ValueError(problem)
 
     def transition_cycle(self, cid: str, to_state: str, *, reason: str,
                          evidence_refs: Iterable[str] = (), actor: str = "controller") -> dict[str, Any]:
@@ -669,11 +760,22 @@ class ControlPlane:
             cur = self.cycle_status(cid)
             if cur is None:
                 raise ValueError(f"unknown cycle: {cid}")
+            if to_state == "VERIFIED":
+                raise ValueError(
+                    "cycle terminal state is REVIEWED (both review axes pass + instrument validation); "
+                    "VERIFIED is the hypothesis/finding state — use `researchctl cycle transition "
+                    f"{cid} REVIEWED` and leave findings to the hypothesis lifecycle"
+                )
             if to_state not in CYCLE_EDGES.get(cur, set()):
                 raise ValueError(f"forbidden transition {cur} -> {to_state}")
             plan = self.cycle_data(cid) or {}
             refs = list(evidence_refs) or self._results_refs(cid)
             self._validate_refs(refs)
+            if to_state in {"RUNNING", "BLOCKED"} and cur == "RESULT_READY" and not refs:
+                raise ValueError(
+                    f"RESULT_READY -> {to_state} back-edge requires evidence refs — record what the "
+                    "result state missed (cite E-ids in results.md) before resuming or blocking"
+                )
             if to_state == "READY":
                 self._require_plan(plan, ("objective", "allowed_scope", "stop_conditions"))
                 self._require_usable_objective(plan)
@@ -691,11 +793,11 @@ class ControlPlane:
                 if not refs:
                     raise ValueError("RESULT_READY requires evidence refs (cite E-ids in results.md)")
                 self._require_section(cid, "results.md", "Disposition")
-            if to_state in {"VERIFIED", "FALSE_POSITIVE", "NOT_APPLICABLE"}:
+            if to_state in {"REVIEWED", "FALSE_POSITIVE", "NOT_APPLICABLE"}:
                 if not refs:
                     raise ValueError(f"{to_state} requires evidence refs")
                 self._require_section(cid, "results.md", "Interpretation")
-                if to_state == "VERIFIED":
+                if to_state == "REVIEWED":
                     self._require_section(cid, "results.md", "Instrument validation")
                     self._require_reviews(cid)
                 if not plan.get("result_summary"):
@@ -801,6 +903,21 @@ class ControlPlane:
                 raise ValueError("TESTING hypothesis requires test_plan")
             if to_state in {"VERIFIED", "FALSE_POSITIVE", "NOT_APPLICABLE"} and not refs:
                 raise ValueError(f"{to_state} hypothesis transition requires evidence refs")
+            if to_state == "NOT_APPLICABLE":
+                absence = str(data.get("precondition_absence", "")).strip()
+                if not absence:
+                    raise ValueError(
+                        "NOT_APPLICABLE requires precondition_absence on the hypothesis — record the absent "
+                        "precondition (version/config/protocol state) via update_hypothesis; use BLOCKED for "
+                        "budget or instrument stops"
+                    )
+                if sentence_too_thin(absence):
+                    raise ValueError(
+                        "NOT_APPLICABLE requires a real precondition_absence sentence (>= 20 characters and "
+                        ">= 3 words after stripping, naming the absent version/config/protocol state) — got "
+                        f"{absence!r}; placeholders do not name a precondition. Use BLOCKED for budget or "
+                        "instrument stops"
+                    )
             if to_state == "CLOSED" and not data.get("learning"):
                 raise ValueError("CLOSED hypothesis requires learning")
             event = self._append_locked("HYPOTHESIS_TRANSITIONED", "hypothesis", hid, actor=actor, reason=reason,
@@ -1398,6 +1515,13 @@ class ControlPlane:
         status = status.upper()
         if status not in {"PASS", "FAIL", "WARN"}:
             raise ValueError("audit status must be PASS, FAIL or WARN")
+        summary = str(summary).strip()
+        if sentence_too_thin(summary):
+            raise ValueError(
+                "audit summary must be a sentence (>= 20 characters and >= 3 words after stripping) — "
+                "name what was audited and what the verdict rests on; the audit ledger is evidence, "
+                "not a checkbox"
+            )
         refs = list(evidence_refs)
         if audit_class in REQUIRED_AUDIT_CLASSES and not refs:
             raise ValueError(f"audit class {audit_class} requires evidence refs")
@@ -1518,6 +1642,7 @@ class ControlPlane:
         if not cid or not refs:
             raise ValueError("worker packet needs cycle_id and evidence_refs")
         review = packet.get("review")
+        quotes: list[Any] = []
         if review is not None:
             if not isinstance(review, dict):
                 raise ValueError("review must be an object: {axis, verdict}")
@@ -1530,10 +1655,26 @@ class ControlPlane:
                     "review packet needs review.reviewer — the identity of the reviewing run; "
                     "the two axes must come from distinct reviewers"
                 )
+            if not str(review.get("run_id", "")).strip():
+                raise ValueError(
+                    "review packet needs review.run_id — the identity of the reviewing run/session; "
+                    "a review produced by the same run as the work is not independent, and audits "
+                    "measure independence from this field, not from prose"
+                )
+            quotes = review.get("evidence_quotes")
+            if not isinstance(quotes, list) or not quotes:
+                raise ValueError(
+                    "review packet needs review.evidence_quotes — a non-empty list of "
+                    "{evidence_ref, quote} objects quoting the registered store copy of each "
+                    "artifact the verdict leans on, so a later edit of the living file cannot "
+                    "silently move the evidence under the review"
+                )
         with _lock(self.root):
             if self.cycle_status(str(cid)) in {None, "CLOSED"}:
                 raise ValueError("worker packet must reference an existing non-closed cycle")
             self._validate_refs(refs)
+            if review is not None:
+                self._validate_review_quotes(quotes, refs)
             aid = f"WR-{len(self._read_events()) + 1:06d}"
             event = self._append_locked("WORKER_RESULT", "worker_result", aid, actor=actor,
                                         reason=packet.get("next_step", "worker result merged"),
@@ -1654,7 +1795,7 @@ class ControlPlane:
             elif e["type"] == "CYCLE_UPDATED" and cid in cycles:
                 cycles[cid].update(e.get("payload", {}))
             elif e["type"] == "CYCLE_TRANSITIONED" and cid in cycles:
-                cycles[cid]["status"] = e.get("payload", {}).get("to")
+                cycles[cid]["status"] = normalize_cycle_state(e.get("payload", {}).get("to"))
         for cid, plan in cycles.items():
             self._write_mapping(self.root / "04_cycles" / cid / "plan.yaml", plan)
 
@@ -1714,7 +1855,7 @@ class ControlPlane:
                 latest[str(cls)] = {"status": payload.get("status"), "time": e.get("time"), "event_id": e.get("event_id")}
         d = self.root / "06_audits"
         d.mkdir(parents=True, exist_ok=True)
-        required = ["scope", "coverage", "negative", "open-hypothesis", "novelty-duplicate", "hygiene-cleanup"]
+        required = sorted(REQUIRED_AUDIT_CLASSES)
         ready = bool(latest) and all(latest.get(k, {}).get("status") == "PASS" for k in required)
         lines = [f"status: {json.dumps('READY' if ready else 'NOT_READY')}", "audits:"]
         for key in sorted(set(required) | set(latest)):

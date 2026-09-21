@@ -33,10 +33,10 @@ cycle.py <ROOT> begin <CYCLE_ID>               # sugar: PLANNED -> READY -> RUNN
 cycle.py <ROOT> submit <CYCLE_ID>              # sugar: RUNNING -> RESULT_READY
 cycle.py <ROOT> transition <CYCLE_ID> <TO>     # guarded edge, exit 1 on violation
 cycle.py <ROOT> update <CYCLE_ID> <PATCH_JSON>        # canonical plan update
-cycle.py <ROOT> close <CYCLE_ID> <TERMINAL>    # RESULT_READY -> VERIFIED|FALSE_POSITIVE|NOT_APPLICABLE -> CLOSED
+cycle.py <ROOT> close <CYCLE_ID> <TERMINAL>    # RESULT_READY -> REVIEWED|FALSE_POSITIVE|NOT_APPLICABLE -> CLOSED
 ```
 
-Code-enforced guards (all in `tools/control_plane.py`, the canonical seam; `tools/cycle.py` and `tools/researchctl.py` are thin adapters with no private enforcement): `READY` needs a usable objective + non-empty scope/stop conditions; `RUNNING` additionally needs `objective.md` (## Question + ## Minimal test) and per-pack `knowledge_triage` (USE/SKIP + reason); `RESULT_READY` needs `results.md` ## Disposition + registered E-* refs; terminal states need ## Interpretation (+ ## Instrument validation for `VERIFIED`); `CLOSED` needs ## New hypotheses + ## Next step + at least one `TECHNIQUE_EVALUATED` event for the cycle. Lifecycle edges outside `28_CYCLE_STATE_MACHINE.md` are rejected. Canonical plan fields are updated through the control plane, not by editing `plan.yaml`. `tools/new_cycle.py` is a thin wrapper over `create`.
+Code-enforced guards (all in `tools/control_plane.py`, the canonical seam; `tools/cycle.py` and `tools/researchctl.py` are thin adapters with no private enforcement): `READY` needs a usable objective + non-empty scope/stop conditions; `RUNNING` additionally needs `objective.md` (## Question + ## Minimal test) and per-pack `knowledge_triage` (USE/SKIP + reason); `RESULT_READY` needs `results.md` ## Disposition + registered E-* refs; terminal states need ## Interpretation (+ ## Instrument validation and both review axes for `REVIEWED`); back-edges `RESULT_READY -> RUNNING|BLOCKED` need at least one evidence ref; `CLOSED` needs ## New hypotheses + ## Next step + at least one `TECHNIQUE_EVALUATED` event for the cycle. Cycle `VERIFIED` is rejected with a pointer to `REVIEWED` (finding-level `VERIFIED` belongs to the hypothesis lifecycle). Lifecycle edges outside `28_CYCLE_STATE_MACHINE.md` are rejected. Canonical plan fields are updated through the control plane, not by editing `plan.yaml`. `tools/new_cycle.py` is a thin wrapper over `create`.
 
 ## Mandatory cycle questions
 

@@ -82,7 +82,9 @@ const preparePayload = {
 }
 const preparePath = join(root, 'prepare.json')
 writeFileSync(preparePath, JSON.stringify(preparePayload))
-execFileSync('python3', [join(root, 'tools', 'researchctl.py'), root, 'prepare', preparePath], { encoding: 'utf8', timeout: 60000 })
+const prepareNonce = JSON.parse(execFileSync(
+  'python3', [join(root, 'tools', 'researchctl.py'), root, 'prepare', preparePath],
+  { encoding: 'utf8', timeout: 60000 })).nonce
 
 // 3. The executor consumes the token, reaches the lab, and records the chain.
 const r1 = await runControlledRequest({ root, args: { method: 'GET', url, principal: 'researcher-A' } })
@@ -91,6 +93,10 @@ check('executor reaches the lab and consumes the token',
 const ledger = readFileSync(join(root, '11_runtime/events.jsonl'), 'utf8')
 check('evidence registered for the capture', ledger.includes('EVIDENCE_REGISTERED'))
 check('action recorded with the token id', ledger.includes('ACTION_RECORDED') && ledger.includes('A-000001'))
+const recordedAction = ledger.split('\n').filter(Boolean).map((line) => JSON.parse(line))
+  .find((event) => event.type === 'ACTION_RECORDED')
+check('action payload carries the consumed token nonce',
+  Boolean(recordedAction) && recordedAction.payload.token_nonce === prepareNonce)
 check('token marked consumed in the store',
   readFileSync(join(root, '11_runtime/action-tokens.jsonl'), 'utf8').includes('"consumed":true'))
 check('capture registered under 08_artifacts/raw',

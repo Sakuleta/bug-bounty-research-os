@@ -47,8 +47,8 @@ owns the truth (`11_WORKER_PROTOCOL.md`).
 
 Delegate when, not if: fan out to subagents when (a) two or more branches run in
 parallel with no shared state, (b) a long task (builds, pulls, boots, sweeps) can run
-in background while you progress elsewhere, (c) a VERIFIED claim needs an independent
-second pair of eyes, or (d) a web-research sweep is separable from live testing.
+in background while you progress elsewhere, (c) a claim heading to REVIEWED needs an
+independent second pair of eyes, or (d) a web-research sweep is separable from live testing.
 Inline execution by default with no parallel branch is how capability silently rots —
 the audit does not check this; the loop above does.
 
@@ -65,7 +65,11 @@ the audit does not check this; the loop above does.
   the engagement's listed assets. The enforcer plugin consumes the token for exactly
   one matching call: `research_os_request` for `tool_family` "http", or
   `research_os_browser` for `tool_family` "browser" (`request_shape` `{url, principal}`)
-  — no preflight, no live action, and raw network egress stays closed.
+  — no preflight, no live action, and raw network egress stays closed. The
+  controlled executors record the consumed nonce as `token_nonce` on every
+  `ACTION_RECORDED`, so the action ledger links each call back to the token that
+  authorized it (`tools/audit.py` warns on legacy records and closure requires the
+  nonce on versioned actions).
 - Scope is default-deny: record it with `researchctl scope-set` before target traffic —
   the first record carries a `source_reference` from the program policy; re-records,
   widenings, and any file that already carries an explicit depth-1 `gate:` line
@@ -86,12 +90,15 @@ the audit does not check this; the loop above does.
   Learning files (`10_learning/technique-discoveries.md`, `11_runtime/last-result.md`,
   `11_runtime/current-context.md`) are projections the OS rebuilds on every mutation —
   never hand-edit them.
-- Claim points are gated: `VERIFIED` requires independent review packets
-  (`researchctl worker` with `review.axis=objective` and `review.axis=method`, latest
-  verdict `pass`, each carrying a distinct `review.reviewer`) — two separate runs,
-  neither reranked; one run cannot satisfy both axes. `researchctl claims-check` gives
-  reviewers an evidence-grounded supports/contradicts/says_nothing verdict per claim
-  (auto-accepted at ≥0.8 confidence, below that flagged) — an aid, not the gate.
+- Claim points are gated: the cycle terminal `REVIEWED` requires independent review
+  packets (`researchctl worker` with `review.axis=objective` and `review.axis=method`,
+  latest verdict `pass`, each carrying a distinct `review.reviewer` and `review.run_id`)
+  — two separate runs, neither reranked; one run cannot satisfy both axes. Each packet
+  also carries `review.evidence_quotes`: `{evidence_ref, quote}` objects whose quotes
+  (≥ 20 chars) must appear in the content-addressed store copy of that evidence, never
+  the mutable living file. `researchctl claims-check` gives reviewers an evidence-grounded
+  supports/contradicts/says_nothing verdict per claim (auto-accepted at ≥0.8 confidence,
+  below that flagged) — an aid, not the gate. `VERIFIED` is the hypothesis/finding state.
 - Researchers' other engagements don't exist here: never reuse identities, sessions,
   credentials, artifacts, or state across programs.
 
@@ -133,11 +140,17 @@ disclosure, or third-party contact without explicit human approval, ever.
 
 Run `tools/audit.py` regularly; all suites under `tools/test_*.py` must stay green.
 Record scope/hygiene/open-hypothesis (and coverage/negative/novelty-duplicate when
-earned) via `researchctl audit-record` with evidence refs; closure also requires the
-method self-attack with its six-row matrix (`researchctl audit-record method-self-attack
-PASS "<summary>" --matrix matrix.json --evidence <E-id>`). Closure needs
-`06_audits/CLOSURE-PROOF.md` + current PASS on every required class + clean machine
-audit (`07_AUDIT_CLOSURE.md`). Never close from intuition.
+earned) via `researchctl audit-record` with evidence refs and a sentence summary
+(≥ 20 chars, ≥ 3 words, naming what was audited); scope/coverage/open-hypothesis
+summaries name a current asset / cycle / hypothesis (or say `no assets` / `no cycles` /
+`none`); closure also requires the method self-attack with its six-row matrix
+(`researchctl audit-record method-self-attack PASS "<summary>" --matrix matrix.json
+--evidence <E-id>`). Closure needs `06_audits/CLOSURE-PROOF.md`, current PASS on all
+seven required classes, and a clean machine audit (`07_AUDIT_CLOSURE.md`). The proof is
+machine-checked: `python3 tools/audit.py <root> --emit-proof` writes the skeleton
+(mechanical facts + `TODO(human)` judgment prompts), you fill the prompts, and
+`--closure` fails on a missing file, a missing/empty section, or an unanswered
+`TODO(human)`. Never close from intuition.
 
 ## 9. Secrets
 

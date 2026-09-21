@@ -13,8 +13,9 @@ from unittest import mock
 TOOLS = Path(__file__).resolve().parent
 ROOT_REPO = TOOLS.parent
 sys.path.insert(0, str(TOOLS))
+import audit as _audit  # noqa: E402
 import control_plane as _control_plane  # noqa: E402
-from control_plane import (ControlPlane, METHOD_SELF_ATTACK_ROWS,  # noqa: E402
+from control_plane import (CYCLE_EDGES, ControlPlane, METHOD_SELF_ATTACK_ROWS,  # noqa: E402
                            REQUIRED_AUDIT_CLASSES, asset_hosts, engagement_assets,
                            host_in_scope, scope_check)
 
@@ -96,6 +97,169 @@ def write_results(root: Path, cid: str, eid: str | None = None, disposition: str
         "## New hypotheses\nH-0002 filed as the next branch.\n\n## Next step\nEvaluate H-0002.\n")
 
 
+def legacyize(root: Path) -> None:
+    """Rewrite the ledger as a pre-versioning historical ledger (no os_version, re-hashed).
+
+    Emulates a workspace archived before the version stamp existed: events lack the
+    field, the chain is intact, and the audit must tolerate them as legacy records.
+    """
+    path = root / "11_runtime/events.jsonl"
+    events = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    prev = "GENESIS"
+    lines = []
+    for event in events:
+        event.pop("os_version", None)
+        event["prev_hash"] = prev
+        event.pop("event_hash", None)
+        event["event_hash"] = ControlPlane._event_hash(event)
+        prev = event["event_hash"]
+        lines.append(json.dumps(event, sort_keys=True, separators=(",", ":")))
+    path.write_text("\n".join(lines) + "\n")
+    ControlPlane(root).refresh()
+
+
+def downgrade_last_event(root: Path) -> None:
+    """Strip `os_version` from only the final ledger event and re-hash it.
+
+    Models a later append that slipped past the version stamp without touching the
+    chain of earlier events (their hashes stay valid).
+    """
+    path = root / "11_runtime/events.jsonl"
+    events = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    last = events[-1]
+    last.pop("os_version", None)
+    last.pop("event_hash", None)
+    last["event_hash"] = ControlPlane._event_hash(last)
+    path.write_text("\n".join(json.dumps(e, sort_keys=True, separators=(",", ":")) for e in events) + "\n")
+    ControlPlane(root).refresh()
+
+
+def downgrade_events_through(root: Path, entity_id: str) -> None:
+    """Strip `os_version` from every event up to and including `entity_id`, re-chaining hashes.
+
+    Keeps the ledger's version stamps monotone (legacy prefix, then versioned suffix) so a
+    single legacy record can be emulated inside an otherwise versioned ledger.
+    """
+    path = root / "11_runtime/events.jsonl"
+    events = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    prev = "GENESIS"
+    legacy = True
+    lines = []
+    for event in events:
+        if legacy:
+            event.pop("os_version", None)
+            if event.get("entity_id") == entity_id:
+                legacy = False
+        event["prev_hash"] = prev
+        event.pop("event_hash", None)
+        event["event_hash"] = ControlPlane._event_hash(event)
+        prev = event["event_hash"]
+        lines.append(json.dumps(event, sort_keys=True, separators=(",", ":")))
+    path.write_text("\n".join(lines) + "\n")
+    ControlPlane(root).refresh()
+
+
+def recording_workspace(cid: str = "C-0001") -> tuple[Path, ControlPlane, str]:
+    """RUNNING cycle with registered evidence and a filled results.md at RESULT_READY."""
+    r = fresh_root()
+    c = ControlPlane(r)
+    c.create_cycle(cid, cycle_fixture(cid, "review binding"))
+    write_objective(r, cid)
+    c.transition_cycle(cid, "READY", reason="ready")
+    c.transition_cycle(cid, "RUNNING", reason="run")
+    (r / f"{cid}-capture.txt").write_text("capture: bounded impact reproduced under the recorded control\n")
+    eid = c.register_evidence(f"{cid}-capture.txt", kind="raw", source="researcher-owned",
+                              cycle_id=cid)["payload"]["id"]
+    write_results(r, cid, eid)
+    c.transition_cycle(cid, "RESULT_READY", reason="result", evidence_refs=[eid])
+    c.update_cycle(cid, {"result_summary": "bounded impact reproduced under review"})
+    return r, c, eid
+
+
+def close_workspace(with_action: bool = False, token_nonce: str | None = None) -> tuple[Path, ControlPlane, str]:
+    """Minimal CLOSED workspace: one false-positive cycle, auditable evidence, no gates."""
+    r = fresh_root()
+    c = ControlPlane(r)
+    c.create_cycle("C-0010", cycle_fixture("C-0010", "closure fixture"))
+    write_objective(r, "C-0010")
+    c.transition_cycle("C-0010", "READY", reason="ready")
+    c.transition_cycle("C-0010", "RUNNING", reason="run")
+    if with_action:
+        action = {
+            "id": "A-CLOSURE", "cycle_id": "C-0010",
+            "target": "the researcher-owned rehearsal target (no network)",
+            "scope_status": "IN_SCOPE", "account": "researcher-A", "object_owner": "researcher-A",
+            "purpose": "closure provenance check", "hypothesis": "rehearsal (no hypothesis)",
+            "expected_secure": "n/a", "expected_vulnerable": "n/a",
+            "side_effect": "none", "stop_condition": "stop after the check",
+        }
+        if token_nonce:
+            action["token_nonce"] = token_nonce
+        c.record_action(action)
+    (r / "scope-proof.txt").write_text("scope proof: the rehearsal asset stayed inside the recorded boundary\n")
+    eid = c.register_evidence("scope-proof.txt", kind="audit", source="researcher-owned",
+                              cycle_id="C-0010")["payload"]["id"]
+    write_results(r, "C-0010", eid, disposition="FALSE_POSITIVE")
+    c.transition_cycle("C-0010", "RESULT_READY", reason="result", evidence_refs=[eid])
+    c.update_cycle("C-0010", {"result_summary": "clean control reproduced the signal"})
+    c.transition_cycle("C-0010", "FALSE_POSITIVE", reason="fp", evidence_refs=[eid])
+    c.evaluate_technique({"cycle_id": "C-0010", "technique_family": "tls-pinning",
+                          "result": "FALSE_POSITIVE", "interpretation": "control reproduced the signal",
+                          "learning": "no pinning oracle on this build", "evidence_refs": [eid]})
+    c.transition_cycle("C-0010", "CLOSED", reason="closed", evidence_refs=[eid])
+    return r, c, eid
+
+
+AUDIT_SUMMARIES = {
+    "scope": "scope audit: no assets were declared and none were contacted",
+    "coverage": "every applicable matrix cell has a terminal state or a named blocker (C-0010)",
+    "negative": "negative conclusions carry validated controls and their capture evidence",
+    "open-hypothesis": "no high-value legal hypothesis is left without a disposition (none open)",
+    "novelty-duplicate": "the candidate was compared against program history and current public research",
+    "hygiene-cleanup": "no credentials, secrets or unrelated artifacts remain in reportable material",
+}
+
+
+def record_all_audits(cp: ControlPlane, eid: str) -> None:
+    for cls, summary in AUDIT_SUMMARIES.items():
+        cp.record_audit(cls, "PASS", summary, evidence_refs=[eid])
+    cp.record_audit("method-self-attack", "PASS", "all six self-attack prompts are answered with no blank rows",
+                    evidence_refs=[eid],
+                    matrix={row: "none — fixture has no closed branches" for row in METHOD_SELF_ATTACK_ROWS})
+
+
+def fill_proof(root: Path) -> None:
+    """Emit the closure proof and replace every TODO(human) line with rehearsal prose."""
+    _audit.emit_closure_proof(root, force=True)
+    path = root / "06_audits/CLOSURE-PROOF.md"
+    lines = []
+    for line in path.read_text().splitlines():
+        if line.startswith("TODO(human):"):
+            lines.append(f"Rehearsal judgment: {line.split(':', 1)[1].strip()} (satisfied by this fixture)")
+        else:
+            lines.append(line)
+    path.write_text("\n".join(lines) + "\n")
+
+
+def replace_proof_section(root: Path, name: str, body: str) -> Path:
+    """Swap one closure-proof section body for `body`; the rest of the proof is untouched."""
+    path = root / "06_audits/CLOSURE-PROOF.md"
+    out: list[str] = []
+    skip = False
+    for line in path.read_text().splitlines():
+        if line.startswith("## "):
+            if skip:
+                skip = False
+            elif line[3:].strip() == name:
+                out += [line, body]
+                skip = True
+                continue
+        if not skip:
+            out.append(line)
+    path.write_text("\n".join(out) + "\n")
+    return path
+
+
 root = fresh_root()
 cp = ControlPlane(root)
 
@@ -149,7 +313,8 @@ cp.create_hypothesis("H-0001", {
 
 # 3. Evidence is an object with a stable ID + hash; later refs must resolve.
 artifact = root / "04_cycles/C-0001/proof.txt"
-artifact.write_text("proof-v1\n")
+artifact.write_text("proof-v1: bounded impact reproduced under the recorded control\n")
+QUOTE = "bounded impact reproduced under the recorded control"
 ev = cp.register_evidence("04_cycles/C-0001/proof.txt", kind="raw", source="researcher-owned", cycle_id="C-0001")
 eid = ev["payload"]["id"]
 check("evidence ID allocated", eid == "E-000001")
@@ -809,12 +974,12 @@ write_results(root, "C-0001", eid)
 cp.transition_cycle("C-0001", "RESULT_READY", reason="result recorded", evidence_refs=[eid])
 cp.update_cycle("C-0001", {"result_summary": "impact reproduced with clean negative control"})
 
-# 5a. Claim gate: VERIFIED needs independent review packets on both axes.
+# 5a. Claim gate: REVIEWED needs independent review packets on both axes.
 try:
-    cp.transition_cycle("C-0001", "VERIFIED", reason="no reviews", evidence_refs=[eid])
-    check("VERIFIED requires review packets", False)
+    cp.transition_cycle("C-0001", "REVIEWED", reason="no reviews", evidence_refs=[eid])
+    check("REVIEWED requires review packets", False)
 except ValueError as exc:
-    check("VERIFIED requires review packets", "review" in str(exc))
+    check("REVIEWED requires review packets", "review" in str(exc))
 try:
     cp.merge_worker({"cycle_id": "C-0001", "evidence_refs": [eid], "review": {"axis": "vibes", "verdict": "pass"}})
     check("invalid review axis rejected", False)
@@ -825,44 +990,96 @@ try:
     check("review packet requires reviewer identity", False)
 except ValueError as exc:
     check("review packet requires reviewer identity", "reviewer" in str(exc))
-cp.merge_worker({"cycle_id": "C-0001", "evidence_refs": [eid], "next_step": "objective review",
-                 "review": {"axis": "objective", "verdict": "pass", "reviewer": "run-objective"}})
 try:
-    cp.transition_cycle("C-0001", "VERIFIED", reason="one axis only", evidence_refs=[eid])
-    check("VERIFIED requires both axes", False)
-except ValueError:
-    check("VERIFIED requires both axes", True)
-cp.merge_worker({"cycle_id": "C-0001", "evidence_refs": [eid], "next_step": "method review",
-                 "review": {"axis": "method", "verdict": "fail", "reviewer": "run-method"}})
+    cp.merge_worker({"cycle_id": "C-0001", "evidence_refs": [eid],
+                     "review": {"axis": "objective", "verdict": "pass", "reviewer": "run-objective",
+                                "evidence_quotes": [{"evidence_ref": eid, "quote": QUOTE}]}})
+    check("review packet requires run_id", False)
+except ValueError as exc:
+    check("review packet requires run_id", "run_id" in str(exc))
+def _quote_packet(axis: str, **review_extra: object) -> dict:
+    review = {"axis": axis, "verdict": "pass", "reviewer": f"run-{axis}",
+              "run_id": f"session-{axis}-1",
+              "evidence_quotes": [{"evidence_ref": eid, "quote": QUOTE}]}
+    review.update(review_extra)
+    return {"cycle_id": "C-0001", "evidence_refs": [eid], "next_step": f"{axis} review", "review": review}
 try:
-    cp.transition_cycle("C-0001", "VERIFIED", reason="failing review", evidence_refs=[eid])
-    check("failing review blocks VERIFIED", False)
+    cp.merge_worker({**_quote_packet("objective"), "review": {"axis": "objective", "verdict": "pass",
+                     "reviewer": "run-objective", "run_id": "session-objective-1", "evidence_quotes": []}})
+    check("review packet requires evidence quotes", False)
+except ValueError as exc:
+    check("review packet requires evidence quotes", "evidence_quotes" in str(exc))
+try:
+    cp.merge_worker({**_quote_packet("objective"),
+                     "review": {"axis": "objective", "verdict": "pass", "reviewer": "run-objective",
+                                "run_id": "session-objective-1",
+                                "evidence_quotes": [{"evidence_ref": eid, "quote": "no such line anywhere"}]}})
+    check("review quote must be a registered-capture substring", False)
+except ValueError as exc:
+    check("review quote must be a registered-capture substring", "not found" in str(exc))
+cp.merge_worker(_quote_packet("objective"))
+try:
+    cp.transition_cycle("C-0001", "REVIEWED", reason="one axis only", evidence_refs=[eid])
+    check("REVIEWED requires both axes", False)
 except ValueError:
-    check("failing review blocks VERIFIED", True)
-cp.merge_worker({"cycle_id": "C-0001", "evidence_refs": [eid], "next_step": "re-review after fixes",
-                 "review": {"axis": "method", "verdict": "pass", "reviewer": "run-method"}})
-cp.transition_cycle("C-0001", "VERIFIED", reason="verified", evidence_refs=[eid])
-check("verified after both reviews pass", cp.cycle_status("C-0001") == "VERIFIED")
+    check("REVIEWED requires both axes", True)
+cp.merge_worker({**_quote_packet("method"), "review": {"axis": "method", "verdict": "fail",
+                 "reviewer": "run-method", "run_id": "session-method-1",
+                 "evidence_quotes": [{"evidence_ref": eid, "quote": QUOTE}]}})
+try:
+    cp.transition_cycle("C-0001", "REVIEWED", reason="failing review", evidence_refs=[eid])
+    check("failing review blocks REVIEWED", False)
+except ValueError:
+    check("failing review blocks REVIEWED", True)
+cp.merge_worker(_quote_packet("method"))
+cp.transition_cycle("C-0001", "REVIEWED", reason="both reviews pass", evidence_refs=[eid])
+check("reviewed after both reviews pass", cp.cycle_status("C-0001") == "REVIEWED")
 
 # 5a-bis. Two axes from one reviewer identity cannot satisfy the claim gate.
 cp.create_cycle("C-0004", cycle_fixture("C-0004", "same-reviewer"))
 write_objective(root, "C-0004")
 cp.transition_cycle("C-0004", "READY", reason="ready")
 cp.transition_cycle("C-0004", "RUNNING", reason="run")
-(root / "same-reviewer-proof.txt").write_text("proof\n")
+(root / "same-reviewer-proof.txt").write_text("same reviewer proof: bounded impact reproduced\n")
 eid4 = cp.register_evidence("same-reviewer-proof.txt", kind="raw", source="researcher-owned",
                             cycle_id="C-0004")["payload"]["id"]
 write_results(root, "C-0004", eid4)
 cp.transition_cycle("C-0004", "RESULT_READY", reason="result", evidence_refs=[eid4])
 cp.update_cycle("C-0004", {"result_summary": "bounded impact reproduced"})
+def _same_reviewer_packet(axis: str, run_id: str) -> dict:
+    return {"cycle_id": "C-0004", "evidence_refs": [eid4],
+            "review": {"axis": axis, "verdict": "pass", "reviewer": "same-run", "run_id": run_id,
+                       "evidence_quotes": [{"evidence_ref": eid4,
+                                            "quote": "bounded impact reproduced"}]}}
 for axis in ("objective", "method"):
-    cp.merge_worker({"cycle_id": "C-0004", "evidence_refs": [eid4],
-                     "review": {"axis": axis, "verdict": "pass", "reviewer": "same-run"}})
+    cp.merge_worker(_same_reviewer_packet(axis, f"session-{axis}-1"))
 try:
-    cp.transition_cycle("C-0004", "VERIFIED", reason="same reviewer", evidence_refs=[eid4])
+    cp.transition_cycle("C-0004", "REVIEWED", reason="same reviewer", evidence_refs=[eid4])
     check("same reviewer cannot satisfy both axes", False)
 except ValueError as exc:
     check("same reviewer cannot satisfy both axes", "distinct reviewers" in str(exc))
+
+# 5a-ter. Two axes from one reviewing run (same run_id) cannot satisfy the claim gate either.
+def _same_run_packet(axis: str, run_id: str) -> dict:
+    return {"cycle_id": "C-0004", "evidence_refs": [eid4],
+            "review": {"axis": axis, "verdict": "pass", "reviewer": f"run-{axis}", "run_id": run_id,
+                       "evidence_quotes": [{"evidence_ref": eid4,
+                                            "quote": "bounded impact reproduced"}]}}
+cp.merge_worker(_same_run_packet("objective", "session-shared"))
+cp.merge_worker(_same_run_packet("method", "session-shared"))
+try:
+    cp.transition_cycle("C-0004", "REVIEWED", reason="same run", evidence_refs=[eid4])
+    check("same run_id cannot satisfy both axes", False)
+except ValueError as exc:
+    check("same run_id cannot satisfy both axes", "run_id" in str(exc) and "distinct" in str(exc))
+# A packet merged without a run_id (e.g. a legacy hand-merged ledger) cannot prove REVIEWED.
+cp.append("WORKER_RESULT", "worker_result", "WR-LEGACY", cycle_id="C-0004", evidence_refs=[eid4],
+          payload={"review": {"axis": "objective", "verdict": "pass", "reviewer": "legacy-run"}})
+try:
+    cp.transition_cycle("C-0004", "REVIEWED", reason="legacy packet without run_id", evidence_refs=[eid4])
+    check("missing run_id blocks REVIEWED", False)
+except ValueError as exc:
+    check("missing run_id blocks REVIEWED", "run_id" in str(exc))
 
 # 5b. CLOSED requires a technique evaluation for the cycle; learning files are projections.
 try:
@@ -988,23 +1205,20 @@ cp4.evaluate_technique({"cycle_id": "C-0010", "technique_family": "tls-pinning",
 cp4.transition_cycle("C-0010", "CLOSED", reason="closed", evidence_refs=[e4])
 # Method self-attack is machine-checked: six rows, no blanks, or the audit is refused.
 try:
-    cp4.record_audit("method-self-attack", "PASS", "no matrix", evidence_refs=[e4])
+    cp4.record_audit("method-self-attack", "PASS", "no matrix provided for the self-attack audit",
+                     evidence_refs=[e4])
     check("method-self-attack requires the six-row matrix", False)
 except ValueError as exc:
     check("method-self-attack requires the six-row matrix", "matrix" in str(exc))
 blank = {r: "none — fixture has no closed branches" for r in METHOD_SELF_ATTACK_ROWS}
 blank["weak-negative"] = "   "
 try:
-    cp4.record_audit("method-self-attack", "PASS", "blank row", evidence_refs=[e4], matrix=blank)
+    cp4.record_audit("method-self-attack", "PASS", "matrix with a blank row", evidence_refs=[e4], matrix=blank)
     check("method-self-attack matrix rows must all be filled", False)
 except ValueError as exc:
     check("method-self-attack matrix rows must all be filled", "weak-negative" in str(exc))
-for cls in sorted(REQUIRED_AUDIT_CLASSES):
-    if cls == "method-self-attack":
-        cp4.record_audit(cls, "PASS", "six prompts answered", evidence_refs=[e4],
-                         matrix={r: "none — fixture has no closed branches" for r in METHOD_SELF_ATTACK_ROWS})
-    else:
-        cp4.record_audit(cls, "PASS", f"{cls} complete", evidence_refs=[e4])
+record_all_audits(cp4, e4)
+fill_proof(root4)
 sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(root4), "--closure"], capture_output=True, text=True)
 check("evidence-backed audit declarations prove closure", sub.returncode == 0)
 # Any later material research event invalidates the current audit set.
@@ -1024,5 +1238,435 @@ check("audit detects event tampering", sub.returncode != 0 and "event_hash misma
 
 next_view = cp4.next_actions()
 check("next seam exposes legal lifecycle moves", any(x["cycle_id"] == "C-0010" for x in next_view["cycles"]))
+
+# 10. Version-stamped events: the envelope records the workspace OS_VERSION; legacy ledgers stay clean.
+ver_root = fresh_root()
+(ver_root / "OS_VERSION").write_text("7.3\n")
+ev = ControlPlane(ver_root).append("NOTE", "note", "N-1", reason="version stamp probe")
+check("new events carry the workspace os_version", ev.get("os_version") == "7.3")
+check("new events carry a placeholder stamp without an OS_VERSION file",
+      ControlPlane(fresh_root()).append("NOTE", "note", "N-2", reason="no version file").get("os_version") == "unknown")
+leg_root, leg_cp, leg_eid = recording_workspace("C-0002")
+legacyize(leg_root)
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(leg_root)], capture_output=True, text=True)
+check("audit tolerates a legacy ledger without os_version", sub.returncode == 0)
+
+# 11. Cycle terminal rename: REVIEWED replaces VERIFIED; legacy ledgers replay as REVIEWED.
+check("cycle edges carry REVIEWED and no cycle VERIFIED",
+      "VERIFIED" not in CYCLE_EDGES and "REVIEWED" in CYCLE_EDGES["RESULT_READY"]
+      and CYCLE_EDGES["REVIEWED"] == {"CLOSED"})
+ren_root, ren_cp, ren_eid = recording_workspace("C-0001")
+try:
+    ren_cp.transition_cycle("C-0001", "VERIFIED", reason="old terminal name", evidence_refs=[ren_eid])
+    check("cycle VERIFIED transition rejected", False)
+except ValueError as exc:
+    check("cycle VERIFIED transition rejected with a REVIEWED hint",
+          "REVIEWED" in str(exc) and "hypothesis" in str(exc))
+write_results(ren_root, "C-0001")
+try:
+    ren_cp.transition_cycle("C-0001", "RUNNING", reason="back to running without evidence")
+    check("RESULT_READY back-edge requires evidence", False)
+except ValueError as exc:
+    check("RESULT_READY back-edge requires evidence", "evidence" in str(exc))
+try:
+    ren_cp.transition_cycle("C-0001", "BLOCKED", reason="blocked without evidence")
+    check("RESULT_READY -> BLOCKED back-edge requires evidence", False)
+except ValueError as exc:
+    check("RESULT_READY -> BLOCKED back-edge requires evidence", "evidence" in str(exc))
+ren_cp.transition_cycle("C-0001", "RUNNING", reason="back to running for a follow-up", evidence_refs=[ren_eid])
+check("RESULT_READY back-edge works with evidence", ren_cp.cycle_status("C-0001") == "RUNNING")
+
+# 11b. NOT_APPLICABLE hypothesis requires a recorded absent precondition.
+na_root = fresh_root(); na_cp = ControlPlane(na_root)
+na_cp.create_hypothesis("H-0001", {
+    "observation": "o", "hypothesis": "h", "secure_prediction": "s", "vulnerable_prediction": "v",
+    "test_question": "q", "test_plan": "p"})
+(na_root / "na-capture.txt").write_text("fingerprint capture: the parser is absent on this build\n")
+na_eid = na_cp.register_evidence("na-capture.txt", kind="raw", source="researcher-owned")["payload"]["id"]
+na_cp.transition_hypothesis("H-0001", "QUEUED", reason="queued")
+na_cp.transition_hypothesis("H-0001", "TESTING", reason="testing")
+try:
+    na_cp.transition_hypothesis("H-0001", "NOT_APPLICABLE", reason="absent", evidence_refs=[na_eid])
+    check("NOT_APPLICABLE requires a recorded absent precondition", False)
+except ValueError as exc:
+    check("NOT_APPLICABLE requires a recorded absent precondition",
+          "precondition_absence" in str(exc) and "BLOCKED" in str(exc))
+na_cp.update_hypothesis("H-0001", {"precondition_absence": "no XML parser on the target build"})
+na_cp.transition_hypothesis("H-0001", "NOT_APPLICABLE", reason="absent", evidence_refs=[na_eid])
+check("NOT_APPLICABLE recorded once the absent precondition is on the hypothesis",
+      na_cp.hypothesis_status("H-0001") == "NOT_APPLICABLE")
+
+# 12. Review binding: the audit re-verifies reviews against the registered store copy.
+leg_cp.append("CYCLE_TRANSITIONED", "cycle", "C-0002",
+              payload={"from": "RESULT_READY", "to": "VERIFIED"}, evidence_refs=[leg_eid], cycle_id="C-0002")
+leg_cp.append("WORKER_RESULT", "worker_result", "WR-L1", cycle_id="C-0002", evidence_refs=[leg_eid],
+              payload={"review": {"axis": "objective", "verdict": "pass", "reviewer": "run-1"}})
+leg_cp.append("WORKER_RESULT", "worker_result", "WR-L2", cycle_id="C-0002", evidence_refs=[leg_eid],
+              payload={"review": {"axis": "method", "verdict": "pass", "reviewer": "run-2"}})
+leg_cp.refresh()
+check("legacy cycle VERIFIED replays as REVIEWED", leg_cp.cycle_status("C-0002") == "REVIEWED")
+check("cycle projection normalizes the legacy status to REVIEWED",
+      '"REVIEWED"' in (leg_root / "04_cycles/C-0002/plan.yaml").read_text())
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(leg_root)], capture_output=True, text=True)
+check("versioned review packets without run_id/quotes fail the audit",
+      sub.returncode != 0 and "run_id" in sub.stdout and "evidence_quotes" in sub.stdout)
+legacyize(leg_root)
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(leg_root)], capture_output=True, text=True)
+check("legacy review packets warn instead of failing the audit",
+      sub.returncode == 0 and "WARN" in sub.stdout and "run_id" in sub.stdout)
+check("legacy normalization leaves no projection drift", "projection drift" not in sub.stdout)
+live_root, live_cp, live_eid = recording_workspace("C-0006")
+live_path = live_root / "C-0006-capture.txt"
+live_path.write_text(live_path.read_text()
+                     + "appended after registration: impact reproduced again\n")
+try:
+    live_cp.merge_worker({"cycle_id": "C-0006", "evidence_refs": [live_eid],
+                          "review": {"axis": "objective", "verdict": "pass", "reviewer": "run-live",
+                                     "run_id": "session-live-1",
+                                     "evidence_quotes": [{"evidence_ref": live_eid,
+                                                          "quote": "appended after registration: impact reproduced again"}]}})
+    check("a quote that exists only in the changed living file is rejected", False)
+except ValueError as exc:
+    check("a quote that exists only in the changed living file is rejected",
+          "not found" in str(exc) and "store copy" in str(exc))
+leg_cp.evaluate_technique({"cycle_id": "C-0002", "technique_family": "cache-key-differential",
+                           "result": "INCONCLUSIVE", "interpretation": "single GET cannot decide the key",
+                           "learning": "variant pair needed", "evidence_refs": [leg_eid]})
+leg_cp.transition_cycle("C-0002", "CLOSED", reason="close after legacy replay", evidence_refs=[leg_eid])
+check("legacy-reviewed cycle closes via REVIEWED", leg_cp.cycle_status("C-0002") == "CLOSED")
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(leg_root)], capture_output=True, text=True)
+check("legacy ledger still audits after closing", sub.returncode == 0)
+
+# 13. Audit content: evidence refs, sentence summaries, named entities (versioned ERROR / legacy WARNING).
+s3_bad_root, s3_bad, s3_bad_eid = recording_workspace("C-0003")
+s3_bad.append("AUDIT_RECORDED", "audit", "scope", evidence_refs=[],
+              payload={"class": "scope", "status": "PASS", "summary": "thin"})
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(s3_bad_root)], capture_output=True, text=True)
+check("audit rejects an audit event without evidence refs",
+      sub.returncode != 0 and "no evidence_refs" in sub.stdout)
+check("audit rejects a summary shorter than 20 chars / 3 words",
+      sub.returncode != 0 and "summary too thin" in sub.stdout)
+s3_ent_root, s3_ent, s3_ent_eid = recording_workspace("C-0004")
+(s3_ent_root / "00_control/engagement.yaml").write_text('scope:\n  assets:\n  - "example.test"\n')
+for cls, summary in [("scope", "the scope was reviewed in this rehearsal"),
+                     ("coverage", "coverage was reviewed in this rehearsal"),
+                     ("open-hypothesis", "the hypotheses were reviewed in this rehearsal")]:
+    s3_ent.append("AUDIT_RECORDED", "audit", cls, evidence_refs=[s3_ent_eid],
+                  payload={"class": cls, "status": "PASS", "summary": summary})
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(s3_ent_root)], capture_output=True, text=True)
+check("scope summary must name a current asset",
+      sub.returncode != 0 and "scope summary names no current asset" in sub.stdout)
+check("coverage summary must name a cycle",
+      sub.returncode != 0 and "coverage summary names no cycle" in sub.stdout)
+check("open-hypothesis summary must name a hypothesis or none",
+      sub.returncode != 0 and "open-hypothesis summary names no hypothesis" in sub.stdout)
+legacyize(s3_ent_root)
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(s3_ent_root)], capture_output=True, text=True)
+check("named-entity lite rules warn (not fail) on legacy audit events",
+      sub.returncode == 0 and "WARN" in sub.stdout)
+s3_ok_root, s3_ok, s3_ok_eid = recording_workspace("C-0005")
+(s3_ok_root / "00_control/engagement.yaml").write_text('scope:\n  assets:\n  - "example.test"\n')
+for cls, summary in [("scope", "the scope covered example.test during this rehearsal"),
+                     ("coverage", "coverage includes C-0005 with a terminal state"),
+                     ("open-hypothesis", "no open high-value hypotheses remain (H-0001 closed)")]:
+    s3_ok.append("AUDIT_RECORDED", "audit", cls, evidence_refs=[s3_ok_eid],
+                 payload={"class": cls, "status": "PASS", "summary": summary})
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(s3_ok_root)], capture_output=True, text=True)
+check("named-entity lite rules pass on conforming summaries", sub.returncode == 0)
+try:
+    s3_ok.record_audit("scope", "PASS", "too thin", evidence_refs=[s3_ok_eid])
+    check("record_audit mirrors the summary rule at write time", False)
+except ValueError as exc:
+    check("record_audit mirrors the summary rule at write time", "summary" in str(exc))
+
+# 14. Closure proof: machine-checked sections, TODO(human) markers, emit/refresh flow.
+pr_root, pr_cp, pr_eid = close_workspace()
+record_all_audits(pr_cp, pr_eid)
+proof_path = pr_root / "06_audits/CLOSURE-PROOF.md"
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pr_root), "--closure"], capture_output=True, text=True)
+check("closure fails before the proof exists",
+      sub.returncode != 0 and "CLOSURE-PROOF.md" in sub.stdout)
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pr_root), "--emit-proof"], capture_output=True, text=True)
+check("emit-proof exits cleanly", sub.returncode == 0 and proof_path.is_file())
+text = proof_path.read_text()
+check("emit-proof writes every required section",
+      all(f"## {name}" in text for name in _audit.CLOSURE_PROOF_SECTIONS))
+check("emit-proof leaves TODO(human) markers in the judgment sections", "TODO(human):" in text)
+check("emit-proof fills mechanical cycle and technique facts",
+      "C-0010" in text and "T-000001" in text)
+check("emit-proof fills the evidence inventory", f"{pr_eid}" in text and "kind=audit" in text)
+before = proof_path.read_text()
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pr_root), "--emit-proof"], capture_output=True, text=True)
+check("emit-proof refreshes a TODO-bearing proof deterministically",
+      sub.returncode == 0 and proof_path.read_text() == before)
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pr_root), "--closure"], capture_output=True, text=True)
+check("unanswered TODOs fail closure", sub.returncode != 0 and "TODO(human)" in sub.stdout)
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pr_root), "--emit-proof"], capture_output=True, text=True)
+check("emit-proof refreshes (does not refuse) while TODOs remain",
+      sub.returncode == 0 and "TODO(human):" in proof_path.read_text())
+fill_proof(pr_root)
+check("filled proof has no TODO markers left", "TODO(human)" not in proof_path.read_text())
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pr_root), "--closure"], capture_output=True, text=True)
+check("a fully filled proof passes closure", sub.returncode == 0 and "closure=READY" in sub.stdout)
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pr_root), "--emit-proof"], capture_output=True, text=True)
+check("emit-proof refuses to overwrite a filled proof",
+      sub.returncode != 0 and "force" in sub.stdout)
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pr_root), "--emit-proof", "--force"],
+                     capture_output=True, text=True)
+check("emit-proof --force rewrites a filled proof",
+      sub.returncode == 0 and "TODO(human):" in proof_path.read_text())
+fill_proof(pr_root)
+text = proof_path.read_text()
+start = text.index("## NEGATIVE_EVIDENCE")
+end = text.index("\n## ", start + 1)
+proof_path.write_text(text[:start] + "## NEGATIVE_EVIDENCE\n\n" + text[end + 1:])
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pr_root), "--closure"], capture_output=True, text=True)
+check("an empty required section fails closure",
+      sub.returncode != 0 and "NEGATIVE_EVIDENCE" in sub.stdout)
+fill_proof(pr_root)
+proof_path.write_text(proof_path.read_text().replace("## BLOCKERS\n", "## BLOCKERS\nTODO(human): still unresolved\n", 1))
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pr_root), "--closure"], capture_output=True, text=True)
+check("a TODO(human) body fails closure",
+      sub.returncode != 0 and "TODO(human)" in sub.stdout and "BLOCKERS" in sub.stdout)
+fill_proof(pr_root)
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pr_root), "--closure"], capture_output=True, text=True)
+check("closure recovers once the proof is filled again", sub.returncode == 0)
+
+# 14b. --emit-proof prints the recorded audit event id and marks non-current facts stale.
+proof_root, proof_cp, proof_eid2 = close_workspace()
+record_all_audits(proof_cp, proof_eid2)
+proof_file = proof_root / "06_audits/CLOSURE-PROOF.md"
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(proof_root), "--emit-proof"],
+                     capture_output=True, text=True)
+text = proof_file.read_text()
+check("emit-proof prints the recorded audit event id", sub.returncode == 0 and "scope: PASS (EV-" in text)
+check("emit-proof prints no stale marker while the audits are current", "stale — re-record" not in text)
+proof_cp.append("NOTE", "research", "N-STALE", reason="a later material event invalidates the audit set")
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(proof_root), "--emit-proof"],
+                     capture_output=True, text=True)
+text = proof_file.read_text()
+check("emit-proof marks non-current audit facts stale",
+      sub.returncode == 0 and "scope: PASS (EV-" in text and "stale — re-record" in text)
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(proof_root), "--emit-proof"],
+                     capture_output=True, text=True)
+check("stale emit-proof output is deterministic", sub.returncode == 0 and proof_file.read_text() == text)
+
+# 15. Action ↔ token provenance: controlled-executor actions carry the preflight nonce.
+tok_root, tok_cp, tok_eid = close_workspace(with_action=True)
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(tok_root)], capture_output=True, text=True)
+check("versioned action without token_nonce warns",
+      sub.returncode == 0 and "WARN" in sub.stdout and "token_nonce" in sub.stdout)
+record_all_audits(tok_cp, tok_eid)
+fill_proof(tok_root)
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(tok_root), "--closure"], capture_output=True, text=True)
+check("closure requires token provenance for versioned actions",
+      sub.returncode != 0 and "actions_have_token_provenance" in sub.stdout)
+legacyize(tok_root)
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(tok_root), "--closure"], capture_output=True, text=True)
+check("legacy actions without token_nonce are tolerated at closure", sub.returncode == 0)
+ok_root, ok_cp, ok_eid = close_workspace(with_action=True, token_nonce="a" * 32)
+record_all_audits(ok_cp, ok_eid)
+fill_proof(ok_root)
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(ok_root), "--closure"], capture_output=True, text=True)
+check("a versioned action carrying the nonce closes cleanly",
+      sub.returncode == 0 and "token_nonce" not in sub.stdout)
+
+# 16. Closure readiness projection requires all seven audit classes.
+ready_root, ready_cp, ready_eid = close_workspace()
+record_all_audits(ready_cp, ready_eid)
+ready_proj = (ready_root / "06_audits/closure-readiness.yaml").read_text()
+check("closure readiness is READY with all seven classes", 'status: "READY"' in ready_proj)
+check("the required audit class set has seven classes", len(REQUIRED_AUDIT_CLASSES) == 7)
+six_root, six_cp, six_eid = close_workspace()
+for cls, summary in AUDIT_SUMMARIES.items():
+    six_cp.record_audit(cls, "PASS", summary, evidence_refs=[six_eid])
+six_proj = (six_root / "06_audits/closure-readiness.yaml").read_text()
+check("closure readiness is NOT_READY without method-self-attack", 'status: "NOT_READY"' in six_proj)
+
+# 17. Closure-proof bodies must carry real content: case/space-insensitive TODO
+# detection, an invisible-stripped minimum, and a word/letter requirement.
+pr2_root, pr2_cp, pr2_eid = close_workspace()
+record_all_audits(pr2_cp, pr2_eid)
+fill_proof(pr2_root)
+for label, body in [
+    ("TODO(HUMAN) case variant", "TODO(HUMAN): map every applicable surface cell to a terminal state or a named blocker (cite ids)"),
+    ("spaced TODO ( human ) variant", "TODO ( human ) : map every applicable surface cell to a terminal state or a named blocker"),
+    ("zero-width only", "\u200b\ufeff\u2060" * 10),
+    ("single punctuation mark", "."),
+    ("single word", "done"),
+    ("single letter", "x"),
+    ("repeated skeleton prompts", "TODO(human): map every applicable surface cell\nTODO(human): map every applicable surface cell"),
+    ("punctuation and digits only", "1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3"),
+]:
+    replace_proof_section(pr2_root, "BLOCKERS", body)
+    sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pr2_root), "--closure"],
+                         capture_output=True, text=True)
+    check(f"closure proof rejects a thin body: {label}",
+          sub.returncode != 0 and "BLOCKERS" in sub.stdout)
+fill_proof(pr2_root)
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pr2_root), "--closure"],
+                     capture_output=True, text=True)
+check("closure proof accepts the filled rehearsal bodies", sub.returncode == 0)
+
+# 18. Version stamps are monotone: once an event carries os_version, every later event must.
+vs_root = fresh_root(); vs_cp = ControlPlane(vs_root)
+vs_cp.append("NOTE", "note", "N-1", reason="the first versioned event in this workspace")
+vs_cp.append("NOTE", "note", "N-2", reason="this event will lose its stamp")
+downgrade_last_event(vs_root)
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(vs_root)], capture_output=True, text=True)
+check("audit rejects a versioned-then-unversioned ledger",
+      sub.returncode != 0 and "version stamp regression at event 2" in sub.stdout)
+leg2_root = fresh_root(); leg2_cp = ControlPlane(leg2_root)
+leg2_cp.append("NOTE", "note", "N-1", reason="legacy ledger event one")
+leg2_cp.append("NOTE", "note", "N-2", reason="legacy ledger event two")
+legacyize(leg2_root)
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(leg2_root)], capture_output=True, text=True)
+check("a ledger with only unversioned events still audits cleanly",
+      sub.returncode == 0 and "version stamp regression" not in sub.stdout)
+leg3_root = fresh_root(); leg3_cp = ControlPlane(leg3_root)
+leg3_cp.append("NOTE", "note", "N-1", reason="legacy first event")
+downgrade_last_event(leg3_root)
+leg3_cp.append("NOTE", "note", "N-2", reason="a later event re-establishes the stamp")
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(leg3_root)], capture_output=True, text=True)
+check("an unversioned event before the first versioned event is tolerated",
+      sub.returncode == 0 and "version stamp regression" not in sub.stdout)
+
+# 19. Quote binding: a review quote may only cite evidence the packet itself lists.
+qb_root, qb_cp, qb_eid = recording_workspace("C-0007")
+(qb_root / "C-0007-extra.txt").write_text("second capture: the control stayed clean under repetition\n")
+qb_eid2 = qb_cp.register_evidence("C-0007-extra.txt", kind="raw", source="researcher-owned",
+                                  cycle_id="C-0007")["payload"]["id"]
+
+def _qbound_packet(axis: str, reviewer: str, quote_ref: str, quote: str) -> dict:
+    return {"cycle_id": "C-0007", "evidence_refs": [qb_eid],
+            "review": {"axis": axis, "verdict": "pass", "reviewer": reviewer,
+                       "run_id": f"session-{reviewer}",
+                       "evidence_quotes": [{"evidence_ref": quote_ref, "quote": quote}]}}
+
+qb_cp.merge_worker(_qbound_packet("objective", "run-a", qb_eid, QUOTE))
+qb_cp.merge_worker(_qbound_packet("method", "run-b", qb_eid, QUOTE))
+qb_cp.transition_cycle("C-0007", "REVIEWED", reason="both axes quote the packet evidence", evidence_refs=[qb_eid])
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(qb_root)], capture_output=True, text=True)
+check("quoted evidence inside the packet refs audits cleanly", sub.returncode == 0)
+try:
+    qb_cp.merge_worker(_qbound_packet("objective", "run-c", qb_eid2, "the control stayed clean under repetition"))
+    check("merge_worker rejects a quote outside the packet evidence_refs", False)
+except ValueError as exc:
+    check("merge_worker rejects a quote outside the packet evidence_refs",
+          "evidence_refs" in str(exc) and qb_eid2 in str(exc))
+qb_cp.append("WORKER_RESULT", "worker_result", "WR-BOUND", cycle_id="C-0007", evidence_refs=[qb_eid],
+             payload={"review": {"axis": "objective", "verdict": "pass", "reviewer": "run-d",
+                                 "run_id": "session-run-d",
+                                 "evidence_quotes": [{"evidence_ref": qb_eid2,
+                                                      "quote": "the control stayed clean under repetition"}]}})
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(qb_root)], capture_output=True, text=True)
+check("audit rejects a quote citing evidence outside the packet refs",
+      sub.returncode != 0 and "evidence_refs" in sub.stdout)
+
+# 20. NOT_APPLICABLE precondition_absence must pass the audit-summary sentence rule.
+na2_root = fresh_root(); na2_cp = ControlPlane(na2_root)
+(na2_root / "na2-capture.txt").write_text("precondition capture: the probe shows the parser is gone\n")
+na2_eid = na2_cp.register_evidence("na2-capture.txt", kind="raw", source="researcher-owned")["payload"]["id"]
+na2_cp.create_hypothesis("H-0001", {
+    "observation": "o", "hypothesis": "h", "secure_prediction": "s", "vulnerable_prediction": "v",
+    "test_question": "q", "test_plan": "p"})
+na2_cp.transition_hypothesis("H-0001", "QUEUED", reason="queued")
+na2_cp.transition_hypothesis("H-0001", "TESTING", reason="testing")
+for placeholder in ("n/a", "none", "x", "TODO", "<...>", "not applicable"):
+    na2_cp.update_hypothesis("H-0001", {"precondition_absence": placeholder})
+    try:
+        na2_cp.transition_hypothesis("H-0001", "NOT_APPLICABLE", reason="placeholder", evidence_refs=[na2_eid])
+        check(f"NOT_APPLICABLE rejects placeholder precondition_absence {placeholder!r}", False)
+    except ValueError as exc:
+        check(f"NOT_APPLICABLE rejects placeholder precondition_absence {placeholder!r}",
+              "precondition_absence" in str(exc) and "BLOCKED" in str(exc))
+na2_cp.update_hypothesis("H-0001", {"precondition_absence": "the XML parser is absent on the target build"})
+na2_cp.transition_hypothesis("H-0001", "NOT_APPLICABLE", reason="absent", evidence_refs=[na2_eid])
+check("NOT_APPLICABLE accepts a real precondition sentence",
+      na2_cp.hypothesis_status("H-0001") == "NOT_APPLICABLE")
+
+# 21. --emit-proof on a path that is not a regular file fails actionably, not with a traceback.
+fk_root = fresh_root()
+(fk_root / "06_audits/CLOSURE-PROOF.md").mkdir(parents=True)
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(fk_root), "--emit-proof"],
+                     capture_output=True, text=True)
+check("emit-proof on a non-regular path fails without a traceback",
+      sub.returncode == 1 and "Traceback" not in sub.stderr
+      and "CLOSURE-PROOF.md" in sub.stdout and "regular file" in sub.stdout)
+
+# 22. Per-axis review grading: each axis's missing run_id is graded with its OWN
+# versioned flag — a legacy packet warns even when the sibling axis is versioned.
+def reviewed_missing_run_id(cid: str, order: tuple[str, ...] = ("objective", "method"),
+                            with_run_id: tuple[str, ...] = ()) -> tuple[Path, ControlPlane, str]:
+    root, cp, eid = recording_workspace(cid)
+    for axis in order:
+        review: dict = {"axis": axis, "verdict": "pass", "reviewer": f"run-{axis}",
+                        "evidence_quotes": [{"evidence_ref": eid, "quote": QUOTE}]}
+        if axis in with_run_id:
+            review["run_id"] = f"session-{axis}"
+        cp.append("WORKER_RESULT", "worker_result", f"WR-{axis}", cycle_id=cid, evidence_refs=[eid],
+                  payload={"review": review})
+    cp.append("CYCLE_TRANSITIONED", "cycle", cid, payload={"from": "RESULT_READY", "to": "REVIEWED"},
+              evidence_refs=[eid], cycle_id=cid)
+    return root, cp, eid
+
+qa_root, qa_cp, qa_eid = reviewed_missing_run_id("C-0008", with_run_id=("method",))
+downgrade_events_through(qa_root, "WR-objective")
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(qa_root)], capture_output=True, text=True)
+check("a legacy axis without run_id only warns when the sibling axis is versioned",
+      sub.returncode == 0 and "objective review lacks run_id" in sub.stdout
+      and "ERROR" not in sub.stdout)
+qb2_root, qb2_cp, qb2_eid = reviewed_missing_run_id("C-0009", order=("method", "objective"),
+                                                   with_run_id=("method",))
+downgrade_events_through(qb2_root, "WR-method")
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(qb2_root)], capture_output=True, text=True)
+check("a versioned axis without run_id errors when the sibling axis is legacy",
+      sub.returncode != 0 and "objective review lacks run_id" in sub.stdout
+      and "method review lacks run_id" not in sub.stdout)
+qc_root, qc_cp, qc_eid = reviewed_missing_run_id("C-0011")
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(qc_root)], capture_output=True, text=True)
+check("both versioned axes missing run_id produce per-axis errors",
+      sub.returncode != 0 and "objective review lacks run_id" in sub.stdout
+      and "method review lacks run_id" in sub.stdout)
+
+# 23. Closure-proof parser: fences are opaque, unknown subheadings stay body text,
+# duplicate required headings fail.
+pp_root, pp_cp, pp_eid = close_workspace()
+record_all_audits(pp_cp, pp_eid)
+fill_proof(pp_root)
+pp_proof = pp_root / "06_audits/CLOSURE-PROOF.md"
+filled_text = pp_proof.read_text()
+pp_proof.write_text("```\n# Closure Proof\n## SCOPE_PROOF\n- a fenced heading with a fenced body long enough to look real\n```\n")
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pp_root), "--closure"],
+                     capture_output=True, text=True)
+check("a fence-only proof collects no sections", sub.returncode != 0 and "SCOPE_PROOF" in sub.stdout)
+pp_proof.write_text(filled_text)
+pp_proof.write_text(filled_text.replace(
+    "## BLOCKERS\n",
+    "## BLOCKERS\nA real blocker note that is long enough to count as a judgment.\n```\nTODO(human)\n```\n", 1))
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pp_root), "--closure"],
+                     capture_output=True, text=True)
+check("a fenced TODO(human) does not block closure", sub.returncode == 0)
+pp_proof.write_text(filled_text + "\n```\n## BLOCKERS\nfenced duplicate heading must stay opaque\n```\n")
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pp_root), "--closure"],
+                     capture_output=True, text=True)
+check("a fenced duplicate heading is ignored", sub.returncode == 0)
+pp_proof.write_text(filled_text.replace(
+    "## NOVELTY_CHECK\n",
+    "## NOVELTY_CHECK\nThe novelty judgment covers the program history and this rehearsal.\n"
+    "## Supporting notes\nTODO(human): still owe a real note\n", 1))
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pp_root), "--closure"],
+                     capture_output=True, text=True)
+check("a real TODO after an unlisted subheading blocks closure",
+      sub.returncode != 0 and "NOVELTY_CHECK" in sub.stdout and "TODO(human)" in sub.stdout)
+pp_proof.write_text(filled_text + "\n## BLOCKERS\nA second BLOCKERS section with a real sentence is still a duplicate.\n")
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pp_root), "--closure"],
+                     capture_output=True, text=True)
+check("a duplicate required heading fails closure",
+      sub.returncode != 0 and "duplicate" in sub.stdout and "BLOCKERS" in sub.stdout)
+pp_proof.write_text(filled_text)
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pp_root), "--closure"],
+                     capture_output=True, text=True)
+check("the pristine filled proof still passes after parser surgery", sub.returncode == 0)
 
 print(f"\n{len(passed)} checks passed")

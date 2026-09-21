@@ -30,7 +30,7 @@ Lifecycle status and closure-readiness declarations must never be edited directl
 
 ## Event integrity
 
-Each event has a sequential ID plus `prev_hash` and `event_hash`. The chain makes accidental reorder, deletion or in-place mutation detectable. Writes use an atomic lock, append-only file mode and `fsync`.
+Each event has a sequential ID plus `prev_hash` and `event_hash`. The chain makes accidental reorder, deletion or in-place mutation detectable. Writes use an atomic lock, append-only file mode and `fsync`. Every new event also carries `os_version` (the workspace `OS_VERSION` at append time, `unknown` when the file is absent): the audit grades content violations on versioned events as errors and on legacy events without the field as warnings, while write-side guards always apply to new events. The envelope rule is monotone: once a versioned event exists, every later event must carry `os_version`, and the audit fails on a version stamp regression (a missing stamp after the first versioned event).
 
 ## Update semantics
 
@@ -56,7 +56,8 @@ Payload: `technique_family`, `result` (`CONFIRMED|FALSE_POSITIVE|NOT_APPLICABLE|
 live action: `action_id`, `nonce`, `expires_at`, `tool_family`, `argument_digest`
 (canonical SHA-256 over `request_shape`), cycle and hypothesis. The DSH enforcer plugin
 consumes the token when the matching tool call arrives; the controlled executor records
-`ACTION_RECORDED` after the call. Tokens live in the transient store
+`ACTION_RECORDED` after the call, carrying the consumed `token_nonce` so the action
+links back to its authorizing token. Tokens live in the transient store
 `11_runtime/action-tokens.jsonl`, never the ledger — a recorded preflight alone cannot
 authorize thirty follow-up actions. When `00_control/engagement.yaml` carries a non-empty
 `assets` list (simple host/URL strings), `prepare` refuses any target whose host is outside

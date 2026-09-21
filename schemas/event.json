@@ -1,6 +1,7 @@
 {
-  "description": "Canonical Research OS event envelope.",
+  "description": "Canonical Research OS event envelope. `os_version` records the workspace OS_VERSION at append time; events without it are legacy (pre-7.3) and audit grades their findings as warnings instead of errors.",
   "required": ["event_id", "time", "actor", "type", "entity_type", "entity_id", "evidence_refs", "payload", "prev_hash", "event_hash"],
+  "os_version": "workspace OS_VERSION at append time (\"unknown\" when the file is absent); absent on legacy events — never required",
   "event_id_pattern": "^EV-[0-9]{6,}$",
   "evidence_ref_pattern": "^E-[0-9]{6,}$",
   "event_types": [

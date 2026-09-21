@@ -13,10 +13,17 @@ RUNNING
   ├──→ NEEDS_PIVOT
   └──→ RESULT_READY
            ↓
-   VERIFIED | FALSE_POSITIVE | NOT_APPLICABLE
+   REVIEWED | FALSE_POSITIVE | NOT_APPLICABLE
            ↓
          CLOSED
 ```
+
+Cycle `VERIFIED` was renamed to `REVIEWED` in v7.3: `REVIEWED` means both review axes
+pass and the instrument validation section is filled. `VERIFIED` is the
+hypothesis/finding state (impact reproduced + clean negative control), not a cycle
+state; `tools/control_plane.py` rejects a cycle transition to `VERIFIED` with a pointer
+to `REVIEWED`, and archived ledgers that recorded the old transition are normalized on
+read.
 
 A cycle cannot become CLOSED solely because an endpoint returned a denial. Evidence, branch disposition and state update are required.
 
@@ -33,12 +40,13 @@ A cycle cannot become CLOSED solely because an endpoint returned a denial. Evide
 | RUNNING -> NEEDS_PIVOT | oracle disproved, adjacent branch viable | agent | negative result + pivot target |
 | NEEDS_PIVOT -> READY | new hypothesis filed | agent | new hypothesis ID |
 | RUNNING -> RESULT_READY | oracle observed, positive or negative | agent | raw request/response pair |
-| RESULT_READY -> VERIFIED | impact reproduced + negative control passes + both review axes pass | agent | both evidence pairs + review packets (objective + method) |
+| RESULT_READY -> REVIEWED | both review axes pass + instrument validation filled | agent | review packets (objective + method: run_id + evidence quotes) + results.md Instrument validation |
 | RESULT_READY -> FALSE_POSITIVE | negative control shows same effect | agent | control evidence |
 | RESULT_READY -> NOT_APPLICABLE | precondition proven absent on target | agent | fingerprint proof |
-| VERIFIED/FALSE_POSITIVE/NOT_APPLICABLE -> CLOSED | learning recorded, state updated | agent | ≥1 TECHNIQUE_EVALUATED event + results.md New hypotheses/Next step |
+| RESULT_READY -> RUNNING/BLOCKED | back-edge: the result state missed something (follow-up work or a blocker) | agent | ≥1 evidence ref naming what was missed |
+| REVIEWED/FALSE_POSITIVE/NOT_APPLICABLE -> CLOSED | learning recorded, state updated | agent | ≥1 TECHNIQUE_EVALUATED event + results.md New hypotheses/Next step |
 
-Forbidden: RUNNING -> CLOSED (must pass through RESULT_READY), BLOCKED -> CLOSED (must exit via protocol below), any state -> VERIFIED without a negative control pair.
+Forbidden: RUNNING -> CLOSED (must pass through RESULT_READY), BLOCKED -> CLOSED (must exit via protocol below), any cycle -> VERIFIED (use REVIEWED; VERIFIED is the hypothesis/finding state), a REVIEWED terminal without passing reviews on both axes.
 
 ## NEEDS_PIVOT rules
 
@@ -58,11 +66,11 @@ Pivot only on oracle failure with a named adjacent branch (sibling endpoint, alt
 
 ## Terminal criteria
 
-- VERIFIED: target-specific impact reproduced twice (or once + independent second oracle) AND negative control clean. Advances to report-draft.
+- REVIEWED: both review axes pass (independent reviewer + run_id + evidence quotes bound to the registered capture) and `results.md` ## Instrument validation is filled. The claim is reviewed; the impact-level criteria (impact reproduced twice or once + independent second oracle AND negative control clean) are the **hypothesis VERIFIED** criteria recorded through the hypothesis lifecycle, and they feed `05_findings/`.
 - FALSE_POSITIVE: control run reproduces the "success" signal without the cause. Record signature to avoid re-testing.
-- NOT_APPLICABLE: architectural precondition absent (version, config, protocol state). Cite fingerprint evidence.
+- NOT_APPLICABLE: architectural precondition absent (version, config, protocol state). Cite fingerprint evidence, and record the absent precondition in the hypothesis's `precondition_absence` field — it must satisfy the audit-summary sentence rule (>= 20 characters and >= 3 words after stripping, naming the absent version/config/protocol state), so `n/a`, `none`, `x`, `TODO` and `<...>` are refused as placeholders. Budget/instrument stops are BLOCKED, not NOT_APPLICABLE.
 - CLOSED: one terminal disposition is complete, ≥1 `TECHNIQUE_EVALUATED` event exists for the cycle, learning/next-step state is recorded, and integrity audits are clean. `plan.yaml` remains a projection.
 
 ## Walkthrough
 
-H-14 (dangling suffix): PLANNED -> READY (oracle: second-response reflection) -> RUNNING (fresh-connection control first) -> RESULT_READY (reflection seen) -> VERIFIED (repeat + clean control) -> CLOSED (learning entry L-09). If control also reflects: -> FALSE_POSITIVE with echo signature. If no keep-alive reuse exists: -> NOT_APPLICABLE with header evidence.
+H-14 (dangling suffix): PLANNED -> READY (oracle: second-response reflection) -> RUNNING (fresh-connection control first) -> RESULT_READY (reflection seen) -> REVIEWED (repeat + clean control + both review axes) -> CLOSED (learning entry L-09). If control also reflects: -> FALSE_POSITIVE with echo signature. If no keep-alive reuse exists: -> NOT_APPLICABLE with header evidence.

@@ -330,7 +330,11 @@ Bound to the executor discipline: the canonical read-only runner is
 JSON summary, no cookie values). Flow: `researchctl prepare` with
 `"tool_family": "browser"` and `request_shape` `{"url": …, "principal": …}` → the
 `research_os_browser` tool consumes the token, re-checks scope, runs the runner, and the
-run log is registered as evidence with `ACTION_RECORDED`. The enforcer denies raw
+run log is registered as evidence with `ACTION_RECORDED`. Controlled-executor actions
+record the consumed preflight nonce as `token_nonce` on the action payload, so each
+action links back to the single-use token that authorized it: `tools/audit.py` warns
+when an action lacks the nonce and closure (`actions_have_token_provenance`) fails if a
+versioned action does — legacy records stay tolerated. The enforcer denies raw
 browser-automation launches (playwright/puppeteer/selenium, `--headless`,
 remote-debugging) in OS workspaces outside this path; install-shaped commands and
 explicit-localhost work stay allowed. Known limit: a browser launch hidden inside an
@@ -409,6 +413,12 @@ or a bash-invoked CLI is not visible to the plugin. To disable it, delete its ro
   host re-check.
 - Scope checks are evaluated against the current assets: actions recorded under an
   earlier scope are downgraded to a warning by the audit, not re-legalized.
+- The event chain is unkeyed: a full ledger rewrite that recomputes every `event_hash`
+  from scratch is undetectable, and a fabricated ledger replays as clean. The stamp is
+  monotone (once an event carries `os_version`, every later event must; the audit errors
+  on a regression), but wholesale re-stamping or stripping is accepted by design — the
+  chain proves accidental corruption and lazy tampering, not adversarial authorship.
+  Detect that threat by cross-checking out-of-band copies of the ledger, not by reading it.
 - `scope-set` is agent-invocable; `human_reference` is procedural friction, not
   cryptographic proof.
 - Host matching is literal `host[:port]` plus `*.domain` — no CIDR, no DNS resolution.

@@ -8,6 +8,10 @@ audits:
     status: "MISSING"
     time: null
     event_id: null
+  - class: "method-self-attack"
+    status: "MISSING"
+    time: null
+    event_id: null
   - class: "negative"
     status: "MISSING"
     time: null

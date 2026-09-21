@@ -54,7 +54,7 @@ def fill_results(root, cid, disposition=True, instrument=True, tail=True, eviden
     eid = None
     if evidence:
         evp = root / '04_cycles' / cid / 'evidence.txt'
-        evp.write_text('cycle evidence\n')
+        evp.write_text('cycle evidence: impact reproduced under the recorded control\n')
         ev = ControlPlane(root).register_evidence(evp.relative_to(root).as_posix(), kind='raw',
                                                   source='researcher-owned', cycle_id=cid)
         eid = ev['payload']['id']
@@ -111,9 +111,14 @@ fill_results(root, 'C-0001', evidence=True)
 for axis in ('objective', 'method'):
     ControlPlane(root).merge_worker({'cycle_id': 'C-0001', 'evidence_refs': [eid],
                                      'next_step': f'{axis} review',
-                                     'review': {'axis': axis, 'verdict': 'pass', 'reviewer': f'{axis}-run'}})
+                                     'review': {'axis': axis, 'verdict': 'pass', 'reviewer': f'{axis}-run',
+                                                'run_id': f'session-{axis}',
+                                                'evidence_quotes': [{'evidence_ref': eid,
+                                                                     'quote': 'impact reproduced under the recorded control'}]}})
 r = run(str(root), 'transition', 'C-0001', 'VERIFIED')
-check('terminal transition VERIFIED', r.returncode == 0)
+check('cycle VERIFIED rename rejected', r.returncode == 1 and 'REVIEWED' in r.stderr)
+r = run(str(root), 'transition', 'C-0001', 'REVIEWED')
+check('terminal transition REVIEWED', r.returncode == 0)
 r = run(str(root), 'transition', 'C-0001', 'CLOSED')
 check('CLOSED blocked before technique evaluation', r.returncode == 1)
 ControlPlane(root).evaluate_technique({'cycle_id': 'C-0001', 'technique_family': 'authz-differential',

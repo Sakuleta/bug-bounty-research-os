@@ -30,6 +30,10 @@ status: "CANDIDATE"
 test_question: "<QUESTION>"   # enforced: required before QUEUED
 test_plan: "<PLAN>"           # enforced: required before TESTING
 learning: "<LESSON>"          # enforced: required before CLOSED
+precondition_absence: "<ABSENT_PRECONDITION>"  # enforced: required before NOT_APPLICABLE;
+                                               # >= 20 chars and >= 3 words after stripping,
+                                               # naming the absent version/config/protocol state
+                                               # (placeholders like "n/a" or "TODO" are refused)
 ```
 
 ## Generation sources
