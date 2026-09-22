@@ -592,7 +592,14 @@ registered evidence (`{id, claim, evidence_ref}`) and returns a `Choice` verdict
 supports / contradicts / says_nothing — with confidence; below 0.8 the verdict is flagged
 for a reasoning model or human, and the seam reports `unavailable` (never a verdict)
 without `TYPESAFE_API_KEY` or when `external_judgment` is not `ALLOWED` (then with the
-policy note and `model: null`). Live check on real rig evidence (2026-09-21, 10 planted
+policy note and `model: null`). `claims-check` always runs the verify-clause step: each
+relation verdict is judged supportable-or-not against the cited evidence by a second
+Choice question, an `unsupported` verdict retries the relation once (bounded: at most
+two relation calls per claim), and a verdict that never verifies is kept but flagged.
+Every live judgment is appended to `11_runtime/jev-judgments.jsonl` (input digest,
+model, verdict, confidence, timestamp) for offline replay (`ts_claims.replay_judgments`
+re-runs stored judgments through a provider and compares guard decisions
+deterministically). Live check on real rig evidence (2026-09-21, 10 planted
 claims across three evidence files): 10/10 verdict accuracy with the deliberately
 unanswerable claim flagged at 0.45 confidence; the script and raw output are committed
 under `tools/ts-eval/` (rerun needs `TS_EVAL_ROOT` on a workspace holding the three

@@ -857,4 +857,110 @@ check('claims-draft --fail-on-flag help states the exact trigger',
       'only when any verdict is flagged' in help_proc.stdout
       and 'unavailable' in help_proc.stdout and 'missing' in help_proc.stdout)
 
+# 6f. v8.2 W14: verify-clause — each relation verdict must be supportable by the
+# cited evidence (bounded retry), judgments are stored for replay, and replay with a
+# mocked provider reproduces guard decisions deterministically.
+from ts_claims import check_claims as _w14_check, replay_judgments as _w14_replay  # noqa: E402
+_w14root = Path(tempfile.mkdtemp())
+for d in ['00_control', '02_surface', '03_hypotheses/active', '03_hypotheses/archive', '04_cycles',
+          '10_learning', '11_runtime']:
+    (_w14root / d).mkdir(parents=True, exist_ok=True)
+(_w14root / '00_control/engagement.yaml').write_text('external_judgment: "ALLOWED"\n')
+(_w14root / '02_surface/endpoints.yaml').write_text('endpoints: []\n')
+(_w14root / '11_runtime/events.jsonl').write_text('')
+(_w14root / '11_runtime/run-status.yaml').write_text('engagement_status: "BOOTSTRAP"\n')
+(_w14root / '11_runtime/tool-registry.yaml').write_text('tools: []\n')
+(_w14root / '11_runtime/lab-status.yaml').write_text('status: UNKNOWN\n')
+(_w14root / '10_learning/freshness.yaml').write_text('components: []\n')
+(_w14root / '10_learning/unknowns.yaml').write_text('unknowns: []\n')
+(_w14root / '10_learning/assumptions.yaml').write_text('assumptions: []\n')
+(_w14root / 'proof.txt').write_text('HTTP 200 observed with title Example Domain\n')
+ControlPlane(_w14root).register_evidence('proof.txt', kind='raw', source='test')
+_w14_calls: list = []
+
+
+def _w14_support_stub(state, questions):
+    _w14_calls.append(set(questions))
+    if 'verify' in questions:
+        return {'model': 'stub-verify', 'answers': {'verify': {'type': 'choice', 'choice': 'supported',
+                  'confidence': 0.88, 'probabilities': {}}}, 'usage': {}}
+    return {'model': 'stub-verify', 'answers': {'relation': {'type': 'choice', 'choice': 'supports',
+              'confidence': 0.9, 'probabilities': {}}}, 'usage': {}}
+
+
+_w14_out = _w14_check(_w14root, {'claims': [{'id': 'v1', 'claim': 'HTTP 200 was observed',
+                                             'evidence_ref': 'E-000001'},
+                                            {'id': 'v1b', 'claim': 'the title was Example Domain',
+                                             'evidence_ref': 'E-000001'}]},
+                      client=_w14_support_stub, verify=True)
+_w14_res = _w14_out['results'][0]
+check('v8.2 W14: a supported verdict verifies and stays auto',
+      _w14_res['auto'] is True and _w14_res.get('verify', {}).get('supported') is True
+      and _w14_res['verify']['attempts'] == 1)
+check('v8.2 W14: verify costs one extra judge call per claim',
+      sum(1 for c in _w14_calls if c == {'relation'}) == 2
+      and sum(1 for c in _w14_calls if c == {'verify'}) == 2)
+_w14_reject_calls: list = []
+
+
+def _w14_reject_stub(state, questions):
+    _w14_reject_calls.append(set(questions))
+    if 'verify' in questions:
+        return {'model': 'stub-verify', 'answers': {'verify': {'type': 'choice', 'choice': 'unsupported',
+                  'confidence': 0.85, 'probabilities': {}}}, 'usage': {}}
+    return {'model': 'stub-verify', 'answers': {'relation': {'type': 'choice', 'choice': 'supports',
+              'confidence': 0.9, 'probabilities': {}}}, 'usage': {}}
+
+
+import shutil as _w14_shutil
+_w14rej = Path(tempfile.mkdtemp())
+for d in ['00_control', '11_runtime']:
+    (_w14rej / d).mkdir(parents=True, exist_ok=True)
+(_w14rej / '00_control/engagement.yaml').write_text('external_judgment: "ALLOWED"\n')
+(_w14rej / '11_runtime/events.jsonl').write_text('')
+(_w14rej / 'proof.txt').write_text('HTTP 200 observed with title Example Domain\n')
+ControlPlane(_w14rej).register_evidence('proof.txt', kind='raw', source='test')
+_w14_reject = _w14_check(_w14rej, {'claims': [{'id': 'v2', 'claim': 'HTTP 200 was observed',
+                                              'evidence_ref': 'E-000001'}]},
+                         client=_w14_reject_stub, verify=True)
+_w14_rres = _w14_reject['results'][0]
+check('v8.2 W14: an unsupported verdict retries boundedly then flags',
+      _w14_rres['auto'] is False and _w14_rres.get('verify', {}).get('supported') is False
+      and _w14_rres['verify']['attempts'] == 2 and 'verify-clause' in _w14_rres.get('note', '')
+      and sum(1 for c in _w14_reject_calls if c == {'relation'}) == 2
+      and sum(1 for c in _w14_reject_calls if c == {'verify'}) == 2)
+import json as _w14_json
+_w14_rows = [ _w14_json.loads(line) for line in
+              (_w14root / '11_runtime/jev-judgments.jsonl').read_text().splitlines() if line.strip()]
+check('v8.2 W14: judgments store digest, model, verdict, confidence and timestamp',
+      all(set(('input_digest', 'model', 'verdict', 'confidence', 'timestamp')) <= set(r)
+          and len(r['input_digest']) == 64 for r in _w14_rows) and len(_w14_rows) >= 2)
+def _w14_match_mock(state, questions):
+    if 'verify' in questions:
+        return {'answers': {'verify': {'type': 'choice', 'choice': 'supported', 'confidence': 0.88}},
+                'usage': {}}
+    return {'answers': {'relation': {'type': 'choice', 'choice': 'supports', 'confidence': 0.9}},
+            'usage': {}}
+
+
+_w14_replay_ok = _w14_replay(_w14root, client=_w14_match_mock)
+check('v8.2 W14: replay with a matching mock reproduces guard decisions',
+      _w14_replay_ok['matched'] == _w14_replay_ok['replayed'] >= 2
+      and _w14_replay_ok['mismatched'] == 0)
+def _w14_flip_mock(state, questions):
+    if 'verify' in questions:
+        return {'answers': {'verify': {'type': 'choice', 'choice': 'unsupported', 'confidence': 0.9}},
+                'usage': {}}
+    return {'answers': {'relation': {'type': 'choice', 'choice': 'contradicts', 'confidence': 0.9}},
+            'usage': {}}
+
+
+_w14_replay_flip = _w14_replay(_w14root, client=_w14_flip_mock)
+check('v8.2 W14: replay with a flipped mock reports mismatches',
+      _w14_replay_flip['mismatched'] >= 2 and _w14_replay_flip['matched'] == 0)
+_w14_denied = _w14_check(POLICY_DENY, {'claims': [{'id': 'v9', 'claim': 'x', 'evidence_ref': 'E-000001'}]},
+                         client=_w14_support_stub, verify=True)
+check('v8.2 W14: verify stays gated by external_judgment ALLOWED',
+      _w14_denied['source'] == 'unavailable' and _w14_denied['results'] == [])
+
 print(f'\n{len(passed)}/{len(passed)} passed')

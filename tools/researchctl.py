@@ -311,7 +311,7 @@ def main() -> int:
         elif ns.fn == "triage":
             out = triage_suggest(Path(ns.root), ns.question)
         elif ns.fn == "claims-check":
-            out = check_claims(Path(ns.root), load_json(ns.packet_json))
+            out = check_claims(Path(ns.root), load_json(ns.packet_json), verify=True)
         elif ns.fn == "claims-draft":
             out = check_draft(Path(ns.root), ns.draft, triage=ns.triage)
         elif ns.fn == "freshness-record":

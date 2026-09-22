@@ -36,6 +36,11 @@ TRIAGE_NOTE = "triage: no relevant passage"
 # a verdict: it is flagged and counted under `invalid_choice`.
 VALID_CHOICES = ("supports", "contradicts", "says_nothing")
 INVALID_CHOICE = "invalid_choice"
+# The verify-clause answer space: does the cited evidence support the verdict the
+# relation just gave? Anything else is flagged like an invalid choice.
+VERIFY_CHOICES = ("supported", "unsupported")
+VERIFY_MAX_RELATION_ATTEMPTS = 2
+JUDGMENTS_REL = "11_runtime/jev-judgments.jsonl"
 PASSAGE_MIN = 400
 PASSAGE_MAX = 1500
 PASSAGE_CAP = 12
@@ -199,8 +204,119 @@ def _http_call(state: dict, questions: dict, timeout: int) -> dict:
                      api_key=os.environ.get("TYPESAFE_API_KEY", ""), timeout=timeout)
 
 
+def _verify_question(claim: str, verdict: str, evidence: str) -> dict:
+    """One Choice question: do the cited evidence quotes support this verdict?"""
+    return {"verify": {
+        "type": "choice",
+        "instructions": {"claim": claim, "verdict": verdict, "evidence": evidence,
+                         "question": "Do the cited evidence quotes support this verdict on `claim`?"},
+        "criteria": {
+            "supported": "The quoted evidence states the verdict or directly implies it.",
+            "unsupported": "The quoted evidence does not support the verdict, or it cuts against it.",
+        },
+    }}
+
+
+def _judgment_digest(claim: str, evidence: str) -> str:
+    """Canonical input digest for one judgment (replay compares it first)."""
+    import hashlib
+    return hashlib.sha256(json.dumps({"claim": claim, "evidence": evidence},
+                                     ensure_ascii=False, sort_keys=True,
+                                     separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def record_judgments(root: Path, records: list[dict]) -> Path:
+    """Append judgment records for replay; returns the ledger path."""
+    path = Path(root) / JUDGMENTS_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        for record in records:
+            fh.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    return path
+
+
+def replay_judgments(root: Path, *, client, path: str | Path | None = None) -> dict:
+    """Re-run stored judgments offline and compare guard decisions deterministically.
+
+    For each stored record the evidence excerpt is re-read and its digest compared
+    first (drifted evidence replays as `drifted`, never as a false match); then the
+    relation question — and, when the stored judgment verified, the verify-clause
+    question on the replayed verdict — re-run through `client` (a mocked provider
+    in tests), and the recomputed verdict, verify outcome and auto decision are
+    compared to the stored ones. Returns {"replayed", "matched", "drifted",
+    "mismatched", "mismatches": [...]}.
+    """
+    root = Path(root)
+    ledger = Path(path) if path is not None else root / JUDGMENTS_REL
+    replayed = matched = drifted = mismatched = 0
+    mismatches: list[dict] = []
+    if ledger.is_file():
+        for line in ledger.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            replayed += 1
+            ref = str(record.get("evidence_ref") or "")
+            try:
+                evidence = evidence_excerpt(root, ref)
+            except ValueError:
+                evidence = None
+            if evidence is None or _judgment_digest(str(record.get("claim") or ""), evidence) != record.get("input_digest"):
+                drifted += 1
+                continue
+            questions = {"relation": {
+                "type": "choice",
+                "instructions": {"claim": record.get("claim"), "evidence": evidence,
+                                 "question": "How does the evidence relate to `claim`?"},
+                "criteria": {
+                    "supports": "The evidence states the claim or directly implies that it is true.",
+                    "contradicts": "The evidence states the opposite of the claim or implies it is false.",
+                    "says_nothing": "The evidence does not address what the claim asserts, either way.",
+                },
+            }}
+            resp = client({"claim": record.get("claim"), "evidence": evidence}, questions)
+            answer = (resp.get("answers") or {}).get("relation") or {}
+            verdict = str(answer.get("choice", ""))
+            try:
+                confidence = float(answer.get("confidence", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            stored_verify = record.get("verify_supported")
+            replayed_verify: bool | None = None
+            if stored_verify is not None and verdict in VALID_CHOICES:
+                vresp = client({"claim": record.get("claim"), "verdict": verdict,
+                                "evidence": evidence},
+                               _verify_question(str(record.get("claim") or ""), verdict, evidence))
+                vanswer = (vresp.get("answers") or {}).get("verify") or {}
+                replayed_verify = str(vanswer.get("choice", "")) == "supported"
+            auto = (verdict in VALID_CHOICES and confidence >= float(record.get("auto_accept", AUTO_ACCEPT))
+                    and (replayed_verify if stored_verify is not None else True))
+            if (verdict == record.get("verdict") and auto == record.get("auto")
+                    and replayed_verify == stored_verify):
+                matched += 1
+            else:
+                mismatched += 1
+                mismatches.append({"claim_id": record.get("claim_id"),
+                                   "stored": [record.get("verdict"), record.get("auto"),
+                                              stored_verify],
+                                   "replayed": [verdict, auto, replayed_verify]})
+    return {"replayed": replayed, "matched": matched, "drifted": drifted,
+            "mismatched": mismatched, "mismatches": mismatches}
+
+
 def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
-                 auto_accept: float = AUTO_ACCEPT, timeout: int = 60, triage: bool = False) -> dict:
+                 auto_accept: float = AUTO_ACCEPT, timeout: int = 60, triage: bool = False,
+                 verify: bool = False) -> dict:
     """Check each {id, claim, evidence_ref} against its registered evidence.
 
     Returns {"source": "typesafe"|"unavailable", "auto_accept": float, "results": [...],
@@ -210,6 +326,12 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
     `none` selection yields `says_nothing` with TRIAGE_NOTE and no relation call, a
     selection runs the relation question on that passage only and records
     `passage_index` / `triage_confidence`; both confidences must clear auto_accept.
+    With `verify=True` (the `researchctl claims-check` step) each relation verdict is
+    then judged supportable-or-not against the cited evidence by a second Choice
+    question; an `unsupported` verdict retries the relation once (bounded), and a
+    verdict that never verifies is kept but flagged (`auto` False with a
+    verify-clause note). Live judgments are appended to 11_runtime/jev-judgments.jsonl
+    (input digest, model, verdict, confidence, timestamp) for offline replay.
     """
     claims = packet.get("claims") or []
     if not isinstance(claims, list) or not claims:
@@ -223,6 +345,7 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
         return _unavailable(NO_KEY_NOTE, auto_accept)
     call = client or (lambda s, q: _http_call(s, q, timeout))
     results = []
+    judgments: list[dict] = []
     usage_in = usage_out = 0
     resp = None
     for i, item in enumerate(claims, 1):
@@ -275,32 +398,74 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
                 "says_nothing": "The evidence does not address what the claim asserts, either way.",
             },
         }}
-        resp = call({"claim": claim, "evidence": evidence}, questions)
-        usage = resp.get("usage", {})
-        usage_in += int(usage.get("input_tokens", 0) or 0)
-        usage_out += int(usage.get("output_tokens", 0) or 0)
-        answer = resp["answers"]["relation"]
-        confidence = float(answer.get("confidence", 0.0) or 0.0)
-        choice = str(answer.get("choice", ""))
-        valid = choice in VALID_CHOICES
+        verify_state: dict = {}
+        attempts = 0
+        while True:
+            attempts += 1
+            resp = call({"claim": claim, "evidence": evidence}, questions)
+            usage = resp.get("usage", {})
+            usage_in += int(usage.get("input_tokens", 0) or 0)
+            usage_out += int(usage.get("output_tokens", 0) or 0)
+            answer = resp["answers"]["relation"]
+            confidence = float(answer.get("confidence", 0.0) or 0.0)
+            choice = str(answer.get("choice", ""))
+            valid = choice in VALID_CHOICES
+            if not verify or not valid:
+                break
+            vresp = call({"claim": claim, "verdict": choice, "evidence": evidence},
+                         _verify_question(claim, choice, evidence))
+            vusage = vresp.get("usage", {})
+            usage_in += int(vusage.get("input_tokens", 0) or 0)
+            usage_out += int(vusage.get("output_tokens", 0) or 0)
+            vanswer = (vresp.get("answers") or {}).get("verify") or {}
+            try:
+                vconfidence = float(vanswer.get("confidence", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                vconfidence = 0.0
+            supported = str(vanswer.get("choice", "")) == "supported"
+            verify_state = {"supported": supported, "confidence": vconfidence,
+                            "attempts": attempts}
+            if supported or attempts >= VERIFY_MAX_RELATION_ATTEMPTS:
+                break
         result = {
             "id": cid, "claim": claim, "evidence_ref": ref,
             "verdict": choice if valid else INVALID_CHOICE, "confidence": confidence,
-            "auto": valid and confidence >= auto_accept and extra.pop("triage_auto", True),
+            "auto": valid and confidence >= auto_accept and extra.pop("triage_auto", True)
+                    and (verify_state.get("supported", True) if verify else True),
             "probabilities": answer.get("probabilities", {}),
         }
+        if verify and valid:
+            result["verify"] = verify_state
+            if not verify_state.get("supported"):
+                result["note"] = ("verify-clause: the cited evidence does not support "
+                                  f"the {choice} verdict after {attempts} attempts; flagged for review")
         if not valid:
             result["note"] = f"unrecognized relation choice {choice!r}; flagged for review"
         result.update(extra)
         results.append(result)
+        judgments.append({
+            "claim_id": cid, "claim": claim, "evidence_ref": ref,
+            "input_digest": _judgment_digest(claim, evidence),
+            "model": resp.get("model"), "verdict": result["verdict"],
+            "confidence": confidence, "auto": result["auto"],
+            "auto_accept": auto_accept,
+            "verify_supported": (verify_state.get("supported") if verify and valid else None),
+            "verify_confidence": (verify_state.get("confidence") if verify and valid else None),
+            "timestamp": _now_iso(),
+        })
     flagged = sum(1 for r in results if not r["auto"])
-    return {"source": "typesafe", "auto_accept": auto_accept, "results": results,
-            "summary": {"checked": len(results), "flagged": flagged,
-                        "supports": sum(1 for r in results if r["verdict"] == "supports"),
-                        "contradicts": sum(1 for r in results if r["verdict"] == "contradicts"),
-                        "says_nothing": sum(1 for r in results if r["verdict"] == "says_nothing"),
-                        "invalid_choice": sum(1 for r in results if r["verdict"] == INVALID_CHOICE)},
-            "model": resp.get("model"), "usage": {"input_tokens": usage_in, "output_tokens": usage_out}}
+    out = {"source": "typesafe", "auto_accept": auto_accept, "results": results,
+           "summary": {"checked": len(results), "flagged": flagged,
+                       "supports": sum(1 for r in results if r["verdict"] == "supports"),
+                       "contradicts": sum(1 for r in results if r["verdict"] == "contradicts"),
+                       "says_nothing": sum(1 for r in results if r["verdict"] == "says_nothing"),
+                       "invalid_choice": sum(1 for r in results if r["verdict"] == INVALID_CHOICE)},
+           "model": resp.get("model"), "usage": {"input_tokens": usage_in, "output_tokens": usage_out}}
+    try:
+        record_judgments(root, judgments)
+    except OSError:
+        pass
+    return out
 
 
 def check_draft(root: Path, draft_path, *, triage: bool = False, client=None, live: bool = True,
