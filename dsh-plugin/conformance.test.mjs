@@ -105,6 +105,20 @@ check('cp into a protected path denied',
   !!h.guardReason(exec('bash', { command: 'cp /tmp/events.bak 11_runtime/events.jsonl' }, osRoot)))
 check('heredoc write into a protected path denied',
   !!h.guardReason(exec('bash', { command: "python3 - <<'PY'\nopen('11_runtime/events.jsonl','a').write('x')\nPY" }, osRoot)))
+
+// ---- W12: inline-interpreter payloads naming protected state -------------------
+check('python3 -c writing the ledger denied',
+  !!h.guardReason(exec('bash', { command: `python3 -c "open('11_runtime/events.jsonl','a').write('x')"` }, osRoot)))
+check('node -e touching the token store denied',
+  !!h.guardReason(exec('bash', { command: `node -e "require('fs').appendFileSync('11_runtime/action-tokens.jsonl','{}')"` }, osRoot)))
+check('perl -e removing a projection denied',
+  !!h.guardReason(exec('bash', { command: `perl -e "unlink '11_runtime/last-result.md'"` }, osRoot)))
+check('python3 tools/audit.py stays allowed',
+  !h.guardReason(exec('bash', { command: 'python3 tools/audit.py --help' }, osRoot)))
+check('cat read of the ledger stays allowed',
+  !h.guardReason(exec('bash', { command: 'cat 11_runtime/events.jsonl' }, osRoot)))
+check('benign python3 -c stays allowed',
+  !h.guardReason(exec('bash', { command: 'python3 -c "print(1+1)"' }, osRoot)))
 check('heredoc body to an outside-workspace redirect is allowed (body is inert text)',
   !h.guardReason(exec('bash', { command: "cat <<'EOF' > /tmp/notes.txt\nsee 11_runtime/events.jsonl for details\nEOF" }, osRoot)))
 check('heredoc redirected inside the workspace with protected literals still denied',

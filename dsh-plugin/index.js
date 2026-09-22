@@ -577,6 +577,131 @@ function targetInsideRoot(root, bases, tok) {
 // below stays off and inert text cannot deny.
 const INTERP_STDIN_HEREDOC = /\b(python3?|node|perl|ruby|php|sh|bash|zsh)\s+-\s*<</
 const PIPE_TO_INTERP = /\|\s*(python3?|node|perl|ruby|php|sh|bash|zsh)\b/
+/** Split one shell segment into words with crude quote awareness (quotes group but
+ *  are kept on the word; the caller strips them). */
+function shellWords(text) {
+  const words = []
+  let cur = ''
+  let quote = null
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (quote) {
+      cur += c
+      if (c === quote) quote = null
+    } else if (c === '"' || c === "'") {
+      quote = c
+      cur += c
+    } else if (/\s/.test(c)) {
+      if (cur) { words.push(cur); cur = '' }
+    } else {
+      cur += c
+    }
+  }
+  if (cur) words.push(cur)
+  return words
+}
+
+/** Split a command into segments on `&&`, `||`, `;`, `|`, `&`, parens and newlines —
+ *  but never inside a quoted span, so an inline payload (`-c "open(…)"`) stays one
+ *  segment with its interpreter word. */
+function splitSegments(cmd) {
+  const segments = []
+  let cur = ''
+  let quote = null
+  const push = () => { segments.push(cur); cur = '' }
+  for (let i = 0; i < String(cmd).length; i++) {
+    const c = cmd[i]
+    if (quote) {
+      cur += c
+      if (c === quote) quote = null
+      continue
+    }
+    if (c === '"' || c === "'") { quote = c; cur += c; continue }
+    if (c === '&' && cmd[i + 1] === '&') { push(); i++; continue }
+    if (c === '|' && cmd[i + 1] === '|') { push(); i++; continue }
+    if (c === ';' || c === '|' || c === '&' || c === '(' || c === ')' || c === '\n') { push(); continue }
+    cur += c
+  }
+  push()
+  return segments
+}
+
+const INLINE_INTERP = new Set(['python3', 'python', 'node', 'perl', 'ruby', 'php', 'sh', 'bash', 'zsh'])
+// A payload naming control-plane-owned material: the guard's marker list plus the
+// runtime/control dir prefixes (a payload can destroy `11_runtime` wholesale without
+// naming any single file in it).
+const PAYLOAD_PROTECTED_DIR = /(^|[^a-z0-9_.-])(11_runtime|00_control)\//i
+
+/** Repo tool scripts are the sanctioned mutation path (`tools/researchctl.py`, the
+ *  BUA runner, …): an interpreter invoking one is never judged by the payload rule,
+ *  no matter what its arguments name. Workspace-relative, resolved inside the root. */
+function isAllowlistedTool(root, script) {
+  const clean = stripQuotes(script)
+  if (/^tools\//.test(clean) && /\.(py|mjs)$/.test(clean)) {
+    return relsFor(root, join(root, clean)).length > 0
+  }
+  return false
+}
+
+/** W12 — inline-interpreter payloads naming protected state.
+ *
+ *  The redirect/heredoc/destructive scans only see the command's targets; an inline
+ *  program (`python3 -c "open('11_runtime/events.jsonl','a')…"`, `node -e …`) names
+ *  protected state in its PAYLOAD, past every shape rule. Deny when a `-c`/`-e`
+ *  payload mentions protected markers or protected-relative paths — unless the
+ *  invocation runs an allowlisted repo tool script.
+ *
+ *  Residual scope (deliberate, documented): a script FILE whose command text names
+ *  nothing protected (`python3 /tmp/x.py`, `node script.js`) still passes — its
+ *  content is unseen — as does a program piped over stdin without a heredoc
+ *  (`echo … | python3`). Closing those needs OS-level write rules on the protected
+ *  paths (see the containment layer); this heuristic closes the inline-text hole
+ *  without breaking repo tooling, reads, or benign tmp operations.
+ */
+function interpPayloadReason(exec) {
+  try {
+    if (!exec || exec.name !== 'bash') return undefined
+    const args = exec.arguments || {}
+    if (typeof args.command !== 'string') return undefined
+    const root = findOsRoot(sessionCwd(exec))
+    if (!root) return undefined
+    const cmd = splitHeredocs(args.command).stripped
+    for (const seg of splitSegments(cmd)) {
+      const words = shellWords(seg.trim())
+      if (words.length === 0) continue
+      let head = words[0].toLowerCase().split(/[/\\]/).pop()
+      if (head === 'env' || head === 'sudo') {
+        words.shift()
+        if (words.length === 0) continue
+        head = words[0].toLowerCase().split(/[/\\]/).pop()
+      }
+      if (!INLINE_INTERP.has(head)) continue
+      let payload = null
+      let script = null
+      for (let i = 1; i < words.length; i++) {
+        const w = stripQuotes(words[i])
+        if ((w === '-c' || w === '-e') && i + 1 < words.length) { payload = stripQuotes(words[i + 1]); break }
+        if (w === '-c' || w === '-e') { payload = ''; break }
+        if (/^-/.test(w)) continue
+        script = words[i]
+        break
+      }
+      if (script !== null && payload === null && isAllowlistedTool(root, script)) continue
+      if (payload !== null && payload !== ''
+        && (mentionsProtected(payload) || PAYLOAD_PROTECTED_DIR.test(payload))) {
+        return 'research-os-enforcer: this inline-interpreter payload names control-plane state — ' +
+          'split the work or use tools/researchctl.py; direct protected writes are denied.'
+      }
+    }
+    return undefined
+  } catch (e) {
+    log('guard-interp-error ' + e)
+    if (mentionsProtected(argsText(exec))) {
+      return 'research-os-enforcer: the interpreter guard could not evaluate the payload and this call touches protected state — refusing (failing closed). Mutate protected state through tools/researchctl.py; retry without the protected path if this call was unrelated.'
+    }
+    return undefined
+  }
+}
 /** R1/R2 — the same protection for shell write shapes, judging the WRITE TARGET.
  *
  *  `2>&1` / `>&2` are descriptor duplications, not file writes: only a real
@@ -1882,7 +2007,7 @@ function apply(ctx) {
     // Monotonic guard: canonical/projection write protection cannot be undone by a
     // later allow. Denials are logged (guard denials are otherwise invisible in the log).
     tools.guard((exec) => {
-      const reason = fsWriteReason(exec) || bashWriteReason(exec)
+      const reason = fsWriteReason(exec) || bashWriteReason(exec) || interpPayloadReason(exec)
       if (reason) log('DENY(guard) ' + (exec && exec.name) + ' :: ' + reason)
       return reason
     })
