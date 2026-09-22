@@ -58,7 +58,12 @@ HTTP(S) only; the browser arm is read-only (navigate + capture) and needs `playw
 error until then); a browser launch, network call, protected write or ledger deletion
 hidden inside an arbitrary interpreter script (python/node/php) or a bash-invoked CLI is
 not detectable by command scanning — egress gating is advisory interception, not a hard
-boundary, and the runner + token remains the sanctioned path.
+boundary, and the runner + token remains the sanctioned path. Accepted residuals: (a) an
+unresolvable variable target (`u=http://localhost:3000; curl $u`) denies fail-closed —
+the gate cannot expand the variable, so it refuses rather than allow a possible egress;
+(b) the inline-interpreter heuristic treats a `bash -c` payload mentioning protected
+markers as suspicious even when it only reads (`bash -c "cat 11_runtime/events.jsonl"`
+denies while a direct `cat 11_runtime/events.jsonl` read stays allowed).
 
 ## Tests
 

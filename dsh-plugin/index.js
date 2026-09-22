@@ -203,7 +203,7 @@ function netCommandIndex(words) {
  *  (`env`, `sudo`, `nohup`, `time`, `nice`, `timeout`, `stdbuf`, `xargs` with their
  *  own flags) and `VAR=x` prefixes skipped, `openssl` only with `s_client`. */
 function hasNetCommand(cmd) {
-  const segments = String(cmd).replace(/["']/g, '').split(/&&|\|\||[;|&()\n]/)
+  const segments = normalizeIfs(cmd).replace(/["']/g, '').split(/&&|\|\||[;|&()\n]/)
   for (const seg of segments) {
     const words = seg.trim().split(/\s+/).filter(Boolean)
     if (words.length === 0) continue
@@ -269,7 +269,7 @@ const EGRESS_VALUE_FLAGS = /^(-H|--header|-d|--data|--data-raw|--data-ascii|--da
  *  excluded). Empty when the command names no bare destination. */
 function schemelessTargets(cmd) {
   const out = []
-  for (const seg of splitSegments(String(cmd))) {
+  for (const seg of splitSegments(normalizeIfs(cmd))) {
     const words = shellWords(seg.trim())
     if (words.length === 0) continue
     const idx = netCommandIndex(words)
@@ -524,6 +524,34 @@ function fsWriteReason(exec) {
  *  is judged (`11_runtime/$'events.jsonl'` is the protected file). */
 function stripQuotes(token) {
   return String(token).replace(/\$(?=['"])/g, '').replace(/["']/g, '')
+}
+
+/** Normalize `$IFS`/`${IFS}` to whitespace for command tokenization (bash splits
+ *  words on the expanded value). Quote-aware: occurrences inside single or double
+ *  quotes stay literal — inside single quotes bash performs no expansion, and inside
+ *  double quotes the expansion never splits words — so `'${IFS}'` and `"a${IFS}b"`
+ *  are not separators. Backslash-escaped `$` never expands. */
+function normalizeIfs(cmd) {
+  const s = String(cmd)
+  let out = ''
+  let quote = null
+  for (let i = 0; i < s.length;) {
+    const c = s[i]
+    if (quote) {
+      if (quote === '"' && c === '\\' && i + 1 < s.length) { out += c + s[i + 1]; i += 2; continue }
+      out += c
+      if (c === quote) quote = null
+      i++
+      continue
+    }
+    if (c === '\\' && i + 1 < s.length) { out += c + s[i + 1]; i += 2; continue }
+    if (c === '"' || c === "'") { quote = c; out += c; i++; continue }
+    if (s.startsWith('${IFS}', i)) { out += ' '; i += 6; continue }
+    if (s.startsWith('$IFS', i)) { out += ' '; i += 4; continue }
+    out += c
+    i++
+  }
+  return out
 }
 
 /** Expand `{a,b,...}` groups recursively with nesting (bash semantics). A group
@@ -867,7 +895,7 @@ function interpPayloadReason(exec) {
     if (typeof args.command !== 'string') return undefined
     const root = findOsRoot(sessionCwd(exec))
     if (!root) return undefined
-    const cmd = breakBackticks(splitHeredocs(args.command).stripped)
+    const cmd = normalizeIfs(breakBackticks(splitHeredocs(args.command).stripped))
     for (const seg of splitSegments(cmd)) {
       const words = shellWords(seg.trim())
       if (words.length === 0) continue
@@ -993,7 +1021,7 @@ function bashWriteReason(exec) {
     const { stripped, bodies } = splitHeredocs(args.command)
     // `$IFS`/`${IFS}` split words at the shell: normalize to whitespace before
     // tokenization so `rm${IFS}11_runtime/events.jsonl` cannot hide the target.
-    const cmd = stripped.replace(/\$\{IFS\}|\$IFS/g, ' ')
+    const cmd = normalizeIfs(stripped)
     const targets = []
     const redirects = []
     const redirected = /(^|[^>&])>>?\s*(?!&)([^\s;&|()<>]+)/g
@@ -1047,7 +1075,7 @@ function liveGateReason(exec) {
     if (!exec || exec.name !== 'bash') return undefined
     const args = exec.arguments || {}
     if (typeof args.command !== 'string') return undefined
-    const cmd = splitHeredocs(args.command).stripped
+    const cmd = normalizeIfs(splitHeredocs(args.command).stripped)
     if (!hasNetCommand(cmd)) return undefined
     const root = findOsRoot(sessionCwd(exec))
     if (!root) return undefined
@@ -1100,7 +1128,7 @@ function isLocalPathArg(raw, cwd) {
  *  <browser app>`, `open -b <browser bundle-id>`, or a bare `open <http(s)://…>`
  *  (default-browser open). */
 function browserAppLaunch(cmd) {
-  for (const seg of splitSegments(String(cmd))) {
+  for (const seg of splitSegments(normalizeIfs(cmd))) {
     const words = shellWords(seg.trim())
     if (words.length === 0) continue
     const idx = netCommandIndex(words)
@@ -1132,7 +1160,7 @@ function browserAppLaunch(cmd) {
  *  stay allowed). `cwd` resolves existing relative paths. */
 function browserBareTargets(cmd, cwd) {
   const out = []
-  for (const seg of splitSegments(String(cmd))) {
+  for (const seg of splitSegments(normalizeIfs(cmd))) {
     const words = shellWords(seg.trim())
     if (words.length === 0) continue
     const idx = netCommandIndex(words)
@@ -1191,7 +1219,7 @@ function browserBareTargets(cmd, cwd) {
  *  words (`open`, `test`) carry no host characters and are skipped. */
 function automationBareTargets(cmd) {
   const out = []
-  for (const seg of splitSegments(String(cmd))) {
+  for (const seg of splitSegments(normalizeIfs(cmd))) {
     if (!BROWSER_LAUNCH.test(seg)) continue
     const words = shellWords(seg.trim())
     if (words.length === 0) continue
@@ -1222,7 +1250,7 @@ function browserGateReason(exec) {
     if (!exec || exec.name !== 'bash') return undefined
     const args = exec.arguments || {}
     if (typeof args.command !== 'string') return undefined
-    const cmd = splitHeredocs(args.command).stripped
+    const cmd = normalizeIfs(splitHeredocs(args.command).stripped)
     if (!BROWSER_LAUNCH.test(cmd)) {
       // W7: user-facing browser launches deny out-of-scope destinations only.
       if (!browserAppLaunch(cmd)) return undefined
