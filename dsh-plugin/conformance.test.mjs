@@ -151,6 +151,16 @@ check('dd of=11_runtime/run-status.yaml denied',
   !!h.guardReason(exec('bash', { command: 'dd of=11_runtime/run-status.yaml if=/tmp/x' }, osRoot)))
 check('ln -sf /dev/null 11_runtime/events.jsonl denied',
   !!h.guardReason(exec('bash', { command: 'ln -sf /dev/null 11_runtime/events.jsonl' }, osRoot)))
+check('ln -f -s plus append through the fresh link denied (symlink TOCTOU, flag order)',
+  !!h.guardReason(exec('bash', { command: 'ln -f -s 11_runtime/events.jsonl /tmp/x && echo forged >> /tmp/x' }, osRoot)))
+check('ln hardlink plus append through it denied',
+  !!h.guardReason(exec('bash', { command: 'ln 11_runtime/events.jsonl /tmp/x && echo forged >> /tmp/x' }, osRoot)))
+check('ln -s through a same-command variable plus append denied',
+  !!h.guardReason(exec('bash', { command: 'F=11_runtime/events.jsonl && ln -s $F /tmp/x && echo forged >> /tmp/x' }, osRoot)))
+check('ln -s of unrelated files plus an unrelated append allowed',
+  !h.guardReason(exec('bash', { command: 'ln -s notes.md /tmp/notes-link && echo done > /tmp/log' }, osRoot)))
+check('ln -s between /tmp names allowed',
+  !h.guardReason(exec('bash', { command: 'ln -s /tmp/a /tmp/b' }, osRoot)))
 check('cd 11_runtime && rm events.jsonl denied (bare name resolved against cd)',
   !!h.guardReason(exec('bash', { command: 'cd 11_runtime && rm events.jsonl' }, osRoot)))
 check('rm -rf 03_hypotheses denied (ancestor of protected hypothesis views)',

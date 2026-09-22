@@ -1000,11 +1000,19 @@ function interpPayloadReason(exec) {
  *  `2>&1` / `>&2` are descriptor duplications, not file writes: only a real
  *  redirect target (or the path arguments of an explicitly writing tool) counts,
  *  so reading a protected file through bash stays allowed (live-verified fix).
- *  Destructive shapes (rm/rmdir/unlink/mv/cp/dd/find -delete/ln -sf/perl -i/sed -i)
- *  resolve their targets too — bare names, `dd of=` operands, brace expansions and
- *  globs (expanded against the filesystem when readable, else the static prefix
- *  before the first wildcard fails closed) — and are denied when the resolved path
- *  equals or is an ancestor of control-plane-owned material. Surrounding quotes are
+ *  Destructive shapes (rm/rmdir/unlink/mv/cp/dd/find -delete/ln/perl -i/sed -i —
+ *  any `ln` spelling, so flag-order (`ln -f -s`) and hardlink (`ln src dst`)
+ *  variants cannot dodge the check) resolve their targets too — bare names, `dd
+ *  of=` operands, brace expansions and globs (expanded against the filesystem
+ *  when readable, else the static prefix before the first wildcard fails
+ *  closed) — and are denied when the resolved path equals or is an ancestor of
+ *  control-plane-owned material. A link whose target does not exist yet cannot be
+ *  resolved, so the link SOURCE is always judged: creating the link and writing
+ *  through it in one command (`ln -s <protected> /tmp/x && echo >> /tmp/x`)
+ *  denies on the source. Same-command `NAME=value` assignments are substituted
+ *  into judged operands (`$V`/`${V}`), so the source cannot hide in a variable
+ *  either (command-substitution sources remain a known residual — the guard is
+ *  static). Surrounding quotes are
  *  stripped and `$IFS`/`${IFS}` normalized before tokenization. `cd <dir> && …`
  *  adds the rebased directory as another base, and an untrusted `workdir` never
  *  moves the root (session cwd) but its targets are judged too — so
@@ -1028,10 +1036,19 @@ function bashWriteReason(exec) {
     // `$IFS`/`${IFS}` split words at the shell: normalize to whitespace before
     // tokenization so `rm${IFS}11_runtime/events.jsonl` cannot hide the target.
     const cmd = normalizeIfs(stripped)
+    // Static same-command assignments (`F=path`) so link sources and redirect
+    // targets through `$F`/`${F}` judge as the assigned value. Last assignment
+    // wins; only simple `NAME=value` words (quoted values unquoted).
+    const assigned = {}
+    for (const m of cmd.matchAll(/(?:^|[\s;&|()]+)([A-Za-z_][A-Za-z0-9_]*)=('[^']*'|"[^"]*"|[^\s;&|()<>]+)/g)) {
+      assigned[m[1]] = stripQuotes(m[2])
+    }
+    const subst = (tok) => String(tok).replace(/\$([A-Za-z_][A-Za-z0-9_]*)|\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g,
+      (whole, a, b) => (assigned[a ?? b] !== undefined ? assigned[a ?? b] : whole))
     const targets = []
     const redirects = []
     const redirected = /(^|[^>&])>>?\s*(?!&)([^\s;&|()<>]+)/g
-    for (const m of cmd.matchAll(redirected)) { targets.push(m[2]); redirects.push(m[2]) }
+    for (const m of cmd.matchAll(redirected)) { targets.push(subst(m[2])); redirects.push(subst(m[2])) }
     const bases = [cwd || root]
     for (const m of cmd.matchAll(/(?:^|[;&|]\s*)cd\s+([^\s;&|()<>]+)/g)) {
       const abs = isAbsolute(m[1]) ? m[1] : join(cwd || root, m[1])
@@ -1043,7 +1060,7 @@ function bashWriteReason(exec) {
       const wd = isAbsolute(args.workdir) ? args.workdir : join(cwd || root, args.workdir)
       if (!bases.includes(wd)) bases.push(wd)
     }
-    const DESTRUCTIVE = /\b(tee|truncate|shred|rm|rmdir|unlink|mv|cp|dd|install)\b|sed\s+-i|perl\s+-i|-delete\b|\bln\s+-s/
+    const DESTRUCTIVE = /\b(tee|truncate|shred|rm|rmdir|unlink|mv|cp|dd|install|ln)\b|sed\s+-i|perl\s+-i|-delete\b/
     if (DESTRUCTIVE.test(cmd)) {
       // Keep quotes on the token: brace expansion is quote-aware (quoted braces
       // never expand), and stripQuotes runs inside targetReason.
@@ -1052,7 +1069,7 @@ function bashWriteReason(exec) {
         let tok = t
         if (tok.startsWith('of=')) tok = tok.slice(3)
         else if (tok.includes('=')) continue
-        targets.push(tok)
+        targets.push(subst(tok))
       }
     }
     if (bodies.length > 0 && (redirects.some((t) => targetInsideRoot(root, bases, t))
