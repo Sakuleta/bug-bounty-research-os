@@ -3433,7 +3433,7 @@ check("v8.2 W2: the audit errors on an action outside the binding",
 # The receipt field is the spec-named `out_of_scope_hops` (hop records, as the
 # runner reports them); a legacy integer `out_of_scope_hop_count` still counts.
 _nr12, _nc12 = _w7_root()
-_nc12.record_action({**_w7_action(), "scope_violation": True, "out_of_scope_hops": [
+_viol12 = _nc12.record_action({**_w7_action(), "scope_violation": True, "out_of_scope_hops": [
     {"host": "evil.example", "reason": "out_of_scope"}]})
 _sub12 = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nr12)],
                         capture_output=True, text=True)
@@ -3446,13 +3446,46 @@ _sub12l = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nr12l)],
 check("v8.2 W12: a legacy integer hop count still fails undispositioned",
       _sub12l.returncode != 0 and "scope_violation" in (_sub12l.stdout + _sub12l.stderr))
 _nc12.request_gate("G-0001", {"cycle_id": "C-0001",
-                              "what_is_needed": "Scope violation review on the browser run",
+                              "what_is_needed": f"Scope violation review for {_viol12['entity_id']} on the browser run",
                               "why_human_only": "Only the researcher can disposition scope drift",
                               "resume_after": "Gate resolution"})
 _nc12.resolve_gate("G-0001", decision="APPROVED", reference="ticket-scope-1")
 _sub12g = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nr12)],
                          capture_output=True, text=True)
 check("v8.2 W12: a gate-dispositioned violation audits clean", _sub12g.returncode == 0)
+# Backlog B8: disposition binds the offending action — a gate resolved before the
+# violation, or one that never names it, does not disposition it.
+_nr12p, _nc12p = _w7_root()
+_nc12p.request_gate("G-0001", {"cycle_id": "C-0001",
+                               "what_is_needed": "Scope review of the upcoming browser run",
+                               "why_human_only": "Only the researcher can disposition scope drift",
+                               "resume_after": "Gate resolution"})
+_nc12p.resolve_gate("G-0001", decision="APPROVED", reference="ticket-scope-0")
+_viol12p = _nc12p.record_action({**_w7_action(), "scope_violation": True, "out_of_scope_hops": [
+    {"host": "evil.example", "reason": "out_of_scope"}]})
+_aid12p = _viol12p["entity_id"]
+_sub12p = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nr12p)],
+                         capture_output=True, text=True)
+check("backlog B8: a gate resolved before the violation does not disposition it",
+      _sub12p.returncode != 0 and "scope_violation" in (_sub12p.stdout + _sub12p.stderr))
+_nc12p.request_gate("G-0002", {"cycle_id": "C-0001",
+                               "what_is_needed": "Scope violation review on the browser run",
+                               "why_human_only": "Only the researcher can disposition scope drift",
+                               "resume_after": "Gate resolution"})
+_nc12p.resolve_gate("G-0002", decision="APPROVED", reference="ticket-scope-2")
+_sub12q = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nr12p)],
+                         capture_output=True, text=True)
+check("backlog B8: a later gate that never names the action does not disposition it",
+      _sub12q.returncode != 0 and "scope_violation" in (_sub12q.stdout + _sub12q.stderr))
+_nc12p.request_gate("G-0003", {"cycle_id": "C-0001",
+                               "what_is_needed": f"Scope violation review for {_aid12p} on the browser run",
+                               "why_human_only": "Only the researcher can disposition scope drift",
+                               "resume_after": "Gate resolution"})
+_nc12p.resolve_gate("G-0003", decision="APPROVED", reference="ticket-scope-3")
+_sub12r = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nr12p)],
+                         capture_output=True, text=True)
+check("backlog B8: a later gate naming the offending action dispositions it",
+      _sub12r.returncode == 0)
 
 
 # v8.2 fix M1: a flow-style (inline-map) identity binding is a garbled contract,

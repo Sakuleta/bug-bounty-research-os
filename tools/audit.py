@@ -459,15 +459,19 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
 
     # Browser scope violations are detection, not prevention: a run the runner
     # flagged (`scope_violation: true` on the ACTION_RECORDED receipt) needs a
-    # resolved human gate on the same cycle for disposition — otherwise the audit
-    # errors (legacy warns). Counts ride along for the record.
-    for e in events:
+    # resolved human gate that postdates it and names the offending action id in
+    # `what_is_needed` — otherwise the audit errors (legacy warns). A gate
+    # resolved before the violation, or one that never names it, dispositions
+    # nothing: blanket same-cycle gates cannot launder later violations. Counts
+    # ride along for the record.
+    for idx, e in enumerate(events):
         if e.get("type") != "ACTION_RECORDED":
             continue
         payload = e.get("payload") or {}
         if payload.get("scope_violation") is not True:
             continue
         cid = str(e.get("cycle_id") or "")
+        aid = str(e.get("entity_id") or "")
         hops = payload.get("out_of_scope_hops")
         if isinstance(hops, list):
             hop_count: int | str = len(hops)
@@ -475,17 +479,28 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
             # Legacy receipts carried the integer `out_of_scope_hop_count`.
             legacy = payload.get("out_of_scope_hop_count")
             hop_count = legacy if isinstance(legacy, int) else "?"
-        gated = any(ge.get("type") == "HUMAN_GATE_RESOLVED" and str(ge.get("cycle_id") or "") == cid
-                    for ge in events)
-        if not gated:
-            message = (f"action {e.get('entity_id')} reports a browser scope_violation "
-                       f"({hop_count} out-of-scope hops) with no "
-                       f"resolved human gate on cycle {cid or '<missing>'} — raise a human gate "
-                       "for disposition before citing this run")
-            if e.get("os_version"):
-                errors.append(message)
-            else:
-                warnings.append(f"legacy action record (pre-7.3, no os_version): {message}")
+        later = [ge for ge in events[idx + 1:]
+                 if ge.get("type") == "HUMAN_GATE_RESOLVED"
+                 and str(ge.get("cycle_id") or "") == cid]
+        bound = any(aid and aid in str((cp.gate(str(ge.get("entity_id") or "")) or {}).get(
+            "what_is_needed") or "") for ge in later)
+        if bound:
+            continue
+        if later:
+            message = (f"action {aid} reports a browser scope_violation "
+                       f"({hop_count} out-of-scope hops) with no resolved human gate on cycle "
+                       f"{cid or '<missing>'} that names it — raise a human gate for disposition "
+                       f"naming the offending action id ({aid}) in what_is_needed before citing this run")
+        else:
+            message = (f"action {aid} reports a browser scope_violation "
+                       f"({hop_count} out-of-scope hops) with no later resolved human gate on cycle "
+                       f"{cid or '<missing>'} — a gate resolved before the violation dispositions "
+                       "nothing; raise a human gate for disposition naming the offending action "
+                       f"id ({aid}) in what_is_needed before citing this run")
+        if e.get("os_version"):
+            errors.append(message)
+        else:
+            warnings.append(f"legacy action record (pre-7.3, no os_version): {message}")
 
     # Provenance drift: the live engagement binding must equal the latest provenance
     # record. A hand edit of 00_control/engagement.yaml behind the ledger's back
