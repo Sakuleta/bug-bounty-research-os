@@ -1727,21 +1727,28 @@ async function runControlledRequest({ root, args, fetchImpl }) {
   if (!token) {
     return { ok: false, text: 'research_os_request: no matching unconsumed preflight token (tokens are single-use and expire). Prepare one first:\n  python3 tools/researchctl.py . prepare payload.json\nwith request_shape:\n  ' + JSON.stringify(redactShapeForText(shape)) }
   }
-  const claim = claimToken(root, token)
-  if (!claim.ok) {
-    log(`DENY(executor) ${shape.method} ${safeUrl} :: ${claim.error}`)
-    return { ok: false, text: `research_os_request: ${claim.error}` }
-  }
   // R7: while a broker socket exists the broker is mandatory — unsigned tokens are
   // refused, both scope checks (local + broker) must pass, and the token consumes
   // through the broker before dispatch. Any denial means no dispatch, no fallback.
+  // The broker gate runs BEFORE the local claim: the broker's authoritative refusal
+  // (already-consumed, bad signature) must win over the claim conflict, and a broker
+  // refusal retires the local record exactly as before. The claim then serializes
+  // only the local append→dispatch window against parallel dispatches.
   const brokerDenial = await consumeBrokerToken(root, token, shape, 'http')
   if (brokerDenial) {
-    releaseClaim(claim.path)
     const reason = redactUrlSecrets(brokerDenial)
     const where = brokerPath() === undefined ? 'executor' : 'executor broker'
     log(`DENY(${where}) ${shape.method} ${safeUrl} :: ${reason}`)
     return { ok: false, text: `research_os_request: ${reason}` }
+  }
+  // Atomic claim before the local append: two parallel dispatches on one token —
+  // exactly one claim wins and the loser refuses before any network effect. The
+  // claim persists after dispatch (released only on definite non-dispatch below),
+  // so a re-appended record can never ride the same nonce twice.
+  const claim = claimToken(root, token)
+  if (!claim.ok) {
+    log(`DENY(executor) ${shape.method} ${safeUrl} :: ${claim.error}`)
+    return { ok: false, text: `research_os_request: ${claim.error}` }
   }
   consumeToken(root, token)
   const lifecycleDenied = cycleLiveReason(root, token)
@@ -1858,20 +1865,25 @@ async function runControlledBrowser({ root, args }) {
   if (!token) {
     return { ok: false, text: 'research_os_browser: no matching unconsumed browser preflight token (tokens are single-use and expire). Prepare one first:\n  python3 tools/researchctl.py . prepare payload.json\nwith "tool_family": "browser" and request_shape:\n  ' + JSON.stringify(redactShapeForText(shape)) }
   }
-  const claim = claimToken(root, token)
-  if (!claim.ok) {
-    log(`DENY(executor browser) ${safeUrl} :: ${claim.error}`)
-    return { ok: false, text: `research_os_browser: ${claim.error}` }
-  }
   // R7: same mandatory broker gate as the HTTP arm — unsigned refusal, both scope
-  // checks, broker consume; no dispatch on any denial.
+  // checks, broker consume; no dispatch on any denial. The broker gate runs BEFORE
+  // the local claim (see the HTTP arm): the broker's authoritative refusal must win
+  // over a claim conflict. The claim then serializes only the local append→dispatch
+  // window against parallel dispatches.
   const brokerDenial = await consumeBrokerToken(root, token, shape, 'browser')
   if (brokerDenial) {
-    releaseClaim(claim.path)
     const reason = redactUrlSecrets(brokerDenial)
     const where = brokerPath() === undefined ? 'executor browser' : 'executor broker browser'
     log(`DENY(${where}) ${safeUrl} :: ${reason}`)
     return { ok: false, text: `research_os_browser: ${reason}` }
+  }
+  // Atomic claim before the local append (see the HTTP arm): exactly one parallel
+  // dispatch wins; the claim persists after dispatch and is released only on
+  // definite non-dispatch below.
+  const claim = claimToken(root, token)
+  if (!claim.ok) {
+    log(`DENY(executor browser) ${safeUrl} :: ${claim.error}`)
+    return { ok: false, text: `research_os_browser: ${claim.error}` }
   }
   consumeToken(root, token)
   const lifecycleDenied = cycleLiveReason(root, token)
