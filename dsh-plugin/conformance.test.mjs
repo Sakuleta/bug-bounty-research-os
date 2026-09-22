@@ -157,6 +157,25 @@ writeFileSync(join(runtimeOnly, 'OS_VERSION'), '7.1\n')
 check('OS_VERSION + 11_runtime/ (no ledger) still detected: projection write denied',
   !!h.guardReason(exec('write', { file_path: '11_runtime/last-result.md', content: 'x' }, runtimeOnly)))
 
+// ---- W3: OS_VERSION is protected material; detection survives marker deletion ----
+check('write to OS_VERSION denied',
+  !!h.guardReason(exec('write', { file_path: 'OS_VERSION', content: '9.9\n' }, osRoot)))
+check('edit to OS_VERSION denied',
+  !!h.guardReason(exec('edit', { file_path: join(osRoot, 'OS_VERSION'), old_string: 'x', new_string: 'y' }, osRoot)))
+check('rm OS_VERSION denied',
+  !!h.guardReason(exec('bash', { command: 'rm OS_VERSION' }, osRoot)))
+check('redirect onto OS_VERSION denied',
+  !!h.guardReason(exec('bash', { command: 'echo 9.9 > OS_VERSION' }, osRoot)))
+const noMarker = join(sandbox, 'no-marker')
+mkdirSync(join(noMarker, '11_runtime'), { recursive: true })
+mkdirSync(join(noMarker, '00_control'), { recursive: true })
+writeFileSync(join(noMarker, '11_runtime', 'events.jsonl'), '')
+writeFileSync(join(noMarker, '00_control', 'engagement.yaml'), 'scope:\n  gate: none\n')
+check('marker deleted but ledger present: ledger write still denied',
+  !!h.guardReason(exec('write', { file_path: '11_runtime/events.jsonl', content: '{}' }, noMarker)))
+check('marker deleted but engagement binding present: protected write still denied',
+  !!h.guardReason(exec('bash', { command: 'echo x >> 11_runtime/events.jsonl' }, noMarker)))
+
 // ---- R5: the preflight token store is control-plane-owned -------------------
 check('write to 11_runtime/action-tokens.jsonl denied',
   !!h.guardReason(exec('write', { file_path: '11_runtime/action-tokens.jsonl', content: '{}' }, osRoot)))

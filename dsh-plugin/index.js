@@ -127,20 +127,21 @@ const PROTECTED_MARKERS = [
   'freshness.yaml', 'evidence-store', 'engagement.yaml', 'identity-binding.yaml',
   'technique-discoveries.md', '04_cycles', '03_hypotheses',
   'knowledge-usage.yaml', 'knowledge-proposals.yaml', 'knowledge-proposals/',
+  'os_version',
 ]
 
 // Static protected files and directories the control plane owns. A destructive target
 // that equals or is an ancestor of any entry here is denied: `rm -rf 11_runtime` deletes
 // control-plane-owned material just as surely as writing one protected file.
 const PROTECTED_TARGETS = [
-  '11_runtime/events.jsonl', '11_runtime/run-status.yaml', '11_runtime/active-cycle.yaml',
-  '11_runtime/evidence-index.jsonl', '11_runtime/current-context.md', '11_runtime/last-result.md',
+  '11_runtime/events.jsonl', '11_runtime/run-status.yaml', '11_runtime/active-cycle.yaml',  '11_runtime/evidence-index.jsonl', '11_runtime/current-context.md', '11_runtime/last-result.md',
   '11_runtime/action-tokens.jsonl', '11_runtime/human-gates', '11_runtime/evidence-store',
   '04_cycles', '03_hypotheses/active', '03_hypotheses/archive',
   '06_audits/closure-readiness.yaml', '10_learning/technique-discoveries.md',
   '10_learning/freshness.yaml', '10_learning/knowledge-usage.yaml',
   '10_learning/knowledge-proposals.yaml', '10_learning/knowledge-proposals',
   '00_control/engagement.yaml', '00_control/identity-binding.yaml',
+  'OS_VERSION',
 ]
 
 // Commands that reach the network. Deliberately narrow: package installs and
@@ -180,17 +181,21 @@ function sessionCwd(exec) {
  *  Detection must survive ledger deletion (an interpreter bypass deletes the ledger to
  *  disarm the enforcer), so OS_VERSION alone is not enough but the ledger is not
  *  required either: any one of the ledger, the engagement binding or the runtime
- *  directory marks the workspace.
+ *  directory marks the workspace. Detection must also survive deletion of the
+ *  OS_VERSION marker itself (removing the marker would otherwise disarm every rule):
+ *  when the marker is gone but any other workspace marker is present, the directory
+ *  is still a workspace (fail closed). A directory with none of the markers is
+ *  unaffected.
  */
 function findOsRoot(cwd) {
   if (!cwd) return undefined
   let dir = resolve(cwd)
   for (let i = 0; i < 12; i++) {
     try {
-      if (existsSync(join(dir, OS_MARKER))
-        && (existsSync(join(dir, LEDGER_REL))
-          || existsSync(join(dir, '00_control', 'engagement.yaml'))
-          || existsSync(join(dir, '11_runtime')))) return dir
+      const other = existsSync(join(dir, LEDGER_REL))
+        || existsSync(join(dir, '00_control', 'engagement.yaml'))
+        || existsSync(join(dir, '11_runtime'))
+      if (other) return dir
     } catch {}
     const parent = resolve(dir, '..')
     if (parent === dir) break
@@ -208,6 +213,9 @@ function relPosix(root, abs) {
 }
 
 function protectedReason(rel, root) {
+  if (rel === OS_MARKER) {
+    return 'research-os-enforcer: OS_VERSION is the workspace marker — removing or editing it disarms every rule, so direct writes are denied.'
+  }
   for (const re of PROTECTED_PATTERNS) {
     if (!re.test(rel)) continue
     if (re === BOOTSTRAP_CONDITIONAL) {
