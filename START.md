@@ -149,6 +149,5 @@ Lifecycle state is not edited directly in projected YAML files. Use `tools/resea
 
 Before a live target action, prepare the preflight through the control plane
 (`researchctl prepare payload.json`) and send the matching request through the
-`research_os_request` executor — the token is single-use and the enforcer plugin
-refuses raw network egress. The AI remains the reasoning engine; the control plane
+controlled executors (`research_os_request` / `research_os_browser`) — the token is single-use and the enforcer plugin gates raw network egress at the tool layer (advisory shape-based interception, not an OS boundary; residuals in `15_TOOLING.md`). The AI remains the reasoning engine; the control plane
 is the invariant enforcer.

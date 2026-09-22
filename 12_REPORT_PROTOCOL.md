@@ -79,7 +79,7 @@ The reporting platform/form is itself a live source of current constraints. Read
 
 ## Platform notes (HackerOne / Bugcrowd / Intigriti)
 
-- Submit only through the program's own platform channel (H1 report, Bugcrowd submission, Intigriti report) and only after the human gate approves. Never auto-submit via API, email, or any side channel.
+- Submit only through the program's own platform channel (H1 report, Bugcrowd submission, Intigriti report) and only after the human gate approves. Never auto-submit via API, email, or any side channel. [PROCEDURAL — no tool watches the submission channel.]
 - Scope, duplicates, and severity follow the platform's live program page at submission time, not a cached copy. Re-check bounty table, out-of-scope list, and disclosure terms in the same session as submission.
 - Researcher identity comes from `00_control/researcher-profile.yaml` (public handles only); production credentials are never stored in the workspace and are human-gated per `08_human_gates.md`. The sole exception is researcher-authorized local-only throwaway credentials under `lab/credentials/` (0600, never evidence) per `29_SECURITY_HYGIENE.md`.
 - Hacktivity/public disclosures are research sources only (`12_knowledge/novelty-research.md` step 6); never copy another report's content into a submission.

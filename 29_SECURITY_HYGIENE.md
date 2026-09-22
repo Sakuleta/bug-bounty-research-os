@@ -101,7 +101,7 @@ other byte of the engagement file and records the `BUDGET_CHANGED` event.
 Engagement work must run on a model route that does not train on prompts or completions.
 The configured contributor-tier Muse route trains on prompts, so it is not acceptable for
 target data — check the active route before bootstrap and switch the engagement to a
-non-training route first.
+non-training route first. [PROCEDURAL — the repo cannot see the provider route.]
 
 ## Personal environment
 

@@ -117,6 +117,45 @@ def test_validate_catches_missing():
     assert r.returncode != 0, "empty dir must fail validation"
 
 
+def test_reviewer_start_counts_match_wc():
+    # v8.2 W13: REVIEWER-START.md line counts are exact `wc -l` values — the file
+    # says so, so this test re-derives them programmatically (0 mismatches).
+    text = (ROOT / "REVIEWER-START.md").read_text()
+    mismatches = []
+    seen: set[str] = set()
+    for path, claimed in (re.findall(r"`([^`]+)` \((\d+)\)", text)
+                          + re.findall(r"`([^`]+)` \|\s*(\d+)", text)):
+        if path in seen:
+            continue
+        seen.add(path)
+        candidate = ROOT / path
+        if not candidate.is_file() or candidate.suffix not in (".md", ".py", ".mjs"):
+            continue
+        actual = sum(1 for _ in candidate.read_text(errors="ignore").splitlines())
+        # wc -l counts newlines: match it exactly (a missing trailing newline reads one less).
+        raw = candidate.read_bytes()
+        actual = raw.count(b"\n")
+        if actual != int(claimed):
+            mismatches.append(f"{path}: claims {claimed}, wc -l is {actual}")
+    assert not mismatches, "REVIEWER-START.md count drift: " + "; ".join(mismatches)
+
+
+def test_validate_snapshot_subset():
+    # v8.2 W13: an engagement snapshot (no tools/) validates the engagement subset
+    # and says its contract explicitly — it is not failed as a broken checkout.
+    snap = Path(tempfile.mkdtemp())
+    (snap / "00_control").mkdir(parents=True)
+    (snap / "11_runtime").mkdir(parents=True)
+    (snap / "00_control" / "engagement.yaml").write_text("scope:\n  assets: []\n")
+    (snap / "11_runtime" / "run-status.yaml").write_text("engagement_status: BOOTSTRAP\n")
+    (snap / "11_runtime" / "events.jsonl").write_text("")
+    r = run(str(TOOLS / "validate_workspace.py"), str(snap))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "engagement snapshot" in r.stdout, "must state the snapshot contract"
+    r = run(str(TOOLS / "validate_workspace.py"), str(ROOT / "examples" / "shadow-engagement"))
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
 def test_provision_check_only():
     tmp = make_root()
     r = run(str(TOOLS / "provision.py"), str(tmp), "--check-only")
@@ -143,7 +182,9 @@ if __name__ == "__main__":
     check("build_context budget + max 3 packs", test_build_context_budget_and_packs)
     check("validate PASS on real root", test_validate_passes_real_root)
     check("validate catches missing", test_validate_catches_missing)
+    check("validate engagement snapshot subset", test_validate_snapshot_subset)
+    check("REVIEWER-START counts match wc -l", test_reviewer_start_counts_match_wc)
     check("provision --check-only", test_provision_check_only)
     check("provision --capability filter", test_provision_capability_filter)
-    print(f"\n{8 - len(FAILS)}/8 passed")
+    print(f"\n{10 - len(FAILS)}/10 passed")
     sys.exit(1 if FAILS else 0)

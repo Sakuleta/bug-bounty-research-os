@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Validate workspace existence + content quality. Usage: validate_workspace.py [ROOT]"""
+"""Validate workspace existence + content quality. Usage: validate_workspace.py [ROOT]
+
+Contract (explicit): an OS checkout root (tools/control_plane.py present) gets the
+full check below; an engagement snapshot (no tools/, but 00_control/ + 11_runtime/)
+gets the engagement subset only — required engagement files plus the leak/junk
+scans. Anything else fails. `tools/audit.py`, not this script, is the engagement
+integrity check.
+"""
 import json
 import re
 import sys
@@ -9,6 +16,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from knowledge_index import parse_index, validate_index  # noqa: E402
 
 ROOT = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(__file__).resolve().parents[1]
+IS_CHECKOUT = (ROOT / 'tools' / 'control_plane.py').is_file()
+IS_SNAPSHOT = (not IS_CHECKOUT
+               and ((ROOT / '00_control' / 'engagement.yaml').is_file()
+                    or (ROOT / '11_runtime' / 'events.jsonl').is_file()))
+if IS_SNAPSHOT:
+    print('engagement snapshot: validating the engagement subset '
+          '(validate_workspace targets an OS checkout root; tools/audit.py is the integrity check)')
 REQUIRED = [
     'OS_VERSION',
     'START.md', 'AGENTS.md', 'ARCHITECTURE.md',
@@ -33,20 +47,28 @@ REQUIRED = [
     '11_runtime/human-gates', '10_learning/freshness.yaml',
     '10_learning/unknowns.yaml', '10_learning/assumptions.yaml',
 ]
+REQUIRED_SNAPSHOT = [
+    '00_control/engagement.yaml',
+    '11_runtime/run-status.yaml',
+    '11_runtime/events.jsonl',
+]
+if IS_SNAPSHOT:
+    REQUIRED = REQUIRED_SNAPSHOT
 LEAK = re.compile(r'turn\d+\S*search|cite.?turn', re.IGNORECASE)
 issues = []
 missing = [p for p in REQUIRED if not (ROOT / p).exists()]
 if missing:
     issues.append('Missing: ' + ', '.join(missing))
 
-idx_errors, idx_warnings = validate_index(ROOT)
+idx_errors, idx_warnings = ([], []) if IS_SNAPSHOT else validate_index(ROOT)
 issues.extend(idx_errors)
 for w in idx_warnings:
     print(f'warning: {w}')
 
 # Knowledge <-> skills binding: every indexed pack ships its skill entry point, so
 # the agent's on-demand reach (the skill) and the triage/lookup layer never drift apart.
-if (ROOT / '12_knowledge' / 'INDEX.yaml').exists():
+# OS checkouts only — engagement snapshots carry no packs or skills.
+if not IS_SNAPSHOT and (ROOT / '12_knowledge' / 'INDEX.yaml').exists():
     for pack in sorted(parse_index(ROOT / '12_knowledge' / 'INDEX.yaml')):
         if not (ROOT / '.dsh' / 'skills' / pack / 'SKILL.md').is_file():
             issues.append(f'knowledge pack without a skill entry point: .dsh/skills/{pack}/SKILL.md missing')
@@ -66,7 +88,7 @@ for rel in ['11_runtime/run-status.yaml', '11_runtime/active-cycle.yaml',
             '11_runtime/tool-registry.yaml', '11_runtime/lab-status.yaml',
             '11_runtime/last-result.md', '11_runtime/current-context.md']:
     p = ROOT / rel
-    if p.exists() and p.stat().st_size == 0:
+    if p.exists() and p.stat().st_size == 0 and not IS_SNAPSHOT:
         issues.append(f'11_runtime template empty: {rel}')
 
 for p in ROOT.rglob('*'):

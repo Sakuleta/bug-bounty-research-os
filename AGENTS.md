@@ -53,7 +53,11 @@ refuses unless real content differs (a timestamp touch is refused; missing/unrea
 files are errors), `--reference` is recorded friction, not proof, and `--gate` binds the
 resolution to an existing RESOLVED human gate. The audit re-validates resolutions, pack
 names and proposal digests, so a hand edit cannot smuggle a false APPLIED or a
-digest-less proposal past it.
+digest-less proposal past it. Enforcement reads the `KNOWLEDGE_PROPOSED` ledger event,
+never the hand-editable projection. Residual (documented, not enforced): direct edits
+to `12_knowledge/` files outside any proposal are invisible — the packs carry no
+baseline outside proposals, so "never silent" covers the promotion path, not the pack
+tree itself.
 
 A cycle ends in exactly one of: verified result, false positive, named blocker,
 non-applicability decision, or a newly justified next hypothesis. Never run large
@@ -87,11 +91,17 @@ the audit does not check this; the loop above does.
   the engagement's listed assets. The enforcer plugin consumes the token for exactly
   one matching call: `research_os_request` for `tool_family` "http", or
   `research_os_browser` for `tool_family` "browser" (`request_shape` `{url, principal}`)
-  — no preflight, no live action, and raw network egress stays closed. The
+  — no preflight, no live action through the controlled executors. Raw network
+  egress outside the executors is not closed by this sentence: the enforcer's bash
+  gate matches known tool spellings (resolved by basename; loopback is a parsed-host
+  test), interpreter/CLI indirection that names control-plane state is denied, and
+  anything else that can open a socket from this host stays outside the gate — the
+  kernel layer for that is `tools/containment/` (`15_TOOLING.md` residual risks). The
   controlled executors record the consumed nonce as `token_nonce` on every
   `ACTION_RECORDED`, so the action ledger links each call back to the token that
-  authorized it (`tools/audit.py` warns on legacy records and closure requires the
-  nonce on versioned actions). Executor receipts are transactional: if capture
+  authorized it (`researchctl record` refuses a nonce that matches no prepared token;
+  `tools/audit.py` errors on unknown nonces on versioned records, warns on legacy
+  ones, and closure requires the nonce on versioned actions). Executor receipts are transactional: if capture
   registration or the `ACTION_RECORDED` write fails after the request was sent, the
   tool returns `ok: false` with an explicit "the request WAS executed but the receipt
   could not be recorded — do not rely on this action as receipted" warning; treat the
@@ -103,7 +113,8 @@ the audit does not check this; the loop above does.
 - Live actions are budgeted: the top-level `budget:` block in `00_control/engagement.yaml`
   (`max_actions_per_cycle`, `max_actions_per_engagement`) caps the engagement, counted by
   `researchctl prepare` as recorded actions plus outstanding (unconsumed, unexpired)
-  preflight tokens; the next prepare refuses with the count when it would exceed either
+  preflight tokens — and consumption never restores headroom: a token consumed without
+  a matching `ACTION_RECORDED` (receipt failure) still counts as used; the next prepare refuses with the count when it would exceed either
   cap, and a malformed block fails closed. `researchctl budget status` shows limits,
   counts and remaining; raising a cap is a human decision recorded through
   `researchctl budget set` (source_reference always, human_reference once limits exist).
@@ -144,17 +155,29 @@ the audit does not check this; the loop above does.
   Learning files (`10_learning/technique-discoveries.md`, `11_runtime/last-result.md`,
   `11_runtime/current-context.md`) are projections the OS rebuilds on every mutation —
   never hand-edit them.
-- Claim points are gated: the cycle terminal `REVIEWED` requires independent review
-  packets (`researchctl worker` with `review.axis=objective` and `review.axis=method`,
-  latest verdict `pass`, each carrying a distinct `review.reviewer` and `review.run_id`)
-  — two separate runs, neither reranked; one run cannot satisfy both axes. Each packet
+- Claim points are gated: the cycle terminal `REVIEWED` requires review packets
+  (`researchctl worker` with `review.axis=objective` and `review.axis=method`,
+  latest verdict `pass`, each carrying a distinct `review.reviewer` and `review.run_id`,
+  compared case-insensitively after trimming)
+  — two separate runs, neither reranked; one run cannot satisfy both axes. While the
+  policy broker runs, each packet additionally carries a broker-attested single-use
+  voucher (`review.attestation`, bound to workspace + hypothesis + axis + reviewer +
+  run + exact packet digest; issue with `researchctl review-issue`) that
+  `merge_worker` consumes exactly once — replayed, forged, rebound or edited-packet
+  vouchers are refused. Without a broker the packets merge on declared identities
+  (the audit notes voucher-less reviews): "distinct declared runs", not attested
+  independence. A review whose `run_id` equals the packet's `producer_run_id` is
+  refused — a run cannot review its own output. Each packet
   also carries `review.evidence_quotes`: `{evidence_ref, quote}` objects whose quotes
   (≥ 20 chars) must appear in the content-addressed store copy of that evidence, never
-  the mutable living file. `researchctl claims-check` gives reviewers an evidence-grounded
+  the mutable living file (the store copy's digest is re-verified before any quote is
+  accepted). `researchctl claims-check` gives reviewers an evidence-grounded
   supports/contradicts/says_nothing verdict per claim (auto-accepted at ≥0.8 confidence,
-  below that flagged) — an aid, not the gate. `VERIFIED` is the hypothesis/finding state.
+  below that flagged; every verdict runs the verify-clause judge against the cited
+  evidence) — an aid, not the gate. `VERIFIED` is the hypothesis/finding state.
 - Researchers' other engagements don't exist here: never reuse identities, sessions,
-  credentials, artifacts, or state across programs.
+  credentials, artifacts, or state across programs. [PROCEDURAL — fresh clone per
+  engagement; no tool binds one workspace to another.]
 
 ## 4. Capabilities (provision, don't wait)
 

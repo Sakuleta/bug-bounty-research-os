@@ -43,8 +43,17 @@ confidence: "LOW|MEDIUM|HIGH"
 A claim (a cycle heading to `REVIEWED`) is independently reviewed on two axes by two
 separate worker packets — never merged, never reranked. Each packet carries the identity
 of the reviewing run (`reviewer`) and the run itself (`run_id`); the control plane
-refuses `REVIEWED` when the two axes share one `reviewer` or one `run_id` (and
-`tools/audit.py` re-checks the ledger), so independence is mechanical, not a promise.
+refuses `REVIEWED` when the two axes share one `reviewer` or one `run_id` (compared
+case-insensitively after trimming, and a review by the packet's own `producer_run_id`
+is refused outright), and `tools/audit.py` re-checks the ledger, so independence is
+mechanical, not a promise.
+While the policy broker runs, each packet additionally carries a broker-attested
+single-use voucher (`review.attestation`, bound to workspace + hypothesis + axis +
+reviewer + run + exact packet digest; issue one per axis with
+`researchctl review-issue packet.json <hypothesis>`): `merge_worker` consumes it
+exactly once, and replayed, forged, rebound or edited-packet vouchers are refused.
+Without a broker the packets merge on declared identities and the audit notes
+voucher-less reviews — "distinct declared runs", not attested independence.
 `reviewer` and `run_id` remain self-asserted packet fields: these checks are mechanical
 binding, not proof that two independent readers actually performed the review.
 Each packet also quotes the registered capture: `evidence_quotes` is a non-empty list of

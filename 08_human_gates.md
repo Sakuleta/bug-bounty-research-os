@@ -59,7 +59,7 @@ WHAT WILL RESUME AFTER IT IS PROVIDED:
 
 Do not ask the researcher to repeat technical work the agent could perform.
 
-## Never bypass a human factor
+## Never bypass a human factor [PROCEDURAL]
 
 Do not bypass, disable, guess, brute-force or socially engineer an OTP, MFA, CAPTCHA, or other human security control merely to avoid asking.
 

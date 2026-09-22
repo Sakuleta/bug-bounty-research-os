@@ -50,7 +50,7 @@ Forbidden: RUNNING -> CLOSED (must pass through RESULT_READY), BLOCKED -> CLOSED
 
 ## NEEDS_PIVOT rules
 
-Pivot only on oracle failure with a named adjacent branch (sibling endpoint, alternate encoding, downgraded protocol, second principal). Carry over the negative result as the pivot's baseline. Max two pivots per hypothesis before filing a fresh hypothesis — endless pivoting is thrash, not coverage.
+Pivot only on oracle failure with a named adjacent branch (sibling endpoint, alternate encoding, downgraded protocol, second principal). Carry over the negative result as the pivot's baseline. Max two pivots per hypothesis before filing a fresh hypothesis — endless pivoting is thrash, not coverage. [PROCEDURAL — counted by discipline, not by a tool.]
 
 ## BLOCKED exit protocol
 
