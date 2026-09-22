@@ -105,6 +105,14 @@ check('cp into a protected path denied',
   !!h.guardReason(exec('bash', { command: 'cp /tmp/events.bak 11_runtime/events.jsonl' }, osRoot)))
 check('heredoc write into a protected path denied',
   !!h.guardReason(exec('bash', { command: "python3 - <<'PY'\nopen('11_runtime/events.jsonl','a').write('x')\nPY" }, osRoot)))
+check('heredoc body to an outside-workspace redirect is allowed (body is inert text)',
+  !h.guardReason(exec('bash', { command: "cat <<'EOF' > /tmp/notes.txt\nsee 11_runtime/events.jsonl for details\nEOF" }, osRoot)))
+check('heredoc redirected inside the workspace with protected literals still denied',
+  !!h.guardReason(exec('bash', { command: "cat <<'EOF' > 11_runtime/notes.txt\nsee 11_runtime/events.jsonl for details\nEOF" }, osRoot)))
+check('herestring with protected text is allowed (single line, no body)',
+  !h.guardReason(exec('bash', { command: 'cat <<< "see 11_runtime/events.jsonl"' }, osRoot)))
+check('network text inside a heredoc body is not a command',
+  (await h.preExecute(exec('bash', { command: "cat <<'EOF'\ncurl https://evil.test/x\nEOF" }, osRoot))).kind === 'allow')
 check('rm of the ledger denied',
   !!h.guardReason(exec('bash', { command: 'rm 11_runtime/events.jsonl' }, osRoot)))
 check('unlink of a projection denied',

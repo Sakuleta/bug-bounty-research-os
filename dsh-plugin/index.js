@@ -500,6 +500,83 @@ function targetReason(root, bases, token) {
   }
   return undefined
 }
+/** Split a command into header lines and heredoc bodies.
+ *
+ *  Returns { stripped, bodies }: `stripped` keeps every line except heredoc body
+ *  lines — headers carrying the `<<MARKER` operator and closing markers stay, so
+ *  redirect targets and command words there are still judged; `bodies` holds the
+ *  removed body text for the conditional body sweep. A body line is inert text
+ *  unless it lands in the workspace (a redirect target resolving inside the root)
+ *  or feeds an interpreter's stdin — otherwise scanning it is a false positive
+ *  (a `/`-sweep hit, or a NET_CMD/brower-launch match on documentation text).
+ *  `<<<` herestrings never start a body; `<<-` allows tab-indented closers;
+ *  multiple heredocs queue in order; an unterminated heredoc swallows the rest
+ *  (shell semantics). A `<<` inside a quoted span is literal text, not an operator,
+ *  so `echo "a << b"` cannot hide later lines from detection.
+ */
+const HEREDOC_OP = /<<(?!<)(-?)\s*(?:'([^']+)'|"([^"]+)"|\\([^\s;&|()<>]+)|([^\s;&|()<>]+))/g
+/** True when the line offset sits inside a single/double-quoted span (rough shell
+ *  quoting: backslash escapes skipped). A `<<` inside quotes is literal text, not a
+ *  heredoc operator, so `echo "a << b"` cannot hide later lines from detection. */
+function inQuotes(line, index) {
+  let single = false
+  let double = false
+  for (let i = 0; i < index; i++) {
+    const c = line[i]
+    if (c === '\\') { i++; continue }
+    if (c === "'" && !double) single = !single
+    else if (c === '"' && !single) double = !double
+  }
+  return single || double
+}
+function splitHeredocs(cmd) {
+  const kept = []
+  const bodies = []
+  const pending = []
+  for (const line of String(cmd).split('\n')) {
+    if (pending.length > 0) {
+      const cur = pending[0]
+      const closer = cur.dash ? line.replace(/^\t+/, '') : line
+      if (closer === cur.marker) {
+        kept.push(line)
+        pending.shift()
+      } else {
+        bodies.push(line)
+      }
+      continue
+    }
+    kept.push(line)
+    HEREDOC_OP.lastIndex = 0
+    let m
+    while ((m = HEREDOC_OP.exec(line)) !== null) {
+      const marker = m[2] ?? m[3] ?? m[4] ?? m[5]
+      if (!marker) continue
+      if (inQuotes(line, m.index)) continue
+      pending.push({ marker, dash: m[1] === '-' })
+    }
+  }
+  return { stripped: kept.join('\n'), bodies }
+}
+
+/** True when a redirect/extraction token resolves inside the workspace root. */
+function targetInsideRoot(root, bases, tok) {
+  for (const variant of braceExpand(stripQuotes(tok))) {
+    const plain = variant.search(/[*?\[]/) >= 0
+      ? variant.slice(0, variant.search(/[*?\[]/))
+      : variant
+    for (const base of bases) {
+      const abs = isAbsolute(plain) ? plain : join(base, plain)
+      if (relsFor(root, abs).length > 0) return true
+    }
+  }
+  return false
+}
+
+// A heredoc body is a program, not data, only when it feeds an interpreter's
+// stdin (`python3 - <<'PY'`, `cat <<'EOF' | python3 -`): otherwise the body sweep
+// below stays off and inert text cannot deny.
+const INTERP_STDIN_HEREDOC = /\b(python3?|node|perl|ruby|php|sh|bash|zsh)\s+-\s*<</
+const PIPE_TO_INTERP = /\|\s*(python3?|node|perl|ruby|php|sh|bash|zsh)\b/
 /** R1/R2 — the same protection for shell write shapes, judging the WRITE TARGET.
  *
  *  `2>&1` / `>&2` are descriptor duplications, not file writes: only a real
@@ -525,12 +602,18 @@ function bashWriteReason(exec) {
     const cwd = sessionCwd(exec)
     const root = findOsRoot(cwd)
     if (!root) return undefined
+    // Heredoc bodies are inert text, not commands: strip them before any
+    // command-word, redirect or destructive-shape detection, and sweep the bodies
+    // for protected targets only when the text lands in the workspace (a redirect
+    // target resolving inside the root) or feeds an interpreter's stdin.
+    const { stripped, bodies } = splitHeredocs(args.command)
     // `$IFS`/`${IFS}` split words at the shell: normalize to whitespace before
     // tokenization so `rm${IFS}11_runtime/events.jsonl` cannot hide the target.
-    const cmd = args.command.replace(/\$\{IFS\}|\$IFS/g, ' ')
+    const cmd = stripped.replace(/\$\{IFS\}|\$IFS/g, ' ')
     const targets = []
+    const redirects = []
     const redirected = /(^|[^>&])>>?\s*(?!&)([^\s;&|()<>]+)/g
-    for (const m of cmd.matchAll(redirected)) targets.push(m[2])
+    for (const m of cmd.matchAll(redirected)) { targets.push(m[2]); redirects.push(m[2]) }
     const bases = [cwd || root]
     for (const m of cmd.matchAll(/(?:^|[;&|]\s*)cd\s+([^\s;&|()<>]+)/g)) {
       const abs = isAbsolute(m[1]) ? m[1] : join(cwd || root, m[1])
@@ -552,9 +635,11 @@ function bashWriteReason(exec) {
         targets.push(tok)
       }
     }
-    if (/python3?\s+-\s*<<|cat\s*<<|<<-?\s*['"]?\w+/.test(cmd)) {
-      // Heredoc bodies are executable scripts: scan every path-shaped token.
-      for (const t of cmd.split(/[\s"'`|&;()<>]+/)) if (t.includes('/')) targets.push(t)
+    if (bodies.length > 0 && (redirects.some((t) => targetInsideRoot(root, bases, t))
+      || INTERP_STDIN_HEREDOC.test(cmd) || PIPE_TO_INTERP.test(cmd))) {
+      // The bodies land in the workspace or run as an interpreter program:
+      // scan every path-shaped token for protected material.
+      for (const t of bodies.join('\n').split(/[\s"'`|&;()<>]+/)) if (t.includes('/')) targets.push(t)
     }
     for (const tok of targets) {
       const reason = targetReason(root, bases, tok)
@@ -576,7 +661,7 @@ function liveGateReason(exec) {
     if (!exec || exec.name !== 'bash') return undefined
     const args = exec.arguments || {}
     if (typeof args.command !== 'string') return undefined
-    const cmd = args.command
+    const cmd = splitHeredocs(args.command).stripped
     if (!hasNetCommand(cmd)) return undefined
     const root = findOsRoot(sessionCwd(exec))
     if (!root) return undefined
@@ -634,7 +719,7 @@ function browserGateReason(exec) {
     if (!exec || exec.name !== 'bash') return undefined
     const args = exec.arguments || {}
     if (typeof args.command !== 'string') return undefined
-    const cmd = args.command
+    const cmd = splitHeredocs(args.command).stripped
     if (!BROWSER_LAUNCH.test(cmd)) {
       // W7: user-facing browser launches deny out-of-scope destinations only.
       if (!browserAppLaunch(cmd)) return undefined
