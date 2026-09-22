@@ -306,6 +306,26 @@ check('npx playwright test with a remote URL still hits the browser gate',
 check('explicit localhost browser work allowed',
   (await h.preExecute(exec('bash', { command: 'npx playwright codegen http://127.0.0.1:3000' }, osRoot))).kind === 'allow')
 
+// ---- W7: browser/app launch recognition (basename family, open -a, open URL) ----
+mkdirSync(join(osRoot, '00_control'), { recursive: true })
+writeFileSync(join(osRoot, '00_control', 'engagement.yaml'), 'scope:\n  assets:\n    - t.example\n')
+check('chromium launch at an out-of-scope host denied',
+  (await h.preExecute(exec('bash', { command: 'chromium --no-sandbox https://evil.example/' }, osRoot))).kind === 'deny')
+check('open -a Google Chrome at an out-of-scope host denied',
+  (await h.preExecute(exec('bash', { command: 'open -a "Google Chrome" https://evil.example/' }, osRoot))).kind === 'deny')
+check('open of an out-of-scope URL denied',
+  (await h.preExecute(exec('bash', { command: 'open https://evil.example/' }, osRoot))).kind === 'deny')
+check('firefox launch at an out-of-scope host denied',
+  (await h.preExecute(exec('bash', { command: '/usr/bin/firefox https://evil.example/' }, osRoot))).kind === 'deny')
+check('chromium launch at an in-scope host allowed',
+  (await h.preExecute(exec('bash', { command: 'chromium https://t.example/app' }, osRoot))).kind === 'allow')
+check('open -a Safari at an in-scope host allowed',
+  (await h.preExecute(exec('bash', { command: 'open -a Safari https://t.example/app' }, osRoot))).kind === 'allow')
+check('open of a localhost URL allowed',
+  (await h.preExecute(exec('bash', { command: 'open http://127.0.0.1:3000/' }, osRoot))).kind === 'allow')
+check('plain open of a file allowed',
+  (await h.preExecute(exec('bash', { command: 'open notes.md' }, osRoot))).kind === 'allow')
+
 // ---- R6 compound commands: install shape is judged per SEGMENT, not per string ------
 check('install && remote playwright test denied (compound bypass closed)',
   (await h.preExecute(exec('bash', { command: 'npx playwright install chromium && npx playwright test https://target.example' }, osRoot))).kind === 'deny')

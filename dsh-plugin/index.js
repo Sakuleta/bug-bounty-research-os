@@ -600,14 +600,52 @@ function liveGateReason(exec) {
   }
 }
 
-/** R6 — raw browser-automation launches are not the live path; the browser executor is. */
+/** Browser-family binary basenames: user-facing browsers (automation harnesses are
+ *  covered by BROWSER_LAUNCH above). First-word position, case-insensitive. */
+const BROWSER_FAMILY = /^(google-chrome.*|chromium.*|chrome|firefox.*|safari)$/i
+/** `-a <app>` names that count as a browser for `open -a` (case-insensitive). */
+const OPEN_BROWSER_APP = /chrome|chromium|firefox|safari|brave|edge|opera|vivaldi|arc/i
+/** True when a quote-stripped command segment launches a user-facing browser:
+ *  a family binary as the command word, `open -a <browser app>`, or a bare
+ *  `open <http(s)://…>` (default-browser open). */
+function browserAppLaunch(cmd) {
+  const segments = String(cmd).replace(/["']/g, '').split(/&&|\|\||[;|&()\n]/)
+  for (const seg of segments) {
+    const words = seg.trim().split(/\s+/).filter(Boolean)
+    if (words.length === 0) continue
+    if (BROWSER_FAMILY.test(words[0].split(/[/\\]/).pop())) return true
+    if (/^open$/i.test(words[0].split(/[/\\]/).pop())) {
+      const rest = seg.trim().slice(words[0].length)
+      if (/(^|\s)-a\s+\S/i.test(rest)) {
+        const app = rest.replace(/^.*?-a\s+/i, '').split(/https?:\/\/|\s--[a-z]|\s-[a-z]/i)[0]
+        if (OPEN_BROWSER_APP.test(app)) return true
+      } else if (/https?:\/\//i.test(rest)) return true
+    }
+  }
+  return false
+}
+/** R6 — raw browser-automation launches are not the live path; the browser executor is.
+ *
+ *  W7 additionally recognizes user-facing browser launches (family binary, `open -a`
+ *  browser app, `open <url>`): those deny only out-of-scope destinations — in-scope
+ *  and loopback targets stay allowed — while automation harnesses keep the R6 rule. */
 function browserGateReason(exec) {
   try {
     if (!exec || exec.name !== 'bash') return undefined
     const args = exec.arguments || {}
     if (typeof args.command !== 'string') return undefined
     const cmd = args.command
-    if (!BROWSER_LAUNCH.test(cmd)) return undefined
+    if (!BROWSER_LAUNCH.test(cmd)) {
+      // W7: user-facing browser launches deny out-of-scope destinations only.
+      if (!browserAppLaunch(cmd)) return undefined
+      const root = findOsRoot(sessionCwd(exec))
+      if (!root) return undefined
+      const urls = cmd.match(/https?:\/\/[^\s'"]+/g) || []
+      if (urls.length === 0) return undefined
+      const bad = urls.find((u) => !urlLoopbackExempt(u) && scopeReasonFor(root, u) !== undefined)
+      if (bad === undefined) return undefined
+      return 'research-os-enforcer: this browser launch targets an out-of-scope destination — prepare a browser preflight (python3 tools/researchctl.py . prepare payload.json with "tool_family": "browser" and request_shape {"url": …, "principal": …}) and call the research_os_browser tool; in-scope and localhost targets stay allowed.'
+    }
     // Judge install shape per COMMAND SEGMENT: one install-shaped segment must not stand
     // the gate down for a later browser segment (`npx playwright install chromium &&
     // npx playwright test <remote>`). The gate stands down only when every segment that
