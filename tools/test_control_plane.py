@@ -3616,57 +3616,12 @@ _sub4r = subprocess.run(
 check("v8.2 fix M4: researchctl names the undecodable binding malformed",
       _sub4r.returncode != 0 and "malformed" in (_sub4r.stdout + _sub4r.stderr))
 
-# Backlog B14: identity-binding provenance — a declared (non-placeholder)
-# binding needs a ledger IDENTITY_BOUND record; hand edits behind the ledger
-# fail the audit until re-recorded through `researchctl identity-set`.
-_nid, _ncd = _w2_root()
-_subid = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nid)],
-                        capture_output=True, text=True)
-check("backlog B14: a declared binding without provenance fails the audit",
-      _subid.returncode != 0 and "identity-set" in (_subid.stdout + _subid.stderr))
-try:
-    _ncd.set_identity("")
-    check("backlog B14: identity-set requires a source reference", False)
-except ValueError as exc:
-    check("backlog B14: identity-set requires a source reference", "source_reference" in str(exc))
-_ncd.set_identity("policy://identity")
-_subid2 = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nid)],
-                         capture_output=True, text=True)
-check("backlog B14: a recorded binding audits clean", _subid2.returncode == 0)
-(_nid / "00_control/identity-binding.yaml").write_text(
-    "expected_identity:\n  public_handle: researcher-x\n  account_reference: rewritten-acct\n"
-    "session:\n  browser_profile: lab/bua-prog\n  session_must_match_identity: true\n"
-    "  cross_engagement_session_reuse: false\n")
-_subid3 = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nid)],
-                         capture_output=True, text=True)
-check("backlog B14: a hand-rewritten binding fails the audit until re-recorded",
-      _subid3.returncode != 0 and "identity-set" in (_subid3.stdout + _subid3.stderr))
-try:
-    _ncd.set_identity("policy://identity-again")
-    check("backlog B14: re-recording identity requires a human reference", False)
-except ValueError as exc:
-    check("backlog B14: re-recording identity requires a human reference",
-          "human_reference" in str(exc))
-_ncd.set_identity("policy://identity-again", human_reference="ticket-id-1")
-_subid4 = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nid)],
-                         capture_output=True, text=True)
-check("backlog B14: a re-recorded binding audits clean", _subid4.returncode == 0)
-_nidp, _ncdp = _w2_root(
-    "binding_version: 1\nexpected_identity:\n  account_reference: <NON_SECRET_ACCOUNT_REFERENCE>\n"
-    "session:\n  browser_profile: <DEDICATED_BROWSER_PROFILE>\n")
-try:
-    _ncdp.set_identity("policy://identity")
-    check("backlog B14: placeholder bindings carry no provenance", False)
-except ValueError as exc:
-    check("backlog B14: placeholder bindings carry no provenance", "real" in str(exc).lower())
-
 # Backlog B15: cross_engagement_session_reuse is enforced — the executor records
 # the used profile on browser receipts and the audit matches it against the bound
 # profile. Default false (engagement-local sessions) errors on drift; an explicit
 # true (deliberate sharing) warns instead. Strictest reading, documented in
 # AGENTS.md §§3/5.
 _nrx, _ncx = _w2_root()
-_ncx.set_identity("policy://identity")
 _ncx.record_action({**_w7_action(), "account": "acct-binding-1",
                     "browser_profile": "lab/bua-prog"})
 _subx = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nrx)],
@@ -3684,7 +3639,6 @@ _nrxt, _ncxt = _w2_root(
     "expected_identity:\n  public_handle: researcher-x\n  account_reference: acct-binding-1\n"
     "session:\n  browser_profile: lab/bua-prog\n  session_must_match_identity: true\n"
     "  cross_engagement_session_reuse: true\n")
-_ncxt.set_identity("policy://identity")
 _ncxt.record_action({**_w7_action(), "account": "acct-binding-1",
                      "browser_profile": "lab/shared-profile"})
 _subxt = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nrxt)],
@@ -3705,7 +3659,6 @@ try:
     check("backlog B1: prepare allows a mismatched account when matching is off", True)
 except ValueError:
     check("backlog B1: prepare allows a mismatched account when matching is off", False)
-_ncmm.set_identity("policy://identity")
 _ncmm.record_action({**_w7_action(), "account": "other-acct"})
 _submm = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nrmm)],
                         capture_output=True, text=True)

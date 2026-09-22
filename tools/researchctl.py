@@ -231,13 +231,6 @@ def main() -> int:
     ib = sub.add_parser("identity-binding", help="print the parsed engagement identity binding "
                                                  "(account reference, browser profile, session flags)")
     ib.set_defaults(fn="identity-binding")
-    ids = sub.add_parser("identity-set", help='record the engagement identity binding provenance '
-                                              '(IDENTITY_BOUND): {"source_reference": "...", '
-                                              '"human_reference": "ticket-id (required to re-record)"}; '
-                                              "the binding file stays human-owned, the ledger records "
-                                              "its digest so hand rewrites fail the audit until re-recorded")
-    ids.add_argument("json")
-    ids.set_defaults(fn="identity-set")
     ri = sub.add_parser("review-issue", help="issue a broker-attested review voucher for a "
                                              "review packet and embed it as review.attestation "
                                              "(one voucher per axis; the broker must be running)")
@@ -339,10 +332,6 @@ def main() -> int:
                     "00_control/identity-binding.yaml is present but malformed — repair the "
                     "expected_identity/session contract (fail closed)")
             out = {"binding_present": binding is not None, **(binding or {})}
-        elif ns.fn == "identity-set":
-            data = load_json(ns.json)
-            out = cp.set_identity(data.get("source_reference", ""),
-                                  human_reference=data.get("human_reference", ""))
         elif ns.fn == "review-issue":
             from control_plane import review_packet_digest as _packet_digest
             packet = load_json(ns.json)

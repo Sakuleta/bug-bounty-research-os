@@ -74,7 +74,6 @@ EVENT_TYPES = {
     "HUMAN_GATE_REQUESTED", "HUMAN_GATE_RESOLVED", "AUDIT_RECORDED", "FRESHNESS_RECORDED",
     "KNOWLEDGE_PROPOSED", "KNOWLEDGE_RESOLVED",
     "STATE_CHANGE", "NOTE", "SCOPE_CHANGED", "BUDGET_CHANGED",
-    "IDENTITY_BOUND",
 }
 HUMAN_GATE_DECISIONS = {"RESUME", "PROVIDED", "APPROVED", "DENIED", "CANCELLED"}
 REQUIRED_AUDIT_CLASSES = {"scope", "coverage", "negative", "open-hypothesis", "novelty-duplicate", "hygiene-cleanup", "method-self-attack"}
@@ -2277,66 +2276,6 @@ class ControlPlane:
     @staticmethod
     def _leading_ws(line: str) -> str:
         return _leading_ws(line)
-
-    def set_identity(self, source_reference: str, human_reference: str = "",
-                     actor: str = "controller") -> dict[str, Any]:
-        """Record the engagement identity binding's provenance (IDENTITY_BOUND).
-
-        The binding file itself is human-owned and is never rewritten here: this
-        records the current file's sha256 plus the parsed account/profile/flags,
-        so a later hand rewrite of `account_reference` (or any other byte) behind
-        the ledger's back fails the audit until re-recorded — the same drift
-        contract as scope/budget. A malformed binding or a placeholder-only one
-        is refused (placeholders carry no provenance). `human_reference` is
-        required to re-record once a prior IDENTITY_BOUND exists; the first
-        record on a pristine template needs only `source_reference`.
-        """
-        reference = str(source_reference or "").strip()
-        if not reference:
-            raise ValueError("identity-set requires a non-empty source_reference (policy URL/section; never a secret)")
-        human = str(human_reference or "").strip()
-        binding = identity_binding(self.root)
-        if isinstance(binding, str):
-            raise ValueError(
-                "00_control/identity-binding.yaml is present but malformed — repair the "
-                "expected_identity/session contract before recording its provenance (fail closed)"
-            )
-        if binding is None or not binding["account_reference"]:
-            raise ValueError(
-                "no declared research identity to record (00_control/identity-binding.yaml "
-                "missing or placeholder-only) — declare a real account_reference first; "
-                "placeholders carry no provenance"
-            )
-        path = self.root / IDENTITY_BINDING_REL
-        try:
-            digest = sha256_file(path)
-        except OSError as exc:
-            raise ValueError(
-                f"the identity binding cannot be read for provenance ({exc}) — repair "
-                "00_control/identity-binding.yaml before recording"
-            ) from exc
-        with _lock(self.root):
-            prior = any(e.get("type") == "IDENTITY_BOUND" for e in self._read_events())
-            if not human and prior:
-                raise ValueError(
-                    "identity-set requires human_reference (a ticket/message id from the human who authorized "
-                    "the change) — this re-records an existing engagement identity; only the first "
-                    "record on a pristine template may omit it"
-                )
-            event = self._append_locked(
-                "IDENTITY_BOUND", "identity", "engagement", actor=actor,
-                reason="engagement identity binding recorded",
-                payload={"account_reference": binding["account_reference"],
-                         "browser_profile": binding["browser_profile"],
-                         "session_must_match_identity": binding["session_must_match_identity"],
-                         "cross_engagement_session_reuse": binding["cross_engagement_session_reuse"],
-                         "binding_digest": digest,
-                         "source_reference": reference,
-                         "human_reference": human},
-            )
-        self.refresh()
-        return event
-
 
     @staticmethod
     def _scope_block_end(lines: list[str], start: int) -> int:
