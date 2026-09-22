@@ -1257,6 +1257,15 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
                     f"closure gate {gid} is not an APPROVED closure review "
                     f"(status={gate.get('status') or 'unknown'}, decision={gate.get('decision') or 'unknown'})"
                 )
+            elif "closure" not in str(gate.get("what_is_needed") or "").casefold():
+                # The binding is purpose-checked, not just id-checked: an unrelated
+                # APPROVED gate (budget, scope, tooling) cannot attest the closure
+                # review even with a matching reference.
+                errors.append(
+                    f"closure gate {gid} does not attest a closure review "
+                    "(its what_is_needed names no closure review) — request a human "
+                    "gate for the closure review itself and cite that gate"
+                )
             elif not reference or str(gate.get("reference") or "").strip() != reference:
                 errors.append(
                     f"closure gate {gid} reference does not match the proof "

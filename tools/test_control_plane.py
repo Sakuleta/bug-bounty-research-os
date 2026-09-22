@@ -199,7 +199,7 @@ def recording_workspace(cid: str = "C-0001") -> tuple[Path, ControlPlane, str]:
 
 
 def close_workspace(with_action: bool = False, token_nonce: str | None = None,
-                    with_closure_gate: bool = False) -> tuple[Path, ControlPlane, str]:
+                    with_closure_gate: bool = False, gate_need: str | None = None) -> tuple[Path, ControlPlane, str]:
     """Minimal CLOSED workspace: one false-positive cycle, auditable evidence, no gates."""
     r = fresh_root()
     c = ControlPlane(r)
@@ -211,7 +211,7 @@ def close_workspace(with_action: bool = False, token_nonce: str | None = None,
         # The closure-review attestation on the real path: requested while RUNNING,
         # resolved APPROVED with a human reference, then the cycle resumes.
         c.request_gate("G-0001", {"cycle_id": "C-0010",
-                                 "what_is_needed": "Closure review: confirm the false-positive disposition and the audit set before closure",
+                                 "what_is_needed": gate_need or "Closure review: confirm the false-positive disposition and the audit set before closure",
                                  "why_human_only": "Only the researcher can attest that closure was reviewed",
                                  "resume_after": "Gate resolution"})
         c.resolve_gate("G-0001", decision="APPROVED", reference="ticket-closure-1")
@@ -2158,6 +2158,17 @@ fill_proof(pr_root)
 check("filled proof has no TODO markers left", "TODO(human)" not in proof_path.read_text())
 sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pr_root), "--closure"], capture_output=True, text=True)
 check("a fully filled proof passes closure", sub.returncode == 0 and "closure=READY" in sub.stdout)
+# Backlog B7: the cited closure gate must attest a closure review — an unrelated
+# APPROVED gate (right id + right reference, wrong purpose) does not bind.
+_ur7, _uc7, _ue7 = close_workspace(
+    with_closure_gate=True,
+    gate_need="Approve a budget raise for unrelated tooling spend")
+record_all_audits(_uc7, _ue7)
+fill_proof(_ur7)
+_sub7 = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_ur7), "--closure"],
+                       capture_output=True, text=True)
+check("an unrelated APPROVED gate does not bind closure",
+      _sub7.returncode != 0 and "closure gate" in _sub7.stdout)
 sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pr_root), "--emit-proof"], capture_output=True, text=True)
 check("emit-proof refuses to overwrite a filled proof",
       sub.returncode != 0 and "force" in sub.stdout)
