@@ -8,7 +8,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { apply, canonicalDigest, mentionsProtected, redactHeaderLine, redactSecrets, redactUrlSecrets, scopeReasonFor, selectToken, shapeFromArgs } from './index.js'
+import { apply, canonicalDigest, dispatchHostReason, mentionsProtected, redactHeaderLine, redactSecrets, redactUrlSecrets, scopeReasonFor, selectToken, shapeFromArgs } from './index.js'
 
 let passed = 0
 const failures = []
@@ -445,6 +445,16 @@ check('out-of-scope host denied with actionable reason',
   (scopeReasonFor(osRoot, 'https://evil.example/a') || '').includes('outside the engagement scope'))
 check('schemeless url denied', !!scopeReasonFor(osRoot, 't.example/a'))
 check('uppercase host matches lowercase assets', scopeReasonFor(osRoot, 'https://T.Example/a') === undefined)
+check('backslash authority denied (fetch would route to the pre-backslash host)',
+  !!scopeReasonFor(osRoot, 'http://127.0.0.1:9\\@t.example/'))
+check('encoded-backslash authority denied (case-insensitive)',
+  !!scopeReasonFor(osRoot, 'http://t.example%5cevil/') && !!scopeReasonFor(osRoot, 'http://t.example%5Cevil/'))
+check('userinfo ending at the last @ still allowed', scopeReasonFor(osRoot, 'https://user@t.example/a') === undefined)
+check('dispatch guard allows a canonical URL', dispatchHostReason('https://t.example/a') === undefined)
+check('dispatch guard refuses a backslash authority without sending',
+  !!dispatchHostReason('http://127.0.0.1:9\\@t.example/'))
+check('dispatch guard refuses an encoded-backslash authority',
+  !!dispatchHostReason('http://t.example%5Cevil/'))
 writeFileSync(engagement, 'scope:\n  assets:\n    - t.example\n    - 127.0.0.1:9443\n')
 check('block-list assets parsed', scopeReasonFor(osRoot, 'https://127.0.0.1:9443/lab') === undefined)
 check('host with port requires port in assets', !!scopeReasonFor(osRoot, 'https://127.0.0.1:9444/lab'))

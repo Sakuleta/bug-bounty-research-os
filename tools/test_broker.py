@@ -430,6 +430,12 @@ check("scope.check refuses an unenforceable policy",
 sc = call("scope.check", workspace=str(tmpdir("ro-broker-scope-")), url="https://example.test/x")
 check("scope.check refuses when no policy is stored",
       sc["ok"] is False and "scope-set" in sc["error"])
+sc = call("scope.check", workspace=ws, url="http://127.0.0.1:9\\@example.test/")
+check("scope.check denies a backslash authority the fetch stack would route elsewhere",
+      sc["ok"] is True and sc["in_scope"] is False)
+sc = call("scope.check", workspace=ws, url="http://example.test%5Cevil/")
+check("scope.check denies an encoded-backslash authority",
+      sc["ok"] is True and sc["in_scope"] is False)
 
 # --- token.consume: single use, tamper, expiry -------------------------------
 

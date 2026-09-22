@@ -220,15 +220,55 @@ def _normalize_host(host: str) -> str:
     return value.lower()
 
 
+# A backslash terminates the authority in the WHATWG URL parser (the real fetch
+# stack), so `http://127.0.0.1\@example.test/` connects to 127.0.0.1 while a naive
+# `/`-split reads `example.test`. Whitespace/control characters and an encoded
+# backslash (%5c, either case) are equally ambiguous to one parser or another:
+# any authority carrying them fails closed ("").
+_AUTHORITY_AMBIGUOUS = re.compile(r"[\\\s\x00-\x1f\x7f]|%5c", re.IGNORECASE)
+
+
+def _authority_host(authority: str) -> str:
+    """Reduce a raw authority (no `/`, `?`, `#`) to host[:port], failing closed.
+
+    Returns "" when the authority is empty or ambiguous, so it can never match a
+    scope pattern; callers treat "" as default-deny.
+    """
+    raw = str(authority or "")
+    if not raw or _AUTHORITY_AMBIGUOUS.search(raw):
+        return ""
+    return _normalize_host(raw)
+
+
+def _url_host(url: str) -> str:
+    """Host[:port] of an absolute URL, failing closed on ambiguity.
+
+    The authority runs to the first of `/`, `?`, `#` (a backslash inside it denies
+    rather than terminates, so the derived host can never disagree with the fetch
+    stack); userinfo ends at the last `@` before that terminator. A scheme-less
+    string is host-less and therefore default-deny, mirroring the previous seam.
+    """
+    text = str(url or "")
+    if "://" not in text:
+        return ""
+    rest = text.split("://", 1)[1]
+    end = len(rest)
+    for term in ("/", "?", "#"):
+        idx = rest.find(term)
+        if idx >= 0:
+            end = min(end, idx)
+    return _authority_host(rest[:end])
+
+
 def _asset_hosts(assets: list[str]) -> list[str]:
     hosts: list[str] = []
     for asset in assets:
         value = asset.strip()
         if "://" in value:
             value = value.split("://", 1)[1]
-        host = value.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0].strip()
+        host = _authority_host(value.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0].strip())
         if host:
-            hosts.append(_normalize_host(host))
+            hosts.append(host)
     return hosts
 
 
@@ -334,11 +374,7 @@ def scope_check(root: Path, url: str) -> dict[str, Any]:
     subdomain.
     """
     assets = engagement_assets(root)
-    host = ""
-    if "://" in url:
-        host = _normalize_host(
-            url.split("://", 1)[1].split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
-        )
+    host = _url_host(url)
     if scope_gate_disabled(root):
         return {"gate": "disabled", "in_scope": True, "host": host, "assets": assets}
     if assets is None:

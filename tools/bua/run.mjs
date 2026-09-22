@@ -132,13 +132,25 @@ export function schemeAllowed(url) {
  *  `t.example:443` with `t.example` (the seam judges them different authorities) and
  *  never splits `t.example.` from `t.example` (the seam treats them as one).
  *  `new URL().host` would do both wrong: it collapses default ports and keeps the
- *  trailing dot. */
+ *  trailing dot.
+ *
+ *  An ambiguous authority (backslash, whitespace/control characters, encoded
+ *  backslash — the WHATWG fetch stack would terminate or reinterpret it) has NO
+ *  cache key: it must never merge with a cached allow verdict for the clean host,
+ *  and `decideRequest` denies it without consulting the seam. */
+const AUTHORITY_AMBIGUOUS = /[\\\s\x00-\x1f\x7f]|%5c/i
+export function authorityAmbiguous(url) {
+  const raw = String(url == null ? '' : url)
+  const authority = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]*)/.exec(raw)
+  return !!authority && (!authority[1] || AUTHORITY_AMBIGUOUS.test(authority[1]))
+}
 export function hostKey(url) {
   const raw = String(url == null ? '' : url)
   const authority = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]*)/.exec(raw)
   if (!authority) {
     try { return new URL(raw).host || undefined } catch { return undefined }
   }
+  if (!authority[1] || AUTHORITY_AMBIGUOUS.test(authority[1])) return undefined
   let host = authority[1].split('@').pop()
   if (host.endsWith('.')) host = host.slice(0, -1)
   return host.toLowerCase() || undefined
@@ -178,7 +190,9 @@ export function makeScopeCache(scopeCheckFn, cap = DISTINCT_HOST_CHECK_CAP) {
 /** Decide one intercepted request: an exempt scheme, or the cached authoritative verdict.
  *  Anything that is not http(s)/ws(s) with a verified in-scope verdict is blocked (fail
  *  closed). WebSockets are checked like their http(s) equivalent — ws: is the ws twin of
- *  http:, wss: of https: — never treated as traffic-free. */
+ *  http:, wss: of https: — never treated as traffic-free. An ambiguous authority is
+ *  denied without consulting the seam: the fetch stack would connect somewhere the
+ *  verdict does not describe. */
 export async function decideRequest(url, cache) {
   const host = hostKey(url)
   if (schemeAllowed(url)) return { allow: true, reason: 'scheme_exempt', host }
@@ -187,6 +201,7 @@ export async function decideRequest(url, cache) {
   if (!['http:', 'https:', 'ws:', 'wss:'].includes(parsed.protocol)) {
     return { allow: false, reason: 'scheme_blocked', host }
   }
+  if (authorityAmbiguous(url)) return { allow: false, reason: 'ambiguous_authority', host }
   const verdict = await cache.check(url)
   if (verdict.in_scope === true) return { allow: true, reason: 'in_scope', host }
   if (verdict.reason) return { allow: false, reason: verdict.reason, host }

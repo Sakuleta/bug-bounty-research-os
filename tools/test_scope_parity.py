@@ -63,8 +63,13 @@ PROBES: list[str] = [
     "https://wild.example/",
     "https://evil.example/x",
     "https://user:pass@t.example/a",
+    "https://user@t.example/a",
     "https://t.example./a",
     "HTTPS://T.EXAMPLE/a",
+    "http://127.0.0.1:9\\@t.example/",
+    "http://t.example%5cevil/",
+    "http://t.example%5Cevil/",
+    "http://t.example\\evil/",
     "t.example/a",
 ]
 

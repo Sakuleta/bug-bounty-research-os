@@ -547,13 +547,21 @@ function scopeGateState(root) {
   return { kind: 'list', assets }
 }
 
-/** Host normalization shared with tools/control_plane.py: strip userinfo, one trailing dot. */
+/** Host normalization shared with tools/control_plane.py: strip userinfo, one trailing dot.
+ *
+ *  A backslash terminates the authority in the WHATWG URL parser (the real fetch
+ *  stack), so `http://127.0.0.1\@example.test/` connects to 127.0.0.1 while a naive
+ *  `/`-split reads `example.test`. Whitespace/control characters and an encoded
+ *  backslash (%5c, either case) are equally ambiguous to one parser or another: any
+ *  authority carrying them normalizes to "" (fail closed, never matches scope). */
+const AUTHORITY_AMBIGUOUS = /[\\\s\x00-\x1f\x7f]|%5c/i
 function normalizeHost(host) {
-  let h = String(host || '')
+  const h = String(host || '')
+  if (!h || AUTHORITY_AMBIGUOUS.test(h)) return ''
   const at = h.lastIndexOf('@')
-  if (at >= 0) h = h.slice(at + 1)
-  if (h.endsWith('.')) h = h.slice(0, -1)
-  return h.toLowerCase()
+  let out = at >= 0 ? h.slice(at + 1) : h
+  if (out.endsWith('.')) out = out.slice(0, -1)
+  return out.toLowerCase()
 }
 
 /** Asset URL/host strings reduced to their host[:port], lowercase. */
@@ -580,11 +588,56 @@ function hostInScope(host, patterns) {
   return false
 }
 
-/** Host[:port] of an absolute URL, mirroring the prepare-side extraction. */
+/** Hostname part (no port) of a normalized host[:port], for the WHATWG cross-check. */
+function manualHostname(host) {
+  const h = String(host || '')
+  if (h.startsWith('[')) {
+    const close = h.indexOf(']')
+    return (close >= 0 ? h.slice(0, close + 1) : h).toLowerCase()
+  }
+  return h.split(':')[0].toLowerCase()
+}
+
+/** Host[:port] of an absolute URL, mirroring the prepare-side extraction.
+ *
+ *  The authority runs to the first of `/`, `?`, `#` (a backslash inside it denies
+ *  rather than terminates); userinfo ends at the last `@` before that terminator.
+ *  After the manual parse, the WHATWG hostname is cross-checked (one trailing dot
+ *  stripped, hostname-only so default-port collapsing cannot false-positive): any
+ *  disagreement — or any ambiguity — yields "" (fail closed, never matches scope). */
 function hostFromUrl(url) {
   const s = String(url || '')
   if (!s.includes('://')) return ''
-  return normalizeHost(s.slice(s.indexOf('://') + 3).split('/')[0].split('?')[0].split('#')[0])
+  const rest = s.slice(s.indexOf('://') + 3)
+  let end = rest.length
+  for (const term of ['/', '?', '#']) {
+    const i = rest.indexOf(term)
+    if (i >= 0) end = Math.min(end, i)
+  }
+  const manual = normalizeHost(rest.slice(0, end))
+  if (!manual) return ''
+  try {
+    const parsed = new URL(s)
+    let whost = String(parsed.hostname || '').toLowerCase()
+    if (whost.endsWith('.')) whost = whost.slice(0, -1)
+    if (!whost || manualHostname(manual) !== whost) return ''
+  } catch {
+    return ''
+  }
+  return manual
+}
+
+/** Dispatch-time guard: re-derive the host the fetch stack will connect to and
+ *  require it to be unambiguous and WHATWG-agreed. Returns undefined when the URL
+ *  may be sent, else the refusal text — callers deny WITHOUT sending. Unreachable
+ *  in normal flow (prepare and the scope re-check refuse first); defense in depth
+ *  against a scope-approved host that is not the connected host. */
+function dispatchHostReason(url) {
+  if (hostFromUrl(url)) return undefined
+  return 'research-os-enforcer: the request URL authority is ambiguous or unparseable ' +
+    '(backslash, whitespace/control characters, or an encoded backslash diverge the ' +
+    'fetch stack from the scope check) — refusing without sending; prepare a preflight ' +
+    'for the canonical URL instead.'
 }
 
 /** R4/R5 — the cycle must still be RUNNING at dispatch, not just at prepare time.
@@ -1200,6 +1253,11 @@ async function runControlledRequest({ root, args, fetchImpl }) {
     log('DENY(executor) lifecycle ' + shape.method + ' ' + safeUrl + ' :: ' + lifecycleDenied)
     return { ok: false, text: lifecycleDenied }
   }
+  const dispatchDenied = dispatchHostReason(shape.url)
+  if (dispatchDenied) {
+    log('DENY(executor) dispatch-host ' + shape.method + ' ' + safeUrl + ' :: ' + dispatchDenied)
+    return { ok: false, text: dispatchDenied }
+  }
   let status = null
   let respHeaders = []
   let bodyText = ''
@@ -1316,6 +1374,11 @@ async function runControlledBrowser({ root, args }) {
   if (lifecycleDenied) {
     log('DENY(executor) lifecycle browser ' + safeUrl + ' :: ' + lifecycleDenied)
     return { ok: false, text: lifecycleDenied }
+  }
+  const dispatchDenied = dispatchHostReason(shape.url)
+  if (dispatchDenied) {
+    log('DENY(executor) dispatch-host browser ' + safeUrl + ' :: ' + dispatchDenied)
+    return { ok: false, text: dispatchDenied }
   }
   const runner = join(root, 'tools', 'bua', 'run.mjs')
   const rel = join('08_artifacts', 'raw', `${token.action_id}-${new Date().toISOString().replace(/[:.]/g, '-')}.browser.log`)
@@ -1470,3 +1533,4 @@ export { name, inject, apply }
 // Test surface (pure helpers + executor core): conformance and integration suites.
 export { canonicalDigest, shapeFromArgs, browserShapeFromArgs, loadTokenStates, selectToken, runControlledRequest, runControlledBrowser, scopeReasonFor, redactSecrets, redactHeaderLine, redactUrlSecrets, redactShapeForText, mentionsProtected }
 export { brokerPath, brokerWorkspace, brokerCall, brokerConsumeToken, consumeBrokerToken, brokerPolicyGet, brokerScopeReason }
+export { dispatchHostReason }

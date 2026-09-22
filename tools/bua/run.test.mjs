@@ -197,6 +197,18 @@ check('a bracketed IPv6 authority keeps its brackets and port',
   hostKey('http://[::1]:8080/x') === '[::1]:8080')
 check('unparseable input has no cache key',
   hostKey('not a url') === undefined && hostKey(null) === undefined)
+check('a backslash authority has no cache key (never merges with the clean host)',
+  hostKey('http://127.0.0.1:9\\@t.example/') === undefined)
+check('an encoded-backslash authority has no cache key',
+  hostKey('http://t.example%5cevil/') === undefined)
+check('an ambiguous authority never merges with a cached allow verdict',
+  hostKey('http://127.0.0.1:9\\@t.example/') !== hostKey('https://t.example/'))
+const allowAll = makeScopeCache(async () => ({ in_scope: true, gate: 'assets' }))
+check('decideRequest denies an ambiguous authority even when the seam allows',
+  (await decideRequest('http://127.0.0.1:9\\@t.example/', allowAll)).allow === false
+  && (await decideRequest('http://127.0.0.1:9\\@t.example/', allowAll)).reason === 'ambiguous_authority')
+check('decideRequest denies an encoded-backslash authority even when the seam allows',
+  (await decideRequest('http://t.example%5Cevil/', allowAll)).allow === false)
 
 // Cross-language parity: the same authority strings through the actual Python seam.
 const PY_NORMALIZE = "import sys; sys.path.insert(0, 'tools'); from control_plane import _normalize_host; " +

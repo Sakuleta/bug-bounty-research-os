@@ -820,6 +820,24 @@ check("scope_check strips one trailing dot before host comparison",
 sc = scope_check(nogate, "HTTPS://T.EXAMPLE/a")
 check("scope_check lowercases scheme and host", sc["in_scope"] is True)
 
+# 4d-quater. URL authority canonicalization (WHATWG parity, fail closed): a backslash
+#            terminates the authority for the real fetch stack, so any authority carrying
+#            a backslash, whitespace/control characters or an encoded backslash denies.
+sc = scope_check(nogate, "http://127.0.0.1:9\\@t.example/")
+check("scope_check denies a backslash authority the fetch stack would route elsewhere",
+      sc["in_scope"] is False)
+sc = scope_check(nogate, "http://t.example%5cevil/")
+check("scope_check denies a lowercase-encoded backslash authority",
+      sc["in_scope"] is False)
+sc = scope_check(nogate, "http://t.example%5Cevil/")
+check("scope_check denies an uppercase-encoded backslash authority",
+      sc["in_scope"] is False)
+sc = scope_check(nogate, "http://t.example\\evil/")
+check("scope_check denies a raw backslash in the authority", sc["in_scope"] is False)
+sc = scope_check(nogate, "https://user@t.example/a")
+check("scope_check still strips userinfo ending at the last @",
+      sc["in_scope"] is True and sc["host"] == "t.example")
+
 # 4e. Prepare honors the gate modes end to end: disabled allows, assets enforce.
 scope_root = fresh_root(); cp_scope = ControlPlane(scope_root)
 cp_scope.create_cycle("C-0001", cycle_fixture("C-0001", root=scope_root))
