@@ -884,12 +884,24 @@ function consumeToken(root, token) {
 const BROKER_SOCKET_REL = ['.dsh', 'research-os-broker', 'broker.sock']
 const BROKER_MAX_LINE = 1024 * 1024
 
-/** Broker socket path when one is configured AND present, else undefined. */
+/** Broker socket path when one is configured AND present, else undefined.
+ *
+ *  Parity with tools/broker/client.py broker_path() + available(): the socket env
+ *  wins, else the socket under RESEARCH_OS_BROKER_HOME (default
+ *  ~/.dsh/research-os-broker). Existence decides availability either way — a
+ *  configured-but-missing socket is not a broker (same as client.available()),
+ *  while a present-but-unreachable socket fails closed at the call site, never a
+ *  silent local fallback. */
 function brokerPath() {
-  const env = process.env.RESEARCH_OS_BROKER_SOCKET
-  if (env && existsSync(env)) return env
-  const fallback = join(homedir(), ...BROKER_SOCKET_REL)
-  return existsSync(fallback) ? fallback : undefined
+  if (process.env.RESEARCH_OS_BROKER_SOCKET) {
+    return existsSync(process.env.RESEARCH_OS_BROKER_SOCKET)
+      ? process.env.RESEARCH_OS_BROKER_SOCKET
+      : undefined
+  }
+  let home = process.env.RESEARCH_OS_BROKER_HOME
+  if (home && home.startsWith('~/')) home = join(homedir(), home.slice(2))
+  const candidate = home ? join(home, 'broker.sock') : join(homedir(), ...BROKER_SOCKET_REL)
+  return existsSync(candidate) ? candidate : undefined
 }
 
 /** Canonical workspace identity the broker signs: the symlink-resolved absolute path.

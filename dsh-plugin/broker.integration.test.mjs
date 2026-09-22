@@ -98,6 +98,34 @@ check('the broker records the workspace policy', policyPut.ok === true && policy
 check('brokerPath discovers the env socket', brokerPath() === brokerSocket)
 check('brokerWorkspace resolves symlinks', brokerWorkspace(root) === workspaceKey)
 
+// 4b. Discovery parity with tools/broker/client.py (SOCKET > HOME/socket > default):
+//     a HOME-only setup must resolve, the socket env must win, and a
+//     configured-but-missing socket is not a broker (parity with client.available).
+{
+  const savedSocket = process.env.RESEARCH_OS_BROKER_SOCKET
+  const savedHome = process.env.RESEARCH_OS_BROKER_HOME
+  const fakeHome = mkdtempSync(join(tmpdir(), 'ros-broker-home-'))
+  const fakeSocket = join(fakeHome, 'broker.sock')
+  writeFileSync(fakeSocket, '')
+  try {
+    delete process.env.RESEARCH_OS_BROKER_SOCKET
+    process.env.RESEARCH_OS_BROKER_HOME = fakeHome
+    check('brokerPath follows RESEARCH_OS_BROKER_HOME when no socket env is set',
+      brokerPath() === fakeSocket)
+    process.env.RESEARCH_OS_BROKER_SOCKET = brokerSocket
+    check('the socket env wins over the home env', brokerPath() === brokerSocket)
+    process.env.RESEARCH_OS_BROKER_SOCKET = join(fakeHome, 'missing.sock')
+    delete process.env.RESEARCH_OS_BROKER_HOME
+    check('a configured-but-missing socket is not a broker', brokerPath() === undefined)
+  } finally {
+    if (savedSocket === undefined) delete process.env.RESEARCH_OS_BROKER_SOCKET
+    else process.env.RESEARCH_OS_BROKER_SOCKET = savedSocket
+    if (savedHome === undefined) delete process.env.RESEARCH_OS_BROKER_HOME
+    else process.env.RESEARCH_OS_BROKER_HOME = savedHome
+    rmSync(fakeHome, { recursive: true, force: true })
+  }
+}
+
 // 5. Mint a signed token through the python client, mirror it into the workspace store.
 const url = 'http://lab.example/x'
 const shape = shapeFromArgs({ method: 'GET', url, principal: 'researcher-A' })
@@ -211,18 +239,33 @@ check('a wider broker policy still meets the local binding',
   && rWide.text.includes('outside the engagement scope')
   && rWide.text.includes('00_control/engagement.yaml'))
 
-// 11. Broker gone after the mint: the stale socket fails closed, never silently local.
+// 11. HOME-only discovery end to end (broker alive): drop the socket env — the
+//     executor must still consult the broker (audit-logged consume), never run silent
+//     local mode while the broker holds policy.
 pyBroker('policy.put', {
   workspace: workspaceKey, assets: ['lab.example'], gate: 'assets',
   source_reference: 'policy://program/scope', human_reference: 'ticket-js-2',
 })
+delete process.env.RESEARCH_OS_BROKER_SOCKET
+process.env.RESEARCH_OS_BROKER_HOME = brokerHome
+check('brokerPath discovers the home socket without the socket env',
+  brokerPath() === brokerSocket)
+const consumesBeforeHome = consumeCount()
+const tHome = mint()
+writeToken(tHome)
+const rHome = await callExecutor()
+check('home-only discovery consumes through the broker, never silently local',
+  rHome.ok === true && dispatches === 2 && consumeCount() === consumesBeforeHome + 1
+  && readFileSync(join(brokerHome, 'audit.log'), 'utf8').includes('token.consume'))
+
+// 12. Broker gone after the mint: the stale socket fails closed, never silently local.
 const t6 = mint()
 writeToken(t6)
 brokerProc.kill('SIGKILL')
 await new Promise((resolve) => brokerProc.on('exit', resolve))
 const r6 = await callExecutor()
 check('a broker-signed token fails closed when the broker is gone',
-  r6.ok === false && dispatches === 1 && r6.text.includes('broker unreachable'))
+  r6.ok === false && dispatches === 2 && r6.text.includes('broker unreachable'))
 
 // 12. Cleanup + summary. The exit hook also cleans up after an assertion crash, so a
 //     failing run never leaves a daemon or a fixture behind.
