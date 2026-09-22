@@ -230,7 +230,7 @@ reason, with a loud run-log warning) and,
 when the main-frame navigation ends out of scope, sets `scope_violation: true`
 and skips screenshot/title instead of capturing it as a normal artifact.
 The executor carries the violation onto the receipt (`scope_violation` +
-`out_of_scope_hop_count` on `ACTION_RECORDED`), flags it in the tool text, and
+`out_of_scope_hops` hop records on `ACTION_RECORDED`), flags it in the tool text, and
 `tools/audit.py` errors until a resolved human gate on the cycle dispositions it.
 Redirect targets must be preflighted as their own action. Downloads are
 disabled (`acceptDownloads: false`); the runner's own actions are read-only,

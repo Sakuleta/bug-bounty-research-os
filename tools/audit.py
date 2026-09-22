@@ -468,12 +468,18 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
         if payload.get("scope_violation") is not True:
             continue
         cid = str(e.get("cycle_id") or "")
-        hops = payload.get("out_of_scope_hop_count")
+        hops = payload.get("out_of_scope_hops")
+        if isinstance(hops, list):
+            hop_count: int | str = len(hops)
+        else:
+            # Legacy receipts carried the integer `out_of_scope_hop_count`.
+            legacy = payload.get("out_of_scope_hop_count")
+            hop_count = legacy if isinstance(legacy, int) else "?"
         gated = any(ge.get("type") == "HUMAN_GATE_RESOLVED" and str(ge.get("cycle_id") or "") == cid
                     for ge in events)
         if not gated:
             message = (f"action {e.get('entity_id')} reports a browser scope_violation "
-                       f"({hops if isinstance(hops, int) else '?'} out-of-scope hops) with no "
+                       f"({hop_count} out-of-scope hops) with no "
                        f"resolved human gate on cycle {cid or '<missing>'} — raise a human gate "
                        "for disposition before citing this run")
             if e.get("os_version"):

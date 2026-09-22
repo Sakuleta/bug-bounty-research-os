@@ -2209,12 +2209,12 @@ function readBrowserSummary(root, stdout) {
       if (!parsed || typeof parsed !== 'object') continue
       const flags = {}
       if (parsed.scope_violation === true) flags.scope_violation = true
-      if (Number.isInteger(parsed.out_of_scope_hop_count)) {
-        flags.out_of_scope_hop_count = parsed.out_of_scope_hop_count
-      } else if (Array.isArray(parsed.out_of_scope_hops)) {
-        flags.out_of_scope_hop_count = parsed.out_of_scope_hops.length
+      // The receipt carries the spec-named `out_of_scope_hops` hop records, as
+      // the runner reports them (capped at the runner's own cap).
+      if (Array.isArray(parsed.out_of_scope_hops)) {
+        flags.out_of_scope_hops = parsed.out_of_scope_hops.slice(0, 50)
       }
-      if (flags.scope_violation || flags.out_of_scope_hop_count) return flags
+      if (flags.scope_violation || (flags.out_of_scope_hops && flags.out_of_scope_hops.length)) return flags
     }
   } catch { /* a summary that cannot be read carries no flags */ }
   return {}
@@ -2237,11 +2237,12 @@ function registerCapture({ root, relPath, token, source, runFlags }) {
     const preflight = (token.preflight && typeof token.preflight === 'object') ? token.preflight : {}
     const payload = { ...preflight, id: token.action_id, token_nonce: token.nonce, ...(evidence ? { evidence_refs: [evidence] } : {}) }
     // Browser scope signals ride the receipt: a run the runner flagged carries
-    // scope_violation + the hop count, so the audit can demand human disposition.
-    if (runFlags && (runFlags.scope_violation || runFlags.out_of_scope_hop_count)) {
+    // scope_violation + the spec-named `out_of_scope_hops` hop records, so the
+    // audit can demand human disposition.
+    if (runFlags && (runFlags.scope_violation || runFlags.out_of_scope_hops)) {
       if (runFlags.scope_violation) payload.scope_violation = true
-      if (Number.isInteger(runFlags.out_of_scope_hop_count)) {
-        payload.out_of_scope_hop_count = runFlags.out_of_scope_hop_count
+      if (Array.isArray(runFlags.out_of_scope_hops)) {
+        payload.out_of_scope_hops = runFlags.out_of_scope_hops.slice(0, 50)
       }
     }
     const payloadPath = join(tmpdir(), `research-os-action-${token.nonce}.json`)
@@ -2536,8 +2537,9 @@ async function runControlledBrowser({ root, args }) {
   }
   const relPath = rel.split(sep).join('/')
   const runFlags = readBrowserSummary(root, stdout)
+  const hopCount = Array.isArray(runFlags.out_of_scope_hops) ? runFlags.out_of_scope_hops.length : 0
   if (runFlags.scope_violation) {
-    log(`FLAG(executor browser) ${safeUrl} :: the runner reported scope_violation with ${runFlags.out_of_scope_hop_count || 0} out-of-scope hops — receipt flagged for human review`)
+    log(`FLAG(executor browser) ${safeUrl} :: the runner reported scope_violation with ${hopCount} out-of-scope hops — receipt flagged for human review`)
   }
   const { evidence, recorded } = registerCapture({ root, relPath, token, source: 'browser-executor', runFlags })
   const receipted = captureWritten && recorded && Boolean(evidence)
@@ -2545,7 +2547,7 @@ async function runControlledBrowser({ root, args }) {
     ? 'runner exit 0'
     : `runner ${exitCode === null ? 'not started' : 'exit ' + exitCode}${error ? ' — ' + error : ''}`
   const flagged = runFlags.scope_violation
-    ? `\n- scope: FLAGGED — scope_violation with ${runFlags.out_of_scope_hop_count || 0} out-of-scope hops (raise a human gate for disposition; the audit errors until one is resolved)`
+    ? `\n- scope: FLAGGED — scope_violation with ${hopCount} out-of-scope hops (raise a human gate for disposition; the audit errors until one is resolved)`
     : ''
   const base = `research_os_browser ${safeUrl} → ${summary}\n- action: ${token.action_id} (token consumed)${flagged}\n- profile: ${browserProfile}${resolved.note ? ' (' + resolved.note + ')' : ''}\n- evidence: ${recorded && evidence ? evidence : (evidence || 'NOT REGISTERED')}\n- capture: ${relPath}`
   // Once the runner was started, a failed receipt must surface even on a non-zero exit.

@@ -715,7 +715,10 @@ check('a non-zero browser runner with a failed receipt still carries the warning
     .filter((event) => event.type === 'ACTION_RECORDED').pop()
   check('the violation rides the ACTION_RECORDED payload',
     Boolean(violAction) && violAction.payload.scope_violation === true
-    && violAction.payload.out_of_scope_hop_count === 2)
+    && Array.isArray(violAction.payload.out_of_scope_hops)
+    && violAction.payload.out_of_scope_hops.length === 1
+    && violAction.payload.out_of_scope_hops[0].host === 'evil.example'
+    && violAction.payload.out_of_scope_hop_count === undefined)
   check('the executor tool text surfaces the flagged receipt',
     w12.text.includes('FLAGGED') && w12.text.includes('scope_violation'))
 }
