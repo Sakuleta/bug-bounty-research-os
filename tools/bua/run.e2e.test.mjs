@@ -11,6 +11,10 @@
  *   - a WebSocket upgrade to the out-of-scope host is closed (the server never completes
  *     an upgrade) and recorded; an in-scope upgrade completes (the in-scope page holds
  *     DOMContentLoaded until the server saw it, so the check is deterministic);
+ *   - a dedicated worker's out-of-scope WebSocket is recorded, never silent: blocked
+ *     (no upgrade) or flagged (`scope_violation`), whichever layer saw it;
+ *   - a service-worker registration is blocked before it can connect anything
+ *     (`service_worker_registrations_blocked`);
  *   - a subresource 302 to the out-of-scope host is FOLLOWED (the known playwright route
  *     limit) but recorded in `out_of_scope_hops`;
  *   - a navigation that follows an out-of-scope 302 is flagged `scope_violation` with the
@@ -70,6 +74,7 @@ function check(label, cond) {
 // ---- two local servers: in-scope and out-of-scope -----------------------------------
 const inState = { hits: {}, upgrades: 0 }
 const outState = { hits: {}, upgrades: 0 }
+const workerReports = []
 const openSockets = []
 const wsAccept = (key) => createHash('sha1')
   .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64')
@@ -134,6 +139,53 @@ const inSrv = createServer((req, res) => {
     const deadline = Date.now() + 3000
     const wait = () => {
       if (inState.upgrades > 0 || Date.now() > deadline) return js(res)
+      setTimeout(wait, 20)
+    }
+    return wait()
+  }
+  if (path === '/workers.html') {
+    return html(res, 'workers', [
+      `<script>window.__sw = 'pending';`,
+      `const w = new Worker('/worker.js');`,
+      `w.onmessage = (e) => {`,
+      `  fetch('/worker-report?outcome=' + encodeURIComponent(String(e.data))`,
+      `    + '&sw=' + encodeURIComponent(window.__sw));`,
+      `};`,
+      `try { navigator.serviceWorker.register('/sw.js')`,
+      `  .then(() => { window.__sw = 'registered' })`,
+      `  .catch(() => { window.__sw = 'blocked' }) }`,
+      `catch (e) { window.__sw = 'blocked' }</script>`,
+      // Parser-blocking: the server holds this response until the worker's report
+      // arrives, so DOMContentLoaded (and the runner's capture) cannot outrun it.
+      '<script src="/wait-worker.js"></script>',
+    ].join(''))
+  }
+  if (path === '/worker.js') {
+    res.writeHead(200, { 'content-type': 'text/javascript' })
+    return res.end([
+      `const ws = new WebSocket('ws://127.0.0.1:${outPort}/worker-socket');`,
+      `ws.onopen = () => postMessage('open');`,
+      `ws.onerror = () => postMessage('error');`,
+      `setTimeout(() => postMessage('timeout'), 2000);`,
+    ].join('\n'))
+  }
+  if (path === '/sw.js') {
+    res.writeHead(200, { 'content-type': 'text/javascript' })
+    return res.end([
+      `self.addEventListener('install', () => {`,
+      `  try { new WebSocket('ws://127.0.0.1:${outPort}/sw-socket') } catch (e) {}`,
+      `});`,
+    ].join('\n'))
+  }
+  if (path === '/worker-report') {
+    workerReports.push((req.url || '').split('?')[1] || '')
+    return js(res)
+  }
+  if (path === '/wait-worker.js') {
+    const seen = workerReports.length
+    const deadline = Date.now() + 8000
+    const wait = () => {
+      if (workerReports.length > seen || Date.now() > deadline) return js(res)
       setTimeout(wait, 20)
     }
     return wait()
@@ -256,7 +308,29 @@ try {
     redirectSummary.screenshot === null && redirectSummary.title === null
     && !readdirSync(join(tmpRoot, OUT_REL)).some((f) => f.startsWith('bua-e2e-redirect') && f.endsWith('.png')))
 
-  // 4. A failing navigation whose URL carries secrets: the captured error text and the
+  // 4. Worker and service-worker sockets: the dedicated worker's out-of-scope socket
+  //    is recorded, never silent (blocked with no upgrade, or observed and flagged),
+  //    and the service-worker registration is blocked before it can connect anything.
+  const upgradesBeforeWorkers = outState.upgrades
+  const workers = await run(`http://127.0.0.1:${inPort}/workers.html`, 'bua-e2e-workers')
+  check('the workers run exits 0', workers.status === 0)
+  const workersSummary = summaryFor('bua-e2e-workers')
+  check('the worker reported its socket outcome before the capture (deterministic)',
+    workerReports.length >= 1)
+  check('the service-worker registration was blocked',
+    workersSummary.service_worker_registrations_blocked >= 1
+    && workersSummary.service_worker_violations === 0)
+  check('the out-of-scope worker websocket is recorded, never silent',
+    workersSummary.blocked_requests.some((b) =>
+      b.url_masked === `ws://127.0.0.1:${outPort}/worker-socket`)
+    && workersSummary.blocked_count >= 1)
+  check('the out-of-scope worker websocket never completed silently: blocked or flagged',
+    outState.upgrades === upgradesBeforeWorkers || workersSummary.scope_violation === true)
+  check('no service-worker socket reached the out-of-scope server',
+    !JSON.stringify(workersSummary).includes('/sw-socket')
+    && !workerReports.some((r) => r.includes('sw-socket')))
+
+  // 5. A failing navigation whose URL carries secrets: the captured error text and the
   //    whole summary must not leak them.
   const failed = await run(`http://127.0.0.1:${inPort}/reset.html?token=ERRSECRET&sig=HASH`, 'bua-e2e-error')
   check('a failing navigation still exits 0 (the capture is the product)', failed.status === 0)

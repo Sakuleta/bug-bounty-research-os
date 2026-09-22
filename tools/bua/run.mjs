@@ -14,13 +14,20 @@
  *   - scope guard in code: the target passes `researchctl scope-check` against
  *     00_control/engagement.yaml before the browser starts (exit 4 when denied), AND
  *     every intercepted http(s)/ws(s) request the context makes — the navigation, every
- *     subresource (JS/CSS/XHR) and every WebSocket upgrade — is checked against the same
- *     seam before it leaves the machine (`context.route` plus `context.routeWebSocket`):
- *     any non-exempt request that is not a verified `in_scope: true` is aborted with
+ *     subresource (JS/CSS/XHR) and every page-realm WebSocket upgrade — is checked
+ *     against the same seam before it leaves the machine (`context.route` plus
+ *     `context.routeWebSocket`, which only sees the page realm): any non-exempt
+ *     request that is not a verified `in_scope: true` is aborted with
  *     `blockedbyclient` (a websocket is closed instead of connected) and recorded in the summary
  *     (`blocked_requests`, `blocked_count`), so a scoped page cannot embed traffic to
- *     an out-of-scope host. (A playwright-core too old for `routeWebSocket` cannot
- *     enforce the ws/wss half and says so loudly at run time — upgrade to enforce.)
+ *     an out-of-scope host. Service workers are blocked outright (registration is
+ *     rejected and lingering registrations unregistered before the first navigation;
+ *     a worker that appears anyway fails the run). Dedicated-worker sockets never
+ *     reach the route layer, so they are observed over CDP auto-attach
+ *     (`Network.webSocketCreated`): an out-of-scope worker socket the route layer
+ *     missed is recorded and fails the run, never a silent `blocked_count: 0`.
+ *     (A playwright-core too old for `routeWebSocket` cannot enforce the ws/wss half:
+ *     the run is refused instead of proceeding unchecked — upgrade to enforce.)
  *     Distinct hosts are checked at most `DISTINCT_HOST_CHECK_CAP` times per run; past
  *     the cap every further host fails closed without spawning the seam
  *     (`reason: host_check_budget_exceeded`);
@@ -258,7 +265,11 @@ export function makeHopCollector(summary, cache, warn = console.log) {
 }
 
 /** The `context.routeWebSocket` handler: the same cache/decision as `context.route`,
- *  but the allowed socket is connected and anything else is closed, never connected. */
+ *  but the allowed socket is connected and anything else is closed, never connected.
+ *
+ *  Route coverage is page-realm only (the router overrides the page's WebSocket
+ *  constructor): sockets opened from dedicated workers or service workers never reach
+ *  this handler — see `observeWorkerWebSocket` and the service-worker block below. */
 export function makeWebSocketHandler(summary, cache, warn = console.log) {
   return async function handleWebSocket(ws) {
     const url = ws.url()
@@ -268,6 +279,60 @@ export function makeWebSocketHandler(summary, cache, warn = console.log) {
     warn(`bua-runner: blocked ${decision.reason} ws host=${decision.host || '-'}`)
     return ws.close()
   }
+}
+
+/** The service-worker block, installed with `context.addInitScript` before the first
+ *  navigation: new registrations are rejected (loudly, via the page console) and
+ *  registrations lingering from a reused profile are unregistered. A service worker
+ *  runs outside every route handler, so registration must never succeed here. */
+export function serviceWorkerInitScript() {
+  return `(() => {
+  try {
+    if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+      navigator.serviceWorker.getRegistrations()
+        .then((rs) => Promise.all(rs.map((r) => r.unregister().catch(() => {}))))
+        .catch(() => {});
+    }
+  } catch (e) { /* no service-worker support: nothing to block */ }
+  try {
+    if (navigator.serviceWorker && navigator.serviceWorker.register) {
+      navigator.serviceWorker.register = function () {
+        console.log('bua-runner: service worker registration blocked');
+        return Promise.reject(new Error('bua-runner: service workers are disabled in the controlled context'));
+      };
+    }
+  } catch (e) { /* non-configurable: the serviceworker event backstop still flags */ }
+})();`
+}
+
+/** Backstop for a service worker that appears despite the registration block (a
+ *  pre-existing controller winning a race, a profile with stored workers): record a
+ *  violation and fail the run — its traffic bypasses every route handler, so it must
+ *  never pass silently. */
+export function makeServiceWorkerHandler(summary, warn = console.log) {
+  return async function handleServiceWorker() {
+    summary.service_worker_violations = (summary.service_worker_violations || 0) + 1
+    summary.scope_violation = true
+    warn('bua-runner: WARNING a service worker appeared in the controlled context ' +
+      'despite the registration block — flagging a scope violation')
+  }
+}
+
+/** Observe one worker-opened socket the route layer may never see (CDP
+ *  `Network.webSocketCreated` via auto-attach): an in-scope socket is ignored; an
+ *  out-of-scope socket the route layer already blocked is not counted twice; one it
+ *  missed is recorded and fails the run — never a silent `blocked_count: 0`. */
+export async function observeWorkerWebSocket(summary, cache, url, warn = console.log) {
+  const decision = await decideRequest(url, cache)
+  if (decision.allow) return { flagged: false }
+  const masked = maskUrlSecrets(url)
+  const seen = (summary.blocked_requests || []).some((b) => b.url_masked === masked)
+  if (seen) return { flagged: false, alreadyBlocked: true }
+  recordBlocked(summary, url, decision.host, decision.reason)
+  summary.scope_violation = true
+  warn(`bua-runner: WARNING out-of-scope worker websocket missed by the route layer ` +
+    `host=${decision.host || '-'} — flagging a scope violation`)
+  return { flagged: true }
 }
 
 /** Masked redirect hops (oldest -> newest) of a navigation, bounded so a hostile
@@ -424,8 +489,39 @@ async function main() {
     error: null,
     blocked_requests: [],
     blocked_count: 0,
+    service_worker_registrations_blocked: 0,
+    service_worker_violations: 0,
     screenshot: shotRel,
   }
+
+  // 4b. The controlled page, created before interception so CDP observation and the
+  //     console watch attach before any navigation.
+  let page = null
+  try {
+    page = context.pages()[0] || (await context.newPage())
+  } catch (e) {
+    console.error('bua-runner: page creation failed. (' + String(e.message || e) + ')')
+    try { await context.close() } catch { /* already closed */ }
+    process.exit(3)
+  }
+  // The service-worker block reports through the page console (the only channel out
+  // of the init script): count loud rejections as blocked registrations.
+  const watchPageConsole = (watched) => {
+    try {
+      watched.on('console', (msg) => {
+        try {
+          if (String(msg.text()).includes('service worker registration blocked')) {
+            summary.service_worker_registrations_blocked += 1
+            console.log('bua-runner: blocked service worker registration')
+          }
+        } catch { /* unparseable console text */ }
+      })
+    } catch { /* console watching unavailable */ }
+  }
+  try {
+    for (const watched of context.pages()) watchPageConsole(watched)
+    context.on('page', watchPageConsole)
+  } catch { /* console watching unavailable */ }
 
   // 5. Per-request interception, installed BEFORE the first navigation: the entry URL
   //    and every subresource (JS/CSS/XHR) passes the scope seam first; anything that
@@ -453,11 +549,37 @@ async function main() {
     process.exit(3)
   }
 
+  // 5a. Service workers run outside every route handler, so registration must never
+  //     succeed in the controlled context: reject new registrations and unregister
+  //     registrations lingering from a reused profile, before the first navigation.
+  //     Missing init-script support fails closed. A worker that appears anyway (the
+  //     'serviceworker' event, or one already running) records a violation and fails
+  //     the run — its traffic bypasses every route handler.
+  const handleServiceWorker = makeServiceWorkerHandler(summary)
+  const swTasks = []
+  try {
+    await context.addInitScript(serviceWorkerInitScript())
+  } catch (e) {
+    console.error('bua-runner: service-worker block could not be installed — refusing to browse unscoped. ' +
+      '(' + String(e.message || e) + ')')
+    try { await context.close() } catch { /* already closed */ }
+    process.exit(3)
+  }
+  try {
+    if (typeof context.serviceWorkers === 'function') {
+      for (const worker of context.serviceWorkers()) swTasks.push(handleServiceWorker(worker))
+    }
+    context.on('serviceworker', (worker) => { swTasks.push(handleServiceWorker(worker)) })
+  } catch (e) {
+    console.log('bua-runner: WARNING service-worker backstop unavailable: ' + maskText(String(e.message || e)))
+  }
+
   // 5b. WebSockets are not routed by `context.route` (playwright keeps them on their
   //     own seam), so a page could open a socket to an out-of-scope host unchecked.
-  //     `routeWebSocket` funnels every ws/wss upgrade through the same decision; an
-  //     older playwright-core without the API gets a loud warning instead (the run
-  //     proceeds, but its ws/wss traffic was never scope-checked).
+  //     `routeWebSocket` funnels every page-realm ws/wss upgrade through the same
+  //     decision. Dedicated workers and service workers never reach it (page-realm
+  //     routing only — see 5a and 5c). Without the API there is no ws/wss
+  //     interception at all, so the run is refused instead of passing silently.
   const wsTasks = []
   if (typeof context.routeWebSocket === 'function') {
     const handleWebSocket = makeWebSocketHandler(summary, scopeCache)
@@ -476,8 +598,87 @@ async function main() {
       process.exit(3)
     }
   } else {
-    console.log('bua-runner: WARNING this playwright-core has no context.routeWebSocket — ' +
-      'WebSocket (ws/wss) traffic is NOT scope-checked by this run; upgrade playwright-core')
+    console.error('bua-runner: this playwright-core has no context.routeWebSocket — refusing to browse ' +
+      'unscoped (a run without ws/wss interception would pass out-of-scope sockets with a silent ' +
+      'blocked_count: 0); upgrade playwright-core')
+    try { await context.close() } catch { /* already closed */ }
+    process.exit(3)
+  }
+
+  // 5c. Dedicated/shared workers never reach the route handlers (page-realm routing
+  //     only): observe their sockets over CDP. Each worker target is auto-attached
+  //     paused (no race: the socket cannot outrun the observer), `Network` is enabled
+  //     in the worker session, and every `Network.webSocketCreated` goes through the
+  //     same scope decision — an out-of-scope worker socket the route layer missed is
+  //     recorded and fails the run, never a silent `blocked_count: 0` (deduped — a
+  //     socket the route layer blocked is never counted twice). Worker targets expose
+  //     no Fetch domain, so observation + violation is the coverage here, exactly as
+  //     the worker half cannot be closed through the route API. Setup failure fails
+  //     closed. (Non-flattened attach: worker messages arrive wrapped in
+  //     `Target.receivedMessageFromTarget` and worker commands go out through
+  //     `Target.sendMessageToTarget` — flattened mode rejects the latter.)
+  const workerWsTasks = []
+  let cdpMsgId = 0
+  const pendingEnables = new Map()
+  const failWorkerScope = (note) => {
+    summary.scope_violation = true
+    console.log('bua-runner: WARNING worker websocket interception degraded (' + note +
+      ') — flagging a scope violation')
+  }
+  const noteWorkerSocket = (url) => {
+    workerWsTasks.push(observeWorkerWebSocket(summary, scopeCache, String(url || '')).catch((e) => {
+      console.log('bua-runner: WARNING worker-websocket scope check failed: ' + maskText(String(e.message || e)))
+    }))
+  }
+  try {
+    const cdp = await context.newCDPSession(page)
+    const toWorker = (sessionId, method, params, track) => {
+      cdpMsgId += 1
+      if (track) pendingEnables.set(cdpMsgId, sessionId)
+      return cdp.send('Target.sendMessageToTarget', {
+        sessionId, message: JSON.stringify({ id: cdpMsgId, method, params }),
+      })
+    }
+    await cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: false })
+    await cdp.send('Network.enable')
+    cdp.on('Network.webSocketCreated', ({ url }) => { noteWorkerSocket(url) })
+    cdp.on('Target.attachedToTarget', ({ targetInfo, sessionId, waitingForDebugger }) => {
+      workerWsTasks.push((async () => {
+        try {
+          if (!/worker/i.test(String((targetInfo || {}).type || ''))) return
+          // Ordered on the connection: the enable applies before the resume below.
+          await toWorker(sessionId, 'Network.enable', {}, true)
+        } catch (e) {
+          failWorkerScope('Network.enable failed: ' + String(e.message || e))
+        } finally {
+          if (waitingForDebugger) {
+            await toWorker(sessionId, 'Runtime.runIfWaitingForDebugger', {}).catch(() => {})
+          }
+        }
+      })().catch((e) => {
+        failWorkerScope(String(e.message || e))
+      }))
+    })
+    cdp.on('Target.receivedMessageFromTarget', ({ sessionId, message }) => {
+      workerWsTasks.push((async () => {
+        let msg = null
+        try { msg = JSON.parse(String(message)) } catch { return }
+        if (msg.id && pendingEnables.has(msg.id)) {
+          pendingEnables.delete(msg.id)
+          if (msg.error) failWorkerScope('the worker rejected Network.enable')
+          return
+        }
+        if (msg.method !== 'Network.webSocketCreated') return
+        noteWorkerSocket(msg.params && msg.params.url)
+      })().catch((e) => {
+        console.log('bua-runner: WARNING worker-websocket scope check failed: ' + maskText(String(e.message || e)))
+      }))
+    })
+  } catch (e) {
+    console.error('bua-runner: worker websocket observation could not be installed — refusing to browse unscoped. ' +
+      '(' + String(e.message || e) + ')')
+    try { await context.close() } catch { /* already closed */ }
+    process.exit(3)
   }
 
   // 5c. Subresource redirect hops: `context.route` treats a request and its redirects as
@@ -495,11 +696,10 @@ async function main() {
     }))
   })
 
-  let page
   let lastNavRequest = null
   let resp = null
   try {
-    page = context.pages()[0] || (await context.newPage())
+    page = page || context.pages()[0] || (await context.newPage())
     // A failed navigation returns no response, so this listener is the witness of the
     // request chain (and its hops) when `page.goto` throws.
     page.on('request', (req) => {
@@ -523,16 +723,22 @@ async function main() {
     console.log(`bua-runner: scope violation — navigation followed ${navHops.length} out-of-scope ` +
       'redirect hop(s); title and screenshot are skipped (chain and hops are recorded)')
   } else if (page) {
-    try {
-      summary.title = await page.title().catch(() => null)
-      await page.screenshot({ path: join(root, shotRel) })
-    } catch (e) {
+    if (summary.scope_violation === true) {
       summary.screenshot = null
-      if (!summary.error) summary.error = maskText(String(e.message || e))
+      console.log('bua-runner: scope violation — worker/service-worker traffic left scope; ' +
+        'title and screenshot are skipped (chain and hops are recorded)')
+    } else {
+      try {
+        summary.title = await page.title().catch(() => null)
+        await page.screenshot({ path: join(root, shotRel) })
+      } catch (e) {
+        summary.screenshot = null
+        if (!summary.error) summary.error = maskText(String(e.message || e))
+      }
     }
   }
   try { await context.close() } catch { /* already closed */ }
-  await Promise.allSettled([...hopTasks, ...wsTasks])
+  await Promise.allSettled([...hopTasks, ...wsTasks, ...swTasks, ...workerWsTasks])
   summary.finished_at = new Date().toISOString()
   writeFileSync(join(root, summaryRel), JSON.stringify(summary, null, 2) + '\n')
   if (summary.screenshot) console.log(`ARTIFACT ${summary.screenshot}`)

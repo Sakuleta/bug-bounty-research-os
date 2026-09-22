@@ -11,13 +11,14 @@
  * Run: `node tools/bua/run.test.mjs` (exits non-zero on failure).
  */
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  decideRequest, hostKey, makeHopCollector, makeScopeCache, makeWebSocketHandler,
-  maskText, maskUrlSecrets, recordBlocked, redirectChain, schemeAllowed,
+  decideRequest, hostKey, makeHopCollector, makeScopeCache, makeServiceWorkerHandler,
+  makeWebSocketHandler, maskText, maskUrlSecrets, observeWorkerWebSocket, recordBlocked,
+  redirectChain, schemeAllowed, serviceWorkerInitScript,
 } from './run.mjs'
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -293,6 +294,52 @@ check('a failing scope check closes the websocket (fail closed) and records the 
   failedWs.connected === 0 && failedWs.closed === 1
   && wsFailSummary.blocked_requests[0].reason === 'scope_check_failed')
 
+// ---- service workers are blocked in the controlled context -----------------------
+// The init script (installed before the first navigation) rejects new registrations
+// and unregisters lingering ones; a worker that appears anyway fails the run.
+const swScript = serviceWorkerInitScript()
+check('the service-worker block rejects registrations loudly',
+  swScript.includes('serviceWorker.register') && swScript.includes('Promise.reject')
+  && swScript.includes('service worker registration blocked'))
+check('the service-worker block unregisters lingering registrations',
+  swScript.includes('getRegistrations') && swScript.includes('unregister'))
+const swSummary = { service_worker_violations: 0, scope_violation: false }
+const swLogs = []
+const swHandler = makeServiceWorkerHandler(swSummary, (line) => swLogs.push(line))
+await swHandler({})
+check('a service worker that appears anyway records a violation and fails the run',
+  swSummary.service_worker_violations === 1 && swSummary.scope_violation === true
+  && swLogs.length === 1)
+await swHandler({})
+check('each service worker appearance is counted',
+  swSummary.service_worker_violations === 2)
+
+// ---- worker-opened sockets outside route coverage are observed, never silent -----
+// decideRequest + recordBlocked + a scope violation when the route layer never saw it;
+// a socket the route layer already blocked is not counted twice.
+const obsCache = makeScopeCache(async (url) => ({
+  gate: 'assets', in_scope: new URL(url).host === 't.example', host: new URL(url).host,
+}))
+const obsIn = await observeWorkerWebSocket(
+  { blocked_requests: [], blocked_count: 0, scope_violation: false },
+  obsCache, 'ws://t.example/socket-in')
+check('an in-scope worker socket is neither recorded nor flagged',
+  obsIn.flagged === false)
+const obsSummary = { blocked_requests: [], blocked_count: 0, scope_violation: false }
+const obsLogs = []
+const obsOut = await observeWorkerWebSocket(obsSummary, obsCache,
+  'ws://evil.example/socket?token=OBSSCRET', (line) => obsLogs.push(line))
+check('an out-of-scope worker socket the route layer missed is recorded and fails the run',
+  obsOut.flagged === true && obsSummary.blocked_count === 1
+  && obsSummary.scope_violation === true && obsLogs.length === 1
+  && obsSummary.blocked_requests[0].url_masked === 'ws://evil.example/socket?token=[REDACTED]'
+  && !JSON.stringify(obsSummary).includes('OBSSCRET'))
+const obsDupe = await observeWorkerWebSocket(obsSummary, obsCache,
+  'ws://evil.example/socket?token=OBSSCRET', (line) => obsLogs.push(line))
+check('a worker socket the route layer already blocked is not counted twice',
+  obsDupe.flagged === false && obsDupe.alreadyBlocked === true
+  && obsSummary.blocked_count === 1 && obsLogs.length === 1)
+
 // ---- followed out-of-scope redirect hops (nav AND subresource) --------------------
 const hopCache = makeScopeCache(async (url) => ({
   gate: 'assets', in_scope: new URL(url).host === 't.example', host: new URL(url).host,
@@ -353,19 +400,21 @@ module.exports = { chromium: { launchPersistentContext: async () => ({
   route: async () => {}, on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
 }) } }
 `)
-  oldRun = execFileSync('node', [
-    join(REPO_ROOT, 'tools', 'bua', 'run.mjs'), '--url', 'https://t.example/entry?token=STUBSECRET',
-    '--principal', 'old-playwright', '--action', 'stub-old', '--out-dir', 'artifacts',
-  ], { cwd: oldRoot, encoding: 'utf8' })
-  check('an old playwright-core without routeWebSocket warns loudly',
-    oldRun.includes('WARNING this playwright-core has no context.routeWebSocket'))
-  const artifacts = join(oldRoot, 'artifacts')
-  const summaryFile = readdirSync(artifacts).find((f) => f.endsWith('.bua.json'))
-  const oldSummary = JSON.parse(readFileSync(join(artifacts, summaryFile), 'utf8'))
-  check('the warned run still completes and records nothing for ws',
-    oldSummary.status === 200 && oldSummary.blocked_count === 0
-    && oldSummary.out_of_scope_hop_count === 0)
-  check('the stub run masks its own URL', !JSON.stringify(oldSummary).includes('STUBSECRET'))
+  oldRun = 'no run'
+  let oldThrew = null
+  try {
+    execFileSync('node', [
+      join(REPO_ROOT, 'tools', 'bua', 'run.mjs'), '--url', 'https://t.example/entry?token=STUBSECRET',
+      '--principal', 'old-playwright', '--action', 'stub-old', '--out-dir', 'artifacts',
+    ], { cwd: oldRoot, encoding: 'utf8' })
+  } catch (e) {
+    oldThrew = e
+  }
+  check('a playwright-core without routeWebSocket refuses to browse (fail closed, never a silent blocked_count: 0)',
+    oldThrew !== null && oldThrew.status === 3
+    && String((oldThrew.stdout || '') + (oldThrew.stderr || '')).includes('refusing to browse unscoped'))
+  check('the refused run writes no summary artifact',
+    !existsSync(join(oldRoot, 'artifacts')) || readdirSync(join(oldRoot, 'artifacts')).length === 0)
 } catch (e) {
   check('an old playwright-core without routeWebSocket run failed: '
     + String(e.message || e).split('\n')[0], false)

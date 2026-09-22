@@ -188,13 +188,17 @@ script carrying its documented precondition.
 
 Before the first navigation the runner installs a context-wide
 `context.route('**/*')` handler and a `context.routeWebSocket('**/*')` handler:
-every http(s) request and every ws/wss handshake is decided through the same
+every http(s) request and every page-realm ws/wss handshake is decided through the same
 `researchctl scope-check` seam (one verdict per authority per run, cached;
 failures cached fail-closed; `data:`/`blob:`/`about:`/`filesystem:` exempt; a
 per-run cap of 64 distinct-host checks fails closed past the cap). A request
 that is not a verified `in_scope: true` is aborted (`blockedbyclient`) or the
 socket closed, and recorded (`blocked_requests`, cap 50, masked;
-`blocked_count`). Redirect hops are the known limit: Playwright does not route
+`blocked_count`). Route coverage is page-realm only: service workers are blocked
+outright (registration rejected before the first navigation; a worker that appears
+anyway fails the run), and dedicated-worker sockets are observed over CDP
+auto-attach — an out-of-scope worker socket the route layer missed is recorded
+and fails the run, never a silent `blocked_count: 0`. Redirect hops are the known limit: Playwright does not route
 redirects (a request and its redirects are one unit), so a followed hop reaches
 its target; the runner records every out-of-scope hop (main-frame and
 subresource, `out_of_scope_hops`, masked, with a loud run-log warning) and,
