@@ -1230,4 +1230,33 @@ except ValueError as exc:
 stop_broker(_w1_proc)
 set_home(HOME)
 
+# v8.2 W7: consumed-but-unrecorded budget accounting holds in broker mode too —
+# a broker-minted token consumed without a receipt still counts (nonce-keyed).
+_w7_home = tmpdir("ro-broker-pending-")
+set_home(_w7_home)
+_w7_proc = spawn_broker(_w7_home)
+_wr7, _wc7 = fixture_root()
+(_wr7 / "00_control/engagement.yaml").write_text(
+    "budget:\n  max_actions_per_cycle: 1\n  max_actions_per_engagement: 10\n")
+_wc7.set_scope(["example.test"], "policy://program/scope")
+_w7_tok = _wc7.prepare_action(prepare_payload("https://example.test/x"))
+check("v8.2 W7: broker-mode prepare mints", _w7_tok["action_id"].startswith("B-"))
+_broker_consumed = call("token.consume", workspace=str(_wr7.resolve()),
+                        digest=_w7_tok["argument_digest"], tool_family="http",
+                        nonce=_w7_tok["broker_nonce"], sig=_w7_tok["broker_sig"])
+check("v8.2 W7: broker consume succeeds (receipt then fails)",
+      _broker_consumed.get("ok") is True)
+with (_wr7 / "11_runtime/action-tokens.jsonl").open("a", encoding="utf-8") as _fh:
+    _fh.write(json.dumps({"action_id": _w7_tok["action_id"], "nonce": _w7_tok["nonce"],
+                          "consumed": True, "consumed_at": now_iso()}) + "\n")
+check("v8.2 W7: broker-mode consumed-but-unrecorded still counts",
+      _wc7.budget_status()["counts"]["engagement"] == 1)
+try:
+    _wc7.prepare_action(prepare_payload("https://example.test/x"))
+    check("v8.2 W7: broker-mode receipt failure does not reopen headroom", False)
+except ValueError:
+    check("v8.2 W7: broker-mode receipt failure does not reopen headroom", True)
+stop_broker(_w7_proc)
+set_home(HOME)
+
 print(f"\n{len(passed)} checks passed")

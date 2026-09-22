@@ -1774,6 +1774,32 @@ function releaseClaim(path) {
   try { rmSync(path, { force: true }) } catch {}
 }
 
+/** Strict allow-list for token-derived filename segments (nonce, action_id).
+
+ *  Token records are workspace-writable, so a forged record could carry
+ *  `../../evil` or control characters into temp/capture filenames. Only
+ *  `[A-Za-z0-9_-]` (≤64 chars) passes — anything else fails closed before any
+ *  path, temp or capture use. */
+function safeTokenSegment(value) {
+  const s = String(value || '')
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(s)) return null
+  return s
+}
+
+/** Fail-closed token identity check for one controlled call: both the nonce and
+ *  the action id must be filename-safe. Sanitized values are written back onto
+ *  the token so every downstream use (claims, consume records, receipts,
+ *  temp/capture filenames) carries the validated form; legit minted values
+ *  already match and pass through unchanged. */
+function sanitizeTokenIdentity(token) {
+  const nonce = safeTokenSegment(token.nonce)
+  const action = safeTokenSegment(token.action_id)
+  if (!nonce || !action) return null
+  token.nonce = nonce
+  token.action_id = action
+  return token
+}
+
 // ---------- policy broker (R7) ----------
 //
 // The broker (tools/broker/) keeps the policy snapshot, the signing key and the
@@ -2151,6 +2177,10 @@ async function runControlledRequest({ root, args, fetchImpl }) {
   if (!token) {
     return { ok: false, text: 'research_os_request: no matching unconsumed preflight token (tokens are single-use and expire). Prepare one first:\n  python3 tools/researchctl.py . prepare payload.json\nwith request_shape:\n  ' + JSON.stringify(redactShapeForText(shape)) }
   }
+  if (!sanitizeTokenIdentity(token)) {
+    log(`DENY(executor) ${shape.method} ${safeUrl} :: the matched token carries a nonce or action id outside [A-Za-z0-9_-] — refusing before any path, temp or capture use (fail closed)`)
+    return { ok: false, text: 'research_os_request: the matched preflight token carries an unsafe nonce or action id — refusing the request (fail closed); prepare a fresh preflight' }
+  }
   // R7: while a broker socket exists the broker is mandatory — unsigned tokens are
   // refused, both scope checks (local + broker) must pass, and the token consumes
   // through the broker before dispatch. Any denial means no dispatch, no fallback.
@@ -2310,6 +2340,10 @@ async function runControlledBrowser({ root, args }) {
   const token = selectToken(loadTokenStates(root), digest, Date.now(), 'browser')
   if (!token) {
     return { ok: false, text: 'research_os_browser: no matching unconsumed browser preflight token (tokens are single-use and expire). Prepare one first:\n  python3 tools/researchctl.py . prepare payload.json\nwith "tool_family": "browser" and request_shape:\n  ' + JSON.stringify(redactShapeForText(shape)) }
+  }
+  if (!sanitizeTokenIdentity(token)) {
+    log(`DENY(executor browser) ${safeUrl} :: the matched token carries a nonce or action id outside [A-Za-z0-9_-] — refusing before any path, temp or capture use (fail closed)`)
+    return { ok: false, text: 'research_os_browser: the matched preflight token carries an unsafe nonce or action id — refusing the request (fail closed); prepare a fresh preflight' }
   }
   // R7: same mandatory broker gate as the HTTP arm — unsigned refusal, both scope
   // checks, broker consume; no dispatch on any denial. The broker gate runs BEFORE
@@ -2497,5 +2531,5 @@ export { name, inject, apply }
 // Test surface (pure helpers + executor core): conformance and integration suites.
 export { canonicalDigest, shapeFromArgs, browserShapeFromArgs, loadTokenStates, selectToken, runControlledRequest, runControlledBrowser, scopeReasonFor, redactSecrets, redactHeaderLine, redactUrlSecrets, redactShapeForText, mentionsProtected }
 export { brokerPath, brokerWorkspace, brokerCall, brokerConsumeToken, consumeBrokerToken, brokerPolicyGet, brokerScopeReason }
-export { claimToken, dispatchHostReason }
+export { claimToken, dispatchHostReason, safeTokenSegment, sanitizeTokenIdentity }
 export { scopeSyncDirtyReason }

@@ -7,7 +7,7 @@
  * Run: node executor.integration.test.mjs
  */
 import { execFileSync } from 'node:child_process'
-import { appendFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir, homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -632,6 +632,35 @@ renameSync(cliBackup, cliPath)
 check('a non-zero browser runner with a failed receipt still carries the warning',
   txr.ok === false && txr.text.includes('runner exit 1')
   && txr.text.includes('the request WAS executed but the receipt could not be recorded — do not rely on this action as receipted'))
+
+// 10e. v8.2 W7: a forged token record carrying path-shaped nonce/action_id is refused
+//      before any dispatch, temp file or capture use (fail closed, no traversal).
+{
+  const evilUrl = url.replace('/ok', '/ok-evil-nonce')
+  const evilShape = shapeFromArgs({ method: 'GET', url: evilUrl, principal: 'researcher-A' })
+  const evilDigest = canonicalDigest(evilShape)
+  const hitsBefore = labHits
+  appendFileSync(join(root, '11_runtime', 'action-tokens.jsonl'), JSON.stringify({
+    action_id: '../../evil', nonce: '../../evil', issued_at: new Date().toISOString(),
+    expires_at: '2099-01-01T00:00:00Z', tool_family: 'http', argument_digest: evilDigest,
+    cycle_id: 'C-0001', hypothesis: 'session-regeneration-probe', target: evilUrl, consumed: false,
+    preflight: { target: evilUrl },
+  }) + '\n')
+  const evil = await runControlledRequest({ root, args: { method: 'GET', url: evilUrl, principal: 'researcher-A' } })
+  check('a path-shaped forged nonce/action_id refuses without dispatch',
+    evil.ok === false && labHits === hitsBefore && /unsafe nonce or action id/.test(evil.text))
+}
+// 10f. v8.2 W7: the BUA runner refuses a path-shaped --action label (fail closed).
+{
+  cpSync(join(OS_REPO, 'tools', 'bua', 'run.mjs'), join(root, 'tools', 'bua', 'run.mjs'))
+  const realRoot = realpathSync(root)
+  let exited = null
+  try {
+    execFileSync('node', [join(realRoot, 'tools', 'bua', 'run.mjs'), '--url', url, '--principal', 'researcher-A', '--action', '../../evil'],
+      { encoding: 'utf8', timeout: 60000, cwd: realRoot })
+  } catch (e) { exited = e.status }
+  check('the runner refuses a path-shaped --action label', exited === 2)
+}
 
 server.close()
 rmSync(root, { recursive: true, force: true })

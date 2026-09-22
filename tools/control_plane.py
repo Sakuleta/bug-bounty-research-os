@@ -864,6 +864,42 @@ def _broker_socket_hint() -> Path | None:
     return base / "broker.sock"
 
 
+def broker_consumed_nonces() -> set[str]:
+    """Nonces the broker consume ledger holds, or empty when unavailable.
+
+    Same discovery as the client (`RESEARCH_OS_BROKER_SOCKET` else the socket under
+    `RESEARCH_OS_BROKER_HOME`, default `~/.dsh/research-os-broker`): the ledger file
+    sits next to the socket. Unreadable/missing means "unknown", never an error —
+    the local token store remains the primary provenance source.
+    """
+    home: Path | None = None
+    sock_env = os.environ.get("RESEARCH_OS_BROKER_SOCKET")
+    home_env = os.environ.get("RESEARCH_OS_BROKER_HOME")
+    if sock_env:
+        home = Path(sock_env).expanduser().parent
+    elif home_env:
+        home = Path(home_env).expanduser()
+    else:
+        home = Path.home() / ".dsh" / "research-os-broker"
+    try:
+        lines = (home / "tokens.jsonl").read_text(errors="ignore").splitlines()
+    except OSError:
+        return set()
+    nonces: set[str] = set()
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(rec, dict) and rec.get("kind") == "consume":
+            nonce = str(rec.get("nonce") or "").strip()
+            if nonce:
+                nonces.add(nonce)
+    return nonces
+
+
 def broker_client():
     """The broker client module when a broker socket is present, else None.
 
@@ -2355,7 +2391,12 @@ class ControlPlane:
         return {"cycles": cycles, "engagement": total}
 
     def _consumed_unrecorded_tokens(self, recorded_ids: set[str]) -> list[dict[str, Any]]:
-        """Latest state per token action_id, keeping only consumed-but-unrecorded ones."""
+        """Latest state per token action_id, keeping only consumed-but-unrecorded ones.
+
+        The receipt join is keyed by `token_nonce`: a consumed token counts as used
+        until an ACTION_RECORDED carries its nonce (the action_id match is kept for
+        legacy records that predate the nonce). Either link proves the receipt landed.
+        """
         path = self._tokens_file()
         if not path.exists():
             return []
@@ -2370,8 +2411,22 @@ class ControlPlane:
             if isinstance(rec, dict) and rec.get("action_id"):
                 key = str(rec["action_id"])
                 states[key] = {**states.get(key, {}), **rec}
-        return [rec for key, rec in states.items()
-                if rec.get("consumed") and key not in recorded_ids]
+        recorded_nonces: set[str] = set()
+        for e in self._read_events():
+            if e.get("type") != "ACTION_RECORDED":
+                continue
+            nonce = str((e.get("payload") or {}).get("token_nonce") or "").strip()
+            if nonce:
+                recorded_nonces.add(nonce)
+        out = []
+        for key, rec in states.items():
+            if not rec.get("consumed") or key in recorded_ids:
+                continue
+            rec_nonce = str(rec.get("nonce") or rec.get("broker_nonce") or "").strip()
+            if rec_nonce and rec_nonce in recorded_nonces:
+                continue
+            out.append(rec)
+        return out
 
     def budget_status(self) -> dict[str, Any]:
         """Limits, counted actions and remaining capacity — the `budget status` seam."""
@@ -2591,7 +2646,28 @@ class ControlPlane:
                     )
             self._validate_refs(refs)
             existing = self._read_events()
-            aid = action.get("id") or f"A-{len(existing) + 1:06d}"
+            if action.get("id"):
+                aid = str(action["id"])
+                if any(e.get("type") == "ACTION_RECORDED" and e.get("entity_id") == aid
+                       for e in existing):
+                    raise ValueError(
+                        f"action id {aid} is already recorded — action ids are unique; "
+                        "re-recording the same receipt is refused (a retry after a failed "
+                        "receipt lands on the same id only while no record exists)"
+                    )
+            else:
+                aid = self._next_action_id(existing)
+            # Nonce provenance: a presented token_nonce must resolve to a prepared
+            # token whenever the store exists — a forged nonce cannot buy a receipt.
+            # An absent nonce stays the legacy path (the audit warns, closure holds
+            # versioned actions to the nonce), so template/manual records keep working.
+            nonce = str(action.get("token_nonce") or "").strip()
+            issued, _consumed = self._known_token_nonces()
+            if nonce and issued and nonce not in issued:
+                raise ValueError(
+                    f"action token_nonce {nonce[:12]}… matches no prepared preflight token — "
+                    "record actions only through the controlled executors (or prepare first)"
+                )
             event = self._append_locked("ACTION_RECORDED", "action", aid, actor=actor,
                                         reason="live-action preflight recorded", payload=action,
                                         cycle_id=action.get("cycle_id"), evidence_refs=refs)
@@ -2599,8 +2675,67 @@ class ControlPlane:
         return event
 
     # ---------- live-action preflight tokens ----------
+    def _next_action_id(self, events: list[dict[str, Any]] | None = None) -> str:
+        """One allocator for `A-` action ids, shared by record and prepare.
+
+        The next id runs one past the highest `A-<n>` already taken — by a recorded
+        action or by a prepared token — so interleaved prepares and records can never
+        mint the same id. Broker `B-` ids live in a separate namespace (the broker
+        ledger) and are ignored here.
+        """
+        maxn = 0
+        for e in (events if events is not None else self._read_events()):
+            if e.get("type") != "ACTION_RECORDED":
+                continue
+            m = re.fullmatch(r"A-(\d+)", str(e.get("entity_id") or ""))
+            if m:
+                maxn = max(maxn, int(m.group(1)))
+        path = self._tokens_file()
+        if path.exists():
+            for line in path.read_text(errors="ignore").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(rec, dict):
+                    m = re.fullmatch(r"A-(\d+)", str(rec.get("action_id") or ""))
+                    if m:
+                        maxn = max(maxn, int(m.group(1)))
+        return f"A-{maxn + 1:06d}"
+
     def _tokens_file(self) -> Path:
         return self.rt / "action-tokens.jsonl"
+
+    def _known_token_nonces(self) -> tuple[set[str], set[str]]:
+        """All vs consumed preflight nonces in the local token store.
+
+        Both the local `nonce` and the broker mirror's `broker_nonce` count: the
+        executor records `token.nonce`, which is the broker nonce in broker mode.
+        Empty when no token was ever prepared (legacy/template workspaces).
+        """
+        issued: set[str] = set()
+        consumed: set[str] = set()
+        path = self._tokens_file()
+        if not path.exists():
+            return issued, consumed
+        for line in path.read_text(errors="ignore").splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            for key in ("nonce", "broker_nonce"):
+                value = str(rec.get(key) or "").strip()
+                if value:
+                    issued.add(value)
+                    if rec.get("consumed"):
+                        consumed.add(value)
+        return issued, consumed
 
     def prepare_action(self, action: dict[str, Any], ttl_seconds: int = 300,
                        actor: str = "controller") -> dict[str, Any]:
@@ -2697,10 +2832,7 @@ class ControlPlane:
                 )
             if client is None:
                 existing = self._read_events()
-                prepared = 0
-                if self._tokens_file().exists():
-                    prepared = sum(1 for line in self._tokens_file().read_text(errors="ignore").splitlines() if line.strip())
-                aid = f"A-{sum(1 for e in existing if e.get('type') == 'ACTION_RECORDED') + prepared + 1:06d}"
+                aid = self._next_action_id(existing)
                 token = {
                     "action_id": aid,
                     "nonce": secrets.token_hex(16),

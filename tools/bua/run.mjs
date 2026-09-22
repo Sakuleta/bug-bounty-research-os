@@ -422,6 +422,12 @@ async function main() {
   if (!root) usage('not inside a Research OS workspace (11_runtime/events.jsonl, 00_control/engagement.yaml or 11_runtime/)')
   insideRoot(root, args['out-dir'], '--out-dir')
   insideRoot(root, args.profile, '--profile')
+  // Token-derived filenames (`<action>-<ts>.png/.bua.json`) must not escape the
+  // out-dir: a forged action id carrying `/`, `..` or control characters fails
+  // closed here, before any capture path is built.
+  if (args.action !== undefined && !/^[A-Za-z0-9_-]{1,64}$/.test(String(args.action))) {
+    usage('--action must match [A-Za-z0-9_-] (1-64 chars)')
+  }
 
   // 1. Scope guard in code — the same seam the control plane and every intercepted
   //    request use: fail fast on the entry URL before the browser starts (exit 4).

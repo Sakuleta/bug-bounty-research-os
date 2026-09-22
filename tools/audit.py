@@ -16,9 +16,10 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from control_plane import (CYCLE_EDGES, EVENT_TYPES, HYP_EDGES, KNOWLEDGE_RESOLUTIONS,  # noqa: E402
                            METHOD_SELF_ATTACK_ROWS, REQUIRED_AUDIT_CLASSES, TECHNIQUE_RESULTS,
-                           ControlPlane, asset_hosts, budget_limits, engagement_assets,
-                           evidence_id_ok, host_in_scope, never_considered_in_window,
-                           normalize_cycle_state, pack_change_problem, review_packet_digest, review_quote_problem, scope_check,
+                           ControlPlane, asset_hosts, broker_consumed_nonces, budget_limits,
+                           engagement_assets, evidence_id_ok, host_in_scope,
+                           never_considered_in_window, normalize_cycle_state, pack_change_problem,
+                           review_packet_digest, review_quote_problem, scope_check,
                            secret_pattern_hits, sha256_file)
 from knowledge_index import index_problem, parse_index, selection_cap, selection_query, top_packs  # noqa: E402
 
@@ -588,6 +589,45 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
                 f"action {e.get('entity_id')} carries no token_nonce (legacy or non-executor record) — "
                 "controlled-executor actions carry the consumed preflight nonce"
             )
+
+    # Action ids are unique receipts: a duplicated action id means two records claim
+    # one identity (the v8.0 concurrent-dispatch race). A duplicate involving any
+    # versioned record is an error; all-legacy duplicates warn.
+    _seen_action_ids: dict[str, bool] = {}
+    for e in events:
+        if e.get("type") != "ACTION_RECORDED":
+            continue
+        aid = str(e.get("entity_id") or "")
+        versioned = bool(e.get("os_version"))
+        if aid in _seen_action_ids:
+            message = (f"duplicate action id {aid} — action receipts are unique; "
+                       "a retry after a failed receipt reuses the id only while no record exists")
+            if versioned or _seen_action_ids[aid]:
+                errors.append(message)
+            else:
+                warnings.append(f"legacy action record (pre-7.3, no os_version): {message}")
+            _seen_action_ids[aid] = _seen_action_ids[aid] or versioned
+        else:
+            _seen_action_ids[aid] = versioned
+
+    # Nonce provenance is consumption, not presence: every recorded token_nonce must
+    # resolve to a consumed token — a consumed record in 11_runtime/action-tokens.jsonl
+    # or, while a broker socket exists, the broker consume ledger. A forged nonce on a
+    # hand-recorded action fails versioned records and warns on legacy ones.
+    _known_issued, _known_consumed = cp._known_token_nonces()
+    _known_consumed |= broker_consumed_nonces()
+    for e in events:
+        if e.get("type") != "ACTION_RECORDED":
+            continue
+        nonce = str((e.get("payload") or {}).get("token_nonce", "")).strip()
+        if not nonce or nonce in _known_consumed:
+            continue
+        message = (f"action {e.get('entity_id')} carries token_nonce {nonce[:12]}… that matches "
+                   "no consumed preflight token — record actions only through the controlled executors")
+        if e.get("os_version"):
+            errors.append(message)
+        else:
+            warnings.append(f"legacy action record (pre-7.3, no os_version): {message}")
 
     # Scope is a live invariant: each recorded action is re-checked against the CURRENT
     # asset list, so a scope narrowed after the fact cannot stay silent. request_shape.url

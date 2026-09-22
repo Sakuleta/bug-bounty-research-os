@@ -216,7 +216,19 @@ def close_workspace(with_action: bool = False, token_nonce: str | None = None) -
             "side_effect": "none", "stop_condition": "stop after the check",
         }
         if token_nonce:
-            action["token_nonce"] = token_nonce
+            # An honest executor flow: prepare a real token, consume it, record with
+            # its nonce — the audit resolves the nonce against consumed tokens.
+            (r / "00_control/engagement.yaml").write_text("scope:\n  gate: none\n")
+            tok = c.prepare_action({
+                **action, "tool_family": "http",
+                "request_shape": {"method": "GET", "url": "https://example.test/api",
+                                  "principal": "researcher-A"},
+            })
+            with (r / "11_runtime/action-tokens.jsonl").open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"action_id": tok["action_id"], "nonce": tok["nonce"],
+                                     "consumed": True,
+                                     "consumed_at": "2026-09-01T00:00:01Z"}) + "\n")
+            action["token_nonce"] = tok["nonce"]
         c.record_action(action)
     (r / "scope-proof.txt").write_text("scope proof: the rehearsal asset stayed inside the recorded boundary\n")
     eid = c.register_evidence("scope-proof.txt", kind="audit", source="researcher-owned",
@@ -704,6 +716,7 @@ check("the digest still covers the raw canonical shape",
 secret_action = {k: v for k, v in base_action.items() if k != "evidence_refs"}
 secret_action["target"] = secret_url
 secret_action["request_shape"] = {"method": "GET", "url": secret_url, "principal": "researcher-A"}
+del secret_action["id"]  # v8.2 W8: action ids are unique — the allocator assigns this receipt
 cp.record_action(secret_action)
 ledger_text = (root / "11_runtime/events.jsonl").read_text()
 check("ACTION_RECORDED payload masks query secrets in url and target",
@@ -3100,6 +3113,99 @@ _kc6c.knowledge_resolve("KP-0001", "APPLIED", "ticket-124")
 _sub6d = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_kr6c)],
                         capture_output=True, text=True)
 check("v8.2 W6: legit APPLIED after a real pack edit audits clean", _sub6d.returncode == 0)
+
+# v8.2 W7: token_nonce provenance — write-side refusal, audit resolution against
+# consumed records, and consumed-but-unrecorded budget accounting keyed by nonce.
+def _w7_root(cap_cycle: int = 50, cap_total: int = 50) -> tuple:
+    r = fresh_root()
+    (r / "00_control/engagement.yaml").write_text(
+        'scope:\n  assets:\n  - "example.test"\n'
+        f"budget:\n  max_actions_per_cycle: {cap_cycle}\n  max_actions_per_engagement: {cap_total}\n")
+    c = ControlPlane(r)
+    c.create_cycle("C-0001", cycle_fixture("C-0001", "nonce probe", root=r))
+    write_objective(r, "C-0001")
+    c.transition_cycle("C-0001", "READY", reason="ready")
+    c.transition_cycle("C-0001", "RUNNING", reason="run")
+    c.create_hypothesis("H-0001", {"cycle_id": "C-0001", "observation": "probe",
+                                   "hypothesis": "probe", "secure_prediction": "denied",
+                                   "vulnerable_prediction": "allowed"})
+    return r, c
+
+
+def _w7_action() -> dict:
+    return {"cycle_id": "C-0001", "target": "https://example.test/api", "scope_status": "IN_SCOPE",
+            "account": "researcher-A", "object_owner": "researcher-A",
+            "purpose": "distinguish authorization behavior", "hypothesis": "H-0001",
+            "expected_secure": "denied", "expected_vulnerable": "unexpected access",
+            "side_effect": "none", "stop_condition": "stop on unsafe behavior", "tool_family": "http",
+            "request_shape": {"method": "GET", "url": "https://example.test/api",
+                              "principal": "researcher-A"}}
+
+
+_nr7, _nc7 = _w7_root()
+_tok7 = _nc7.prepare_action(_w7_action())
+try:
+    _nc7.record_action({**_w7_action(), "token_nonce": "forged-nonce-not-a-real-token"})
+    check("v8.2 W7: record_action refuses a forged token_nonce", False)
+except ValueError as exc:
+    check("v8.2 W7: record_action refuses a forged token_nonce", "token_nonce" in str(exc))
+with (_nr7 / "11_runtime/action-tokens.jsonl").open("a", encoding="utf-8") as _fh:
+    _fh.write(json.dumps({"action_id": _tok7["action_id"], "nonce": _tok7["nonce"],
+                          "consumed": True, "consumed_at": "2026-09-01T00:00:01Z"}) + "\n")
+_nc7.record_action({**_w7_action(), "token_nonce": _tok7["nonce"]})
+check("v8.2 W7: record_action accepts the consumed token nonce",
+      any(e.get("type") == "ACTION_RECORDED" for e in _nc7._read_events()))
+_nr7f, _nc7f = _w7_root()
+_tok7f = _nc7f.prepare_action(_w7_action())
+_nc7f.append("ACTION_RECORDED", "action", _tok7f["action_id"], cycle_id="C-0001",
+             reason="forged receipt fixture",
+             payload={**_w7_action(), "token_nonce": "forged-nonce-not-a-real-token"})
+_sub7 = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nr7f)],
+                       capture_output=True, text=True)
+check("v8.2 W7: the audit errors on a forged token_nonce",
+      _sub7.returncode != 0 and "token_nonce" in (_sub7.stdout + _sub7.stderr))
+# Consumed-but-unrecorded capacity (reviewer D PROBE 1): the receipt-failure path
+# must not reopen budget headroom.
+_nr7b, _nc7b = _w7_root(cap_cycle=1, cap_total=10)
+_tok7b = _nc7b.prepare_action(_w7_action())
+try:
+    _nc7b.prepare_action(_w7_action())
+    check("v8.2 W7: second prepare refused while the token is outstanding", False)
+except ValueError:
+    check("v8.2 W7: second prepare refused while the token is outstanding", True)
+with (_nr7b / "11_runtime/action-tokens.jsonl").open("a", encoding="utf-8") as _fh:
+    _fh.write(json.dumps({"action_id": _tok7b["action_id"], "nonce": _tok7b["nonce"],
+                          "consumed": True, "consumed_at": "2026-09-01T00:00:01Z"}) + "\n")
+check("v8.2 W7: consumed-but-unrecorded still counts against the cap",
+      _nc7b.budget_status()["counts"]["engagement"] == 1)
+try:
+    _nc7b.prepare_action(_w7_action())
+    check("v8.2 W7: receipt failure does not reopen budget headroom", False)
+except ValueError:
+    check("v8.2 W7: receipt failure does not reopen budget headroom", True)
+
+# v8.2 W8: one allocator for A- ids across record and prepare; duplicates refused
+# at the seam and flagged by the audit.
+_nr8, _nc8 = _w7_root()
+_t8a = _nc8.prepare_action(_w7_action())
+_r8a = _nc8.record_action({k: v for k, v in _w7_action().items()})
+_t8b = _nc8.prepare_action(_w7_action())
+check("v8.2 W8: interleaved prepares and records never share an id",
+      len({_t8a["action_id"], _r8a["entity_id"], _t8b["action_id"]}) == 3)
+_nc8.record_action({**_w7_action(), "id": "A-000004"})
+try:
+    _nc8.record_action({**_w7_action(), "id": "A-000004"})
+    check("v8.2 W8: a duplicate explicit action id is refused", False)
+except ValueError as exc:
+    check("v8.2 W8: a duplicate explicit action id is refused", "already recorded" in str(exc))
+_nr8b, _nc8b = _w7_root()
+_nc8b.record_action({**_w7_action(), "id": "A-000004"})
+_nc8b.append("ACTION_RECORDED", "action", "A-000004", cycle_id="C-0001", reason="dup fixture",
+             payload=_w7_action())
+_sub8 = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nr8b)],
+                       capture_output=True, text=True)
+check("v8.2 W8: the audit errors on duplicate action ids",
+      _sub8.returncode != 0 and "duplicate action id A-000004" in (_sub8.stdout + _sub8.stderr))
 
 
 print(f"\n{len(passed)} checks passed")
