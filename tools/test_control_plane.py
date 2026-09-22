@@ -3207,5 +3207,36 @@ _sub8 = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nr8b)],
 check("v8.2 W8: the audit errors on duplicate action ids",
       _sub8.returncode != 0 and "duplicate action id A-000004" in (_sub8.stdout + _sub8.stderr))
 
+# v8.2 W5: provenance drift — hand edits behind the ledger fail the audit until
+# re-recorded; hop entries carry the seam's real reason (node-side, run.test.mjs).
+_dr5 = fresh_root()
+_dc5 = ControlPlane(_dr5)
+_dc5.set_scope(["example.test"], "policy://scope")
+_dc5.set_budget({"max_actions_per_cycle": 5, "max_actions_per_engagement": 50,
+                 "source_reference": "policy://budget"})
+_sub5 = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_dr5)],
+                       capture_output=True, text=True)
+check("v8.2 W5: recorded scope and budget audit clean", _sub5.returncode == 0)
+(_dr5 / "00_control/engagement.yaml").write_text(
+    'scope:\n  assets:\n  - "example.test"\n  - "evil.example"\n'
+    'budget:\n  max_actions_per_cycle: 5\n  max_actions_per_engagement: 50\n')
+_sub5w = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_dr5)],
+                        capture_output=True, text=True)
+check("v8.2 W5: hand-widened scope fails the audit until re-recorded",
+      _sub5w.returncode != 0 and "scope drifted" in (_sub5w.stdout + _sub5w.stderr)
+      and "researchctl scope-set" in (_sub5w.stdout + _sub5w.stderr))
+_dc5.set_scope(["example.test", "evil.example"], "policy://scope-v2", human_reference="ticket-1")
+_sub5r = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_dr5)],
+                        capture_output=True, text=True)
+check("v8.2 W5: re-recorded scope audits clean", _sub5r.returncode == 0)
+(_dr5 / "00_control/engagement.yaml").write_text(
+    'scope:\n  assets:\n  - "example.test"\n  - "evil.example"\n'
+    'budget:\n  max_actions_per_cycle: 1\n  max_actions_per_engagement: 50\n')
+_sub5b = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_dr5)],
+                        capture_output=True, text=True)
+check("v8.2 W5: hand-lowered budget fails the audit until re-recorded",
+      _sub5b.returncode != 0 and "budget caps drifted" in (_sub5b.stdout + _sub5b.stderr)
+      and "researchctl budget set" in (_sub5b.stdout + _sub5b.stderr))
+
 
 print(f"\n{len(passed)} checks passed")

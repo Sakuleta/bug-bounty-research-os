@@ -231,12 +231,15 @@ export function recordBlocked(summary, url, host, reason) {
   }
 }
 
-/** Record one followed out-of-scope redirect hop: capped list + full count, masked. */
+/** Record one followed redirect hop: capped list + full count, masked. The entry
+ *  carries the seam's real decision reason (`out_of_scope`, `host_check_budget_exceeded`,
+ *  `scope_check_failed`, …) — never a blanket out-of-scope label — so audits and
+ *  warnings cannot misread authority saturation as scope drift. */
 const OUT_OF_SCOPE_HOPS_CAP = 50
-export function recordOutOfScopeHop(summary, url, host) {
+export function recordOutOfScopeHop(summary, url, host, reason) {
   summary.out_of_scope_hop_count += 1
   if (summary.out_of_scope_hops.length < OUT_OF_SCOPE_HOPS_CAP) {
-    summary.out_of_scope_hops.push({ host, url_masked: maskUrlSecrets(url) })
+    summary.out_of_scope_hops.push({ host, url_masked: maskUrlSecrets(url), reason: reason || 'out_of_scope' })
   }
 }
 
@@ -256,9 +259,9 @@ export function makeHopCollector(summary, cache, warn = console.log) {
       found.push({ url: hop, host: decision.host })
       if (seen.has(hop)) continue
       seen.add(hop)
-      recordOutOfScopeHop(summary, hop, decision.host)
-      warn(`bua-runner: WARNING followed redirect hop was out of scope (playwright does not route ` +
-        `redirect hops) host=${decision.host || '-'} url=${hop}`)
+      recordOutOfScopeHop(summary, hop, decision.host, decision.reason)
+      warn(`bua-runner: WARNING followed redirect hop denied (${decision.reason || 'out_of_scope'}; ` +
+        `playwright does not route redirect hops) host=${decision.host || '-'} url=${hop}`)
     }
     return found
   }

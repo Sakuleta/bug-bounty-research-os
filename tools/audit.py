@@ -436,6 +436,49 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
                 "record a human-approved raise with `researchctl budget set`"
             )
 
+    # Provenance drift: the live engagement binding must equal the latest provenance
+    # record. A hand edit of 00_control/engagement.yaml behind the ledger's back
+    # (widened assets, flipped gate, lowered caps) mints tokens with unearned
+    # provenance credit — the audit errors until the change is re-recorded through
+    # `researchctl scope-set` / `researchctl budget set`.
+    scope_records = [e for e in events if e.get("type") == "SCOPE_CHANGED"]
+    if scope_records:
+        latest_scope = scope_records[-1]
+        recorded_scope = latest_scope.get("payload") or {}
+        recorded_assets = recorded_scope.get("assets")
+        recorded_gate = str(recorded_scope.get("gate") or "")
+        current_assets = engagement_assets(root)
+        current_gate = scope_check(root, "https://scope-drift-probe.invalid/")["gate"]
+        current_mode = "none" if current_gate == "disabled" else current_gate
+        if (not isinstance(recorded_assets, list) or list(recorded_assets) != (current_assets or [])
+                or recorded_gate != current_mode):
+            message = (
+                "engagement scope drifted from the latest SCOPE_CHANGED record "
+                f"(recorded assets={recorded_assets} gate={recorded_gate or '<missing>'}; "
+                f"current assets={current_assets} gate={current_mode}) — re-record the scope "
+                "with `researchctl scope-set` (human_reference required)"
+            )
+            if latest_scope.get("os_version"):
+                errors.append(message)
+            else:
+                warnings.append(f"legacy scope record (pre-7.3, no os_version): {message}")
+    budget_records = [e for e in events if e.get("type") == "BUDGET_CHANGED"]
+    if budget_records and isinstance(budget, dict):
+        latest_budget = budget_records[-1]
+        recorded_caps = (latest_budget.get("payload") or {}).get("new") or {}
+        drifted = [key for key in ("max_actions_per_cycle", "max_actions_per_engagement")
+                   if recorded_caps.get(key) != budget.get(key)]
+        if drifted:
+            message = (
+                f"engagement budget caps drifted from the latest BUDGET_CHANGED record "
+                f"(recorded={recorded_caps}; current={budget}) on {', '.join(drifted)} — "
+                "re-record the caps with `researchctl budget set` (human_reference required)"
+            )
+            if latest_budget.get("os_version"):
+                errors.append(message)
+            else:
+                warnings.append(f"legacy budget record (pre-7.3, no os_version): {message}")
+
     for hid in cp.all_hypothesis_ids():
         status = None
         created = False

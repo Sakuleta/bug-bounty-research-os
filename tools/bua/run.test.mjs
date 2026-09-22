@@ -357,10 +357,11 @@ const foundHops = await collectHops({ request: () => outHop })
 check('a followed out-of-scope hop is recorded masked and returned as a violation',
   foundHops.length === 1 && hopSummary.out_of_scope_hop_count === 1
   && hopSummary.out_of_scope_hops[0].host === 'evil.example'
+  && hopSummary.out_of_scope_hops[0].reason === 'out_of_scope'
   && hopSummary.out_of_scope_hops[0].url_masked === 'https://evil.example/cb?token=[REDACTED]')
 check('the hop warning keeps the existing loud wording',
   hopWarnings.length === 1
-  && hopWarnings[0].startsWith('bua-runner: WARNING followed redirect hop was out of scope')
+  && hopWarnings[0].startsWith('bua-runner: WARNING followed redirect hop denied (out_of_scope;')
   && hopWarnings[0].includes('evil.example') && !hopWarnings[0].includes('HOPSECRET'))
 await collectHops({ request: () => outHop })
 check('the same hop seen through several responses is recorded once',
@@ -375,6 +376,17 @@ check('out-of-scope hops are counted in full and capped at 50',
   hopSummary.out_of_scope_hop_count === 62 && hopSummary.out_of_scope_hops.length === 50)
 check('no hop secret survives anywhere in the records',
   !JSON.stringify(hopSummary.out_of_scope_hops).includes('HOPSECRET'))
+// v8.2 W5: a hop denied by authority saturation carries the seam's real reason,
+// not a blanket out-of-scope label.
+const saturatedCache = makeScopeCache(async () => ({ gate: 'assets', in_scope: false }), 0)
+const satSummary = { out_of_scope_hops: [], out_of_scope_hop_count: 0 }
+const satWarnings = []
+await makeHopCollector(satSummary, saturatedCache, (line) => satWarnings.push(line))(
+  { request: () => rq('https://elsewhere.example/x') })
+check('a budget-exhausted hop records host_check_budget_exceeded',
+  satSummary.out_of_scope_hop_count === 1
+  && satSummary.out_of_scope_hops[0].reason === 'host_check_budget_exceeded'
+  && satWarnings.length === 1 && satWarnings[0].includes('host_check_budget_exceeded'))
 
 // ---- an older playwright-core without routeWebSocket: warn loudly, record nothing ----
 // A stub module (no real browser) whose context lacks the API exercises the CLI guard.
