@@ -19,6 +19,16 @@ DEFAULT_HOME = Path.home() / ".dsh" / "research-os-broker"
 SOCKET_NAME = "broker.sock"
 MAX_LINE = 1024 * 1024
 
+# The fields covered by a review voucher signature, in signing order. Issue and
+# consume MUST agree byte-for-byte, and the audit's offline HMAC re-verification
+# derives the same projection — single source, imported by broker.py and
+# control_plane.broker_verify_voucher_sig alike. `cycle_id` rides along with
+# `hypothesis_id` because reviews gate cycles: the voucher binds the hypothesis
+# under review, the cycle it belongs to, the axis, the declared reviewer/run
+# and the exact packet.
+VOUCHER_SIGNED_FIELDS = ("workspace", "cycle_id", "hypothesis_id", "axis", "reviewer",
+                         "run_id", "packet_sha256", "nonce", "expires_at")
+
 
 class BrokerUnavailable(Exception):
     """The broker socket is absent, unreachable, timed out or answered garbage."""

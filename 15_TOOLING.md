@@ -447,7 +447,7 @@ install is an unenforced workspace. To disable it, delete its row in
 
 ### Policy broker (scope/token authority outside the workspace, optional)
 
-`tools/broker/` runs a stdlib Unix-socket daemon (`python3 tools/broker/broker.py --serve`, or `researchctl broker serve`) that owns what workspace files cannot be trusted with: the scope snapshot (`<home>/policies/<sha256(workspace)>.json`), the HMAC signing key (`<home>/key`, 0600, never leaves the home), the single-use mint/consume ledger (`tokens.jsonl`) and every decision (`audit.log`). Home is `RESEARCH_OS_BROKER_HOME` or `~/.dsh/research-os-broker`.
+`tools/broker/` runs a stdlib Unix-socket daemon (`python3 tools/broker/broker.py --serve`, or `researchctl broker serve`) that owns what workspace files cannot be trusted with: the scope snapshot (`<home>/policies/<sha256(workspace)>.json`), the HMAC signing key (`<home>/key`, 0600, consulted in place by same-UID OS processes and never copied elsewhere), the single-use mint/consume ledger (`tokens.jsonl`) and every decision (`audit.log`). Home is `RESEARCH_OS_BROKER_HOME` or `~/.dsh/research-os-broker`.
 
 - `researchctl scope-set` pushes the recorded policy (including the workspace budget caps) to the broker whenever the socket is present; a failing push raises (fail closed).
 - `researchctl prepare` refuses unless the broker holds a policy for the workspace, and mints the token there (`B-…` carrying `broker_sig`/`broker_nonce`/`broker_workspace`); the broker re-checks scope, the target host, TTL bounds (1–3600 s, default 300) and the action budget from its own mint ledger.
@@ -481,11 +481,15 @@ The DSH plugin's egress gate is advisory interception at the tool layer; interpr
   host re-check.
 - Scope checks are evaluated against the current assets: actions recorded under an
   earlier scope are downgraded to a warning by the audit, not re-legalized.
-- The event chain is unkeyed: a full ledger rewrite that recomputes every `event_hash`
-  from scratch is undetectable, and a fabricated ledger replays as clean. The stamp is
-  monotone (once an event carries `os_version`, every later event must; the audit errors
+- The event chain is keyed while a broker home holds a key and unkeyed otherwise:
+  broker-mode events carry `"keyed": true` with an HMAC hash the audit re-verifies
+  against the home key (plus voucher signatures and broker consumption), so a full
+  ledger rewrite or a transplanted workspace fails verification there. In local
+  no-broker mode the chain stays unkeyed: a full ledger rewrite that recomputes every
+  `event_hash` from scratch is undetectable, and a fabricated ledger replays as clean.
+  The stamp is monotone (once an event carries `os_version`, every later event must; the audit errors
   on a regression), but wholesale re-stamping or stripping is accepted by design — the
-  chain proves accidental corruption and lazy tampering, not adversarial authorship.
+  unkeyed chain proves accidental corruption and lazy tampering, not adversarial authorship.
   Detect that threat by cross-checking out-of-band copies of the ledger, not by reading it.
 - `scope-set` is agent-invocable; `human_reference` is procedural friction, not
   cryptographic proof.

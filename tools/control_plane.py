@@ -9,6 +9,7 @@ Standard library only.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -997,6 +998,89 @@ def _broker_socket_hint() -> Path | None:
     return base / "broker.sock"
 
 
+def _broker_home() -> Path:
+    """Broker home discovery shared by every broker-home consult.
+
+    Same discovery as the client (`RESEARCH_OS_BROKER_SOCKET` else the socket under
+    `RESEARCH_OS_BROKER_HOME`, default `~/.dsh/research-os-broker`): the key and the
+    consume ledger sit next to the socket.
+    """
+    sock_env = os.environ.get("RESEARCH_OS_BROKER_SOCKET")
+    home_env = os.environ.get("RESEARCH_OS_BROKER_HOME")
+    if sock_env:
+        return Path(sock_env).expanduser().parent
+    if home_env:
+        return Path(home_env).expanduser()
+    return Path.home() / ".dsh" / "research-os-broker"
+
+
+def broker_key() -> bytes | None:
+    """The broker HMAC key, or None when no broker home holds one.
+
+    Same-UID consult only: the key file stays in the broker home (0600, created
+    once); the control plane keys the ledger hash chain with it and the audit
+    re-verifies keyed hashes and voucher signatures against it. None means local
+    no-broker mode — the chain stays unkeyed and vouchers stay unverifiable
+    (documented KNOWN-LIMIT, not an error).
+    """
+    try:
+        key = (_broker_home() / "key").read_bytes()
+    except OSError:
+        return None
+    return key or None
+
+
+def broker_review_consumed() -> set[str] | None:
+    """Voucher nonces the broker review-consume ledger holds, or None when unknown.
+
+    None (no broker ledger file) means local mode — the audit keeps its binding
+    cross-checks but cannot prove broker consumption. A present ledger is
+    authoritative: every attested voucher nonce on a merged packet must appear.
+    """
+    try:
+        lines = (_broker_home() / "tokens.jsonl").read_text(errors="ignore").splitlines()
+    except OSError:
+        return None
+    nonces: set[str] = set()
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(rec, dict) and rec.get("kind") == "review-consume":
+            nonce = str(rec.get("nonce") or "").strip()
+            if nonce:
+                nonces.add(nonce)
+    return nonces
+
+
+def broker_verify_voucher_sig(voucher: dict[str, Any]) -> bool | None:
+    """Verify a review voucher's HMAC against the broker key, or None when unknown.
+
+    True means issued-by-this-broker untampered; False means forged or rebound
+    (fail closed). None means no broker key is readable — local mode keeps the
+    audit's binding cross-checks but cannot prove issuance (documented
+    KNOWN-LIMIT, not an error).
+    """
+    key = broker_key()
+    if key is None:
+        return None
+    if not isinstance(voucher, dict):
+        return False
+    from broker.client import VOUCHER_SIGNED_FIELDS
+    try:
+        expected = hmac.new(
+            key,
+            _json_dump({field: voucher.get(field) for field in VOUCHER_SIGNED_FIELDS}).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+    except (TypeError, ValueError):
+        return False
+    return hmac.compare_digest(expected, str(voucher.get("sig") or ""))
+
+
 def broker_consumed_nonces() -> set[str]:
     """Nonces the broker consume ledger holds, or empty when unavailable.
 
@@ -1005,15 +1089,7 @@ def broker_consumed_nonces() -> set[str]:
     sits next to the socket. Unreadable/missing means "unknown", never an error —
     the local token store remains the primary provenance source.
     """
-    home: Path | None = None
-    sock_env = os.environ.get("RESEARCH_OS_BROKER_SOCKET")
-    home_env = os.environ.get("RESEARCH_OS_BROKER_HOME")
-    if sock_env:
-        home = Path(sock_env).expanduser().parent
-    elif home_env:
-        home = Path(home_env).expanduser()
-    else:
-        home = Path.home() / ".dsh" / "research-os-broker"
+    home = _broker_home()
     try:
         lines = (home / "tokens.jsonl").read_text(errors="ignore").splitlines()
     except OSError:
@@ -1078,6 +1154,12 @@ class ControlPlane:
             self.os_version = (self.root / "OS_VERSION").read_text(errors="ignore").strip() or "unknown"
         except OSError:
             self.os_version = "unknown"
+        # Ledger key: the broker HMAC key when a broker home holds one, read once
+        # here. Keyed appends mark the event (`"keyed": true`) and HMAC the hash
+        # chain with it, binding the ledger to this broker home — a transplanted
+        # or hand-edited ledger fails verification. None means local no-broker
+        # mode: the chain stays unkeyed (documented KNOWN-LIMIT).
+        self.ledger_key = broker_key()
         self.rt.mkdir(parents=True, exist_ok=True)
 
     # ---------- ledger primitives ----------
@@ -1098,9 +1180,18 @@ class ControlPlane:
         return out
 
     @staticmethod
-    def _event_hash(event: dict[str, Any]) -> str:
+    def _event_hash(event: dict[str, Any], key: bytes | None = None) -> str:
+        """Hash one event body: HMAC with the broker key when keyed, sha256 local.
+
+        The `"keyed": true` marker is part of the hashed body, so a marker added
+        or stripped afterwards invalidates the hash either way. Callers pass the
+        control plane's `ledger_key` (None in local no-broker mode).
+        """
         body = {k: v for k, v in event.items() if k != "event_hash"}
-        return hashlib.sha256(_json_dump(body).encode("utf-8")).hexdigest()
+        data = _json_dump(body).encode("utf-8")
+        if key is not None:
+            return hmac.new(key, data, hashlib.sha256).hexdigest()
+        return hashlib.sha256(data).hexdigest()
 
     def _append_locked(
         self,
@@ -1140,7 +1231,11 @@ class ControlPlane:
             "payload": redact(payload) if payload is not None else {},
             "prev_hash": previous_hash,
         }
-        event["event_hash"] = self._event_hash(event)
+        if self.ledger_key is not None:
+            event["keyed"] = True
+            event["event_hash"] = self._event_hash(event, self.ledger_key)
+        else:
+            event["event_hash"] = self._event_hash(event)
         line = _json_dump(event) + "\n"
         fd = os.open(self.events, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
