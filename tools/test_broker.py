@@ -1227,6 +1227,35 @@ try:
     check("v8.2 W1: packet edited after issue is refused", False)
 except ValueError as exc:
     check("v8.2 W1: packet edited after issue is refused", "digest" in str(exc))
+# Backlog B3: producer_run_id rides the voucher digest — a post-issue edit or
+# omission invalidates the voucher (otherwise stripping the producer defeats the
+# producer-run self-review refusal at merge).
+_p_prod = _w1_packet(_ve3, _vq3, "objective", "rev-a", "run-1")
+_p_prod["producer_run_id"] = "run-prod"
+check("backlog B3: the digest binds producer_run_id",
+      _w1_digest(_p_prod) != _w1_digest({k: v for k, v in _p_prod.items()
+                                        if k != "producer_run_id"}))
+_w1_issue(_vr3, _p_prod, "H-0001")
+_vc3.merge_worker(dict(_p_prod))
+check("backlog B3: the intact producer packet merges", True)
+_p_strip = _w1_packet(_ve3, _vq3, "objective", "rev-a", "run-1")
+_p_strip["producer_run_id"] = "run-prod"
+_w1_issue(_vr3, _p_strip, "H-0001")
+_stripped = {k: v for k, v in _p_strip.items() if k != "producer_run_id"}
+try:
+    _vc3.merge_worker(_stripped)
+    check("backlog B3: producer_run_id stripped after issue is refused", False)
+except ValueError as exc:
+    check("backlog B3: producer_run_id stripped after issue is refused", "digest" in str(exc))
+_p_swap = _w1_packet(_ve3, _vq3, "objective", "rev-a", "run-1")
+_p_swap["producer_run_id"] = "run-prod"
+_w1_issue(_vr3, _p_swap, "H-0001")
+_swapped = dict(_p_swap, producer_run_id="run-other")
+try:
+    _vc3.merge_worker(_swapped)
+    check("backlog B3: producer_run_id rewritten after issue is refused", False)
+except ValueError as exc:
+    check("backlog B3: producer_run_id rewritten after issue is refused", "digest" in str(exc))
 stop_broker(_w1_proc)
 set_home(HOME)
 

@@ -716,8 +716,11 @@ def review_packet_digest(packet: dict[str, Any]) -> str:
 
     The reviewing run hashes this exact projection when asking the broker for a
     voucher (`review.issue ... packet_sha256`); `merge_worker` and the audit
-    recompute it, so a voucher cannot move to an edited packet. `_json_dump` is
-    the shared canonicalization (sorted keys, compact separators).
+    recompute it, so a voucher cannot move to an edited packet. `producer_run_id`
+    rides the digest: a post-issue edit or omission of the producer invalidates
+    the voucher, so the producer-run self-review refusal cannot be defeated by
+    stripping the field after issue. `_json_dump` is the shared canonicalization
+    (sorted keys, compact separators).
     """
     review = dict(packet.get("review") or {})
     review.pop("attestation", None)
@@ -725,6 +728,7 @@ def review_packet_digest(packet: dict[str, Any]) -> str:
         "cycle_id": packet.get("cycle_id"),
         "evidence_refs": packet.get("evidence_refs"),
         "next_step": packet.get("next_step"),
+        "producer_run_id": packet.get("producer_run_id"),
         "review": review,
     }
     return hashlib.sha256(_json_dump(projection).encode("utf-8")).hexdigest()
