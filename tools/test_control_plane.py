@@ -2960,4 +2960,24 @@ check("researchctl knowledge resolve --gate wires through the canonical seam",
       sub.returncode == 0 and json.loads(sub.stdout)["payload"]["gate"] == "G-0001")
 
 
+# v8.2 W3: lock truthfulness — a live holder is never reclaimed, dead owners are.
+import os as _os, time as _time
+from control_plane import _lock as _w3_lock
+_w3_root = fresh_root()
+_w3_lockdir = _w3_root / "11_runtime" / ".control-plane.lock"
+_w3_lockdir.mkdir()
+(_w3_lockdir / "owner").write_text(f"{_os.getpid()} {_time.time() - 10000}\n")
+try:
+    with _w3_lock(_w3_root, timeout=0.3):
+        check("v8.2 W3: live holder past the horizon is not reclaimed", False)
+except TimeoutError:
+    check("v8.2 W3: live holder past the horizon is not reclaimed", True)
+import shutil as _shutil
+_shutil.rmtree(_w3_lockdir, ignore_errors=True)
+_w3_lockdir.mkdir()
+(_w3_lockdir / "owner").write_text(f"99999999 {_time.time() - 10000}\n")
+with _w3_lock(_w3_root, timeout=2.0, stale_seconds=0.0):
+    check("v8.2 W3: dead owner is reclaimed", True)
+
+
 print(f"\n{len(passed)} checks passed")

@@ -703,13 +703,16 @@ _STALE_LOCK_SECONDS = 120.0
 
 
 @contextmanager
-def _lock(root: Path, timeout: float = 10.0):
+def _lock(root: Path, timeout: float = 10.0, stale_seconds: float | None = None):
     """Cross-process lock implemented with atomic mkdir plus stale-lock recovery.
 
-    A crashed holder must not brick the workspace: the lock records its owner pid
-    and heartbeat, and a lock whose owner is dead or older than the staleness
-    horizon is reclaimed instead of blocking every future mutation.
+    A crashed holder must not brick the workspace: the lock records its owner pid.
+    A lock whose owner process is still alive is never reclaimed, regardless of
+    age; only a lock whose owner is dead (or unreadable, falling back to the
+    lock dir mtime) and older than the staleness horizon is reclaimed.
+    `stale_seconds` overrides the module default for fast tests.
     """
+    horizon = _STALE_LOCK_SECONDS if stale_seconds is None else stale_seconds
     lock = root / "11_runtime" / ".control-plane.lock"
     lock.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
@@ -725,10 +728,14 @@ def _lock(root: Path, timeout: float = 10.0):
             alive = False
             try:
                 pid_s, ts_s = (lock / "owner").read_text().split()
-                alive = _pid_alive(int(pid_s)) and (time.time() - float(ts_s)) < _STALE_LOCK_SECONDS
+                owner_pid = int(pid_s)
+                if _pid_alive(owner_pid):
+                    alive = True
+                else:
+                    alive = (time.time() - float(ts_s)) < horizon
             except (OSError, ValueError):
                 try:
-                    alive = (time.time() - lock.stat().st_mtime) < _STALE_LOCK_SECONDS
+                    alive = (time.time() - lock.stat().st_mtime) < horizon
                 except OSError:
                     alive = False
             if not alive:
