@@ -36,6 +36,12 @@ sandbox-exec -f /tmp/research-os-egress.sb -- <host command>
   are rejected: the profile never uses DNS (SBPL has no resolution step, so a name would
   either be rejected by the parser or pin whatever it resolved to at compile time).
   IPv6 must be bracketed (`[::1]:8080`).
+- `--broker-socket PATH` (repeatable, sorted, absolute) allows `AF_UNIX` connects to a
+  policy-broker socket: `(allow network-outbound (remote unix-socket (path-literal …)))`.
+  The path is symlink-resolved at generation time (SBPL literals match exactly what the
+  kernel sees — a symlinked path never matches). Without it the broker socket is
+  unreachable inside the sandbox, so wrap with the broker's socket to keep broker mode:
+  `generate_profile.py --workspace "$PWD" --broker-socket ~/.dsh/research-os-broker/broker.sock`.
 - `--print` (default) vs `--out PATH` (atomic temp + `os.replace`, no partial profiles).
 - `--literal-ips` / `--no-literal-ips` force the emission mode; the default probes the
   host's SBPL parser with one compile check whose profile allows the exec plumbing
@@ -109,7 +115,7 @@ machine run, reported as SKIP when the environment cannot run it).
 
 | file | role |
 | --- | --- |
-| `generate_profile.py` | deterministic SBPL generator (`--print` / `--out`, `--allow`, `--workspace`) |
+| `generate_profile.py` | deterministic SBPL generator (`--print` / `--out`, `--allow`, `--workspace`, `--broker-socket`) |
 | `selftest.py` | runs the real containment proof on this machine (`--json`) |
 | `../test_containment.py` | generator + selftest suite (`check()` style, non-zero on failure) |
 | `README.md` | this document |

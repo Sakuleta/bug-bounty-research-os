@@ -82,7 +82,8 @@ print(cfg["prefix"] + json.dumps(out))
 def skip_reason(platform: str, sandbox_exec_present: bool, sandbox_exec: str = "") -> str | None:
     """The reason this machine cannot run the containment proof, or None."""
     if platform != "darwin":
-        return f"sandbox-exec is a macOS (darwin) API; this platform is {platform!r}"
+        return (f"sandbox-exec is a macOS (darwin) API; this platform is {platform!r} — "
+                f"no --sandbox-exec binary can run the proof here")
     if not sandbox_exec_present:
         return (f"sandbox-exec not found at {sandbox_exec or 'the default path'} "
                 f"(pass --sandbox-exec PATH on macOS builds that ship it)")

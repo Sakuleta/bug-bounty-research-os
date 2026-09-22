@@ -115,6 +115,19 @@ loopback_allow = gen("--print", "--literal-ips", "--allow", "127.0.0.1:8080")
 check("loopback --allow is accepted",
       loopback_allow.returncode == 0 and '(remote ip "127.0.0.1:8080")' in loopback_allow.stdout)
 
+# --- generator: --broker-socket AF_UNIX allowance (broker composition) --------
+
+broker_sock = str(workspace / "broker.sock")
+broker_real = os.path.realpath(broker_sock)
+brokered = build_profile(workspaces=[str(workspace)], broker_sockets=[broker_sock])
+check("a --broker-socket path renders as a unix-socket network-outbound rule",
+      f'(allow network-outbound (remote unix-socket (path-literal "{broker_real}")))' in brokered)
+r = gen("--print", "--broker-socket", broker_sock)
+check("--broker-socket renders through the CLI",
+      r.returncode == 0 and f'(remote unix-socket (path-literal "{broker_real}")' in r.stdout)
+plain = build_profile(workspaces=[str(workspace)])
+check("no unix-socket rule without --broker-socket", "unix-socket" not in plain)
+
 # --- generator: rejection paths ---------------------------------------------
 
 r = gen("--print", "--allow", "evil.example:443")
@@ -238,6 +251,8 @@ else:
 check("skip_reason is None on darwin with sandbox-exec", selftest_mod.skip_reason("darwin", True) is None)
 check("skip_reason names the platform on non-darwin",
       "darwin" in (selftest_mod.skip_reason("linux", True) or ""))
+check("skip_reason names the sandbox-exec knob on non-darwin",
+      "--sandbox-exec" in (selftest_mod.skip_reason("linux", True) or ""))
 check("skip_reason names the missing binary",
       "sandbox-exec" in (selftest_mod.skip_reason("darwin", False) or ""))
 
