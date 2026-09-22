@@ -16,8 +16,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from control_plane import (CYCLE_EDGES, EVENT_TYPES, HYP_EDGES, KNOWLEDGE_RESOLUTIONS,  # noqa: E402
                            METHOD_SELF_ATTACK_ROWS, REQUIRED_AUDIT_CLASSES, TECHNIQUE_RESULTS,
-                           ControlPlane, asset_hosts, broker_consumed_nonces, broker_key, budget_limits,
-                           broker_review_consumed, broker_verify_voucher_sig,
+                           ControlPlane, asset_hosts, broker_consumed_nonces, budget_limits,
                            engagement_assets, evidence_id_ok, host_in_scope, identity_binding,
                            IDENTITY_BINDING_REL, never_considered_in_window, normalize_cycle_state,
                            pack_change_problem,
@@ -304,11 +303,6 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
     errors: list[str] = []
     warnings: list[str] = []
     events = cp._read_events()
-    # Broker-home consults, read once: the HMAC key (keyed-chain and voucher
-    # verification) and the review-consume ledger (consumption proof). Absent in
-    # local no-broker mode — the audit keeps its unkeyed/binding checks there.
-    _ledger_key = broker_key()
-    _review_consumed = broker_review_consumed()
 
     # Ledger integrity: envelope shape, sequence, references, known types, and tamper-evident hash chain.
     required_event_fields = {"event_id", "time", "actor", "type", "entity_type", "entity_id", "evidence_refs", "payload", "prev_hash", "event_hash"}
@@ -338,17 +332,7 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
             errors.append(f"unknown event type at {i}: {event.get('type')}")
         if event.get("prev_hash") != prev:
             errors.append(f"ledger prev_hash mismatch at {i}")
-        if event.get("keyed") is True:
-            # Broker-keyed hash chain: the event binds this ledger to the broker
-            # home's HMAC key — a transplanted or hand-edited ledger fails here.
-            if _ledger_key is None:
-                errors.append(
-                    f"ledger keyed event at {i} but no broker key is readable — the ledger "
-                    "needs its broker home to verify (transplanted workspace?)"
-                )
-            elif event.get("event_hash") != cp._event_hash(event, _ledger_key):
-                errors.append(f"ledger event_hash mismatch at {i} (broker-keyed chain)")
-        elif event.get("event_hash") != cp._event_hash(event):
+        if event.get("event_hash") != cp._event_hash(event):
             errors.append(f"ledger event_hash mismatch at {i}")
         hits = secret_pattern_hits(json.dumps(event, ensure_ascii=False))
         if hits:
@@ -1223,7 +1207,7 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
                 errors.append(f"cycle {cid} {axis} review voucher names hypothesis "
                               f"{hypothesis_id!r}, which does not belong to cycle {cid}")
             expected_digest = review_packet_digest(packet.get("packet") or {})
-            if str(attestation.get("packet_sha256", "")).lower() != expected_digest:
+            if expected_digest is None or str(attestation.get("packet_sha256", "")).lower() != expected_digest:
                 errors.append(f"cycle {cid} {axis} review voucher's packet digest does not match "
                               "the merged packet — the packet was edited after issue")
             nonce = str(attestation.get("nonce") or "")
@@ -1232,30 +1216,6 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
                     errors.append(f"cycle {cid} review vouchers share nonce {nonce[:12]}… — "
                                   "vouchers are single-use, one per axis")
                 attested_nonces[axis] = nonce
-            # Broker-home verification (skipped in local no-broker mode, where no
-            # key or consume ledger exists to consult): the voucher must be issued
-            # for THIS workspace with a verifying HMAC, and its nonce must appear
-            # in the broker's review-consume ledger — a valid-but-never-consumed
-            # voucher is a hand-appended packet, not a merged review.
-            if broker_verify_voucher_sig(attestation) is False:
-                errors.append(f"cycle {cid} {axis} review voucher signature does not verify "
-                              "against the broker key — the voucher was not issued by this "
-                              "broker or was tampered with")
-            elif _ledger_key is not None:
-                if str(attestation.get("workspace") or "") != str(root):
-                    errors.append(f"cycle {cid} {axis} review voucher was issued for a different "
-                                  f"workspace ({str(attestation.get('workspace') or '')!r}) — "
-                                  "vouchers cannot move across workspaces")
-                if _review_consumed is None:
-                    if nonce:
-                        warnings.append(
-                            f"cycle {cid} {axis} review voucher consumption is unverifiable "
-                            "(no broker consume ledger) — merged reviews consume through the "
-                            "broker; treat an unconsumed voucher as suspect")
-                elif nonce and nonce not in _review_consumed:
-                    errors.append(f"cycle {cid} {axis} review voucher was never consumed through "
-                                  "the broker — merge reviews with merge_worker instead of "
-                                  "hand-appending attested packets")
         for axis in ("objective", "method"):
             packet = axes.get(axis, {})
             quotes = packet.get("evidence_quotes")

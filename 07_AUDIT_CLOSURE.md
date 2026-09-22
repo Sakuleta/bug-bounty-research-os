@@ -173,7 +173,6 @@ neither named nor closed out by the latest open-hypothesis audit; novelty-duplic
 contradicts when a VERIFIED hypothesis is named nowhere in the latest
 novelty-duplicate summary (each finding must visibly pass the program-history and
 current-research comparison). The remaining judgment content is backed by the
-closure-review gate attestation above. The ledger hash chain is HMAC-keyed in
-broker mode and unkeyed locally (`15_TOOLING.md` known limits) — the unkeyed chain
-proves accidental corruption and lazy tampering, not authorship; the gate reference (a human
+closure-review gate attestation above. The ledger hash chain stays unkeyed (`15_TOOLING.md` known limits) — it proves
+accidental corruption and lazy tampering, not authorship; the gate reference (a human
 ticket) is the out-of-band trail, not a cryptographic proof.

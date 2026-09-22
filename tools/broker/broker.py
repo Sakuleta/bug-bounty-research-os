@@ -3,8 +3,7 @@
 ledger and decision audit live OUTSIDE the agent-writable workspace.
 
 The broker owns what workspace-local files cannot be trusted with: the scope snapshot
-(`policies/<wsid>.json`), the HMAC signing key (`key`, 0600, consulted in place by
-same-UID OS processes and never copied elsewhere),
+(`policies/<wsid>.json`), the HMAC signing key (`key`, 0600, never leaves this home),
 the mint/consume ledger (`tokens.jsonl`) and every decision (`audit.log`). An agent
 that edits `00_control/engagement.yaml` or `11_runtime/action-tokens.jsonl` cannot
 widen the broker policy, forge a signature or replay a consumed nonce.
@@ -37,7 +36,7 @@ from typing import Any
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))          # tools/broker (client.py)
 sys.path.insert(0, str(_HERE.parent))   # tools (control_plane.py)
-from client import VOUCHER_SIGNED_FIELDS, broker_home, workspace_key  # noqa: E402
+from client import broker_home, workspace_key  # noqa: E402
 from control_plane import (  # noqa: E402
     _json_dump, asset_hosts, canonical_request_shape, host_in_scope,
 )
@@ -60,6 +59,12 @@ BUDGET_KEYS = ("max_actions_per_cycle", "max_actions_per_engagement")
 # The fields covered by the token signature, in signing order. Mint and consume MUST
 # agree byte-for-byte, so both derive the signed payload from this one tuple.
 _SIGNED_FIELDS = ("workspace", "action_id", "nonce", "digest", "tool_family", "expires_at")
+# The fields covered by a review voucher signature, in signing order. Issue and
+# consume MUST agree byte-for-byte. `cycle_id` rides along with `hypothesis_id`
+# because reviews gate cycles: the voucher binds the hypothesis under review, the
+# cycle it belongs to, the axis, the declared reviewer/run and the exact packet.
+_VOUCHER_SIGNED_FIELDS = ("workspace", "cycle_id", "hypothesis_id", "axis", "reviewer",
+                          "run_id", "packet_sha256", "nonce", "expires_at")
 _ASSET_REFUSED = re.compile(r"[\s\"'\\#\x00-\x1f\x7f]")
 
 
@@ -156,8 +161,7 @@ class Broker:
 
     # ---------- key + files ----------
     def key(self) -> bytes:
-        """The 32-byte HMAC key: created once, 0600, consulted in place by same-UID
-        OS processes (control plane keying, audit verification) and never copied elsewhere."""
+        """The 32-byte HMAC key: created once, 0600, never leaves the broker home."""
         path = self.home / KEY_NAME
         if not path.exists():
             try:
@@ -530,7 +534,7 @@ class Broker:
                 "packet_sha256": packet_sha256, "nonce": nonce,
                 "expires_at": _expiry_iso(ttl),
             }
-            voucher["sig"] = self._sign({key: voucher[key] for key in VOUCHER_SIGNED_FIELDS})
+            voucher["sig"] = self._sign({key: voucher[key] for key in _VOUCHER_SIGNED_FIELDS})
             self._append_jsonl(self.tokens_file, {
                 "kind": "review-issue", **voucher, "issued_at": _now_iso()})
         return {"ok": True, "voucher": voucher}, (
@@ -554,12 +558,12 @@ class Broker:
             if record.get("workspace") != workspace:
                 raise Refused(
                     f"voucher {nonce[:12]}… was issued for a different workspace ({record.get('workspace')})")
-            expected = self._sign({key: record.get(key) for key in VOUCHER_SIGNED_FIELDS})
+            expected = self._sign({key: record.get(key) for key in _VOUCHER_SIGNED_FIELDS})
             if not hmac.compare_digest(expected, sig):
                 raise Refused(
                     "voucher signature does not verify — the voucher was not issued by this broker or was tampered with")
-            presented = {key: voucher.get(key) for key in VOUCHER_SIGNED_FIELDS if key != "sig"}
-            issued = {key: record.get(key) for key in VOUCHER_SIGNED_FIELDS if key != "sig"}
+            presented = {key: voucher.get(key) for key in _VOUCHER_SIGNED_FIELDS if key != "sig"}
+            issued = {key: record.get(key) for key in _VOUCHER_SIGNED_FIELDS if key != "sig"}
             if presented != issued:
                 raise Refused("voucher fields do not match the issued voucher — rebound or edited vouchers are refused")
             if str(record.get("expires_at") or "") <= _now_iso():

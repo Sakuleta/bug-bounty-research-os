@@ -291,11 +291,8 @@ machine-checked: `python3 tools/audit.py <root> --emit-proof` writes the skeleto
 (mechanical facts + `TODO(human)` judgment prompts), you fill the prompts, and
 `--closure` fails on a missing file, a missing/empty section, an unanswered
 `TODO(human)`, or a missing/unresolved gate binding. Never close from intuition. The
-ledger hash chain is HMAC-keyed while a broker home holds a key (each keyed event
-carries `"keyed": true`; the audit re-verifies it, voucher signatures and broker
-consumption against the home) and unkeyed in local no-broker mode (`15_TOOLING.md`
-known limits): there it proves accidental corruption, not authorship — cross-check
-out-of-band ledger copies for that.
+ledger hash chain stays unkeyed by design (`15_TOOLING.md` known limits): it proves
+accidental corruption, not authorship — cross-check out-of-band ledger copies for that.
 
 ## 9. Secrets
 

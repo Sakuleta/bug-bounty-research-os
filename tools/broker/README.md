@@ -22,7 +22,7 @@ researchctl / enforcer ──newline JSON over <home>/broker.sock──▶ broke
 | artifact | workspace copy | broker copy | why |
 | --- | --- | --- | --- |
 | scope policy | `00_control/engagement.yaml` (human binding) | `policies/<sha256(workspace)>.json` | narrowing/widening the file cannot change what the broker mints |
-| signing key | — | `key` (0600, created once, consulted in place by same-UID OS processes) | a workspace-local edit cannot forge a signature |
+| signing key | — | `key` (0600, created once, never leaves the home) | a workspace-local edit cannot forge a signature |
 | token ledger | `11_runtime/action-tokens.jsonl` | `tokens.jsonl` | the broker refuses a replayed nonce from its own log |
 | decision audit | enforcer log | `audit.log` | refusals and mints are recorded outside the agent's reach |
 
