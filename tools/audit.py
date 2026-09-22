@@ -740,9 +740,10 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
             warnings.append(f"legacy action record (pre-7.3, no os_version): {message}")
 
     # Identity binding: the workspace declares its one research identity; recorded
-    # action accounts must carry it. No binding file (or a placeholder-only one, as
-    # templates ship) warns; a garbled binding errors; a mismatched account on a
-    # versioned action errors (legacy warns).
+    # action accounts must carry it — unless the binding itself disables matching
+    # (`session_must_match_identity: false`, honored by prepare too). No binding
+    # file (or a placeholder-only one, as templates ship) warns; a garbled binding
+    # errors; a mismatched account on a versioned action errors (legacy warns).
     binding = identity_binding(root)
     if isinstance(binding, str):
         errors.append(
@@ -753,6 +754,11 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
         warnings.append(
             "no declared research identity binding (00_control/identity-binding.yaml "
             "missing or placeholder-only) — record the engagement identity before live work"
+        )
+    elif not binding["session_must_match_identity"]:
+        warnings.append(
+            "identity binding declares an account but session_must_match_identity is false — "
+            "recorded action accounts are not matched against the binding (prepare allows any account)"
         )
     else:
         reference = binding["account_reference"]

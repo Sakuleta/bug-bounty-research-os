@@ -3467,6 +3467,26 @@ _sub4r = subprocess.run(
 check("v8.2 fix M4: researchctl names the undecodable binding malformed",
       _sub4r.returncode != 0 and "malformed" in (_sub4r.stdout + _sub4r.stderr))
 
+# Backlog B1: the audit honors session_must_match_identity: false — the same
+# mismatched accounts prepare allows must not fail the audit (write-side/audit
+# parity; no test covered the flag).
+_nrmm, _ncmm = _w2_root(
+    "binding_version: 1\nengagement: probe\nplatform: DIRECT\nprogram: Probe\n"
+    "expected_identity:\n  public_handle: researcher-x\n  account_reference: acct-binding-1\n"
+    "session:\n  browser_profile: lab/bua-prog\n  session_must_match_identity: false\n"
+    "  cross_engagement_session_reuse: false\n")
+try:
+    _ncmm.prepare_action({**_w7_action(), "account": "other-acct"})
+    check("backlog B1: prepare allows a mismatched account when matching is off", True)
+except ValueError:
+    check("backlog B1: prepare allows a mismatched account when matching is off", False)
+_ncmm.record_action({**_w7_action(), "account": "other-acct"})
+_submm = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nrmm)],
+                        capture_output=True, text=True)
+check("backlog B1: the audit stays clean on mismatched accounts when matching is off",
+      _submm.returncode == 0
+      and "does not match" not in (_submm.stdout + _submm.stderr))
+
 # Backlog B9: a non-file at the binding path (directory, fifo, dangling link)
 # is a garbled contract, not an absent one — fail closed, never warn-and-allow.
 _nrbf, _ncbf = _w2_root("expected_identity:\n  account_reference: alice\n")
