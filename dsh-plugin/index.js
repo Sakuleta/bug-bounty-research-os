@@ -328,13 +328,19 @@ const PM_QUERY = /(^|[\s;&|(])(npm|pnpm|yarn|bun)\s+(i|install|add|ls|list|view|
 // Capture hygiene (29_SECURITY_HYGIENE: RAW -> SANITIZE -> REFERENCE). Values in these
 // headers never reach a capture; secret-shaped strings in any text are redacted on write.
 const SENSITIVE_HEADERS = /^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token|x-access-token|api-key|x-csrf-token)\b/i
+// BEGIN-GENERATED-SECRET-PATTERNS
+// Source of truth: tools/secret-patterns.json — do not hand-edit; run python3 tools/generate_secret_patterns.py.
 const SECRET_SHAPES = [
-  /\bglpat-[A-Za-z0-9_-]{16,}\b/g,
-  /\bgh[pousr]_[A-Za-z0-9]{16,}\b/g,
-  /\bAKIA[0-9A-Z]{16}\b/g,
-  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\b/g,
+  /glpat-[A-Za-z0-9_.-]{16,}/g,
+  /github_pat_[A-Za-z0-9_]{20,}/g,
+  /gh[pousr]_[A-Za-z0-9]{16,}/g,
+  /xox[baprs]-[A-Za-z0-9-]{10,}/g,
+  /AKIA[0-9A-Z]{16}/g,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/g,
+  /eyJ[A-Za-z0-9_-]{6,}\.eyJ[A-Za-z0-9_-]{6,}\./g,
 ]
+// END-GENERATED-SECRET-PATTERNS
 
 function log(line) {
   try { appendFileSync(homedir() + '/.dsh/research-os-enforcer.log', new Date().toISOString() + ' ' + line + '\n') } catch {}

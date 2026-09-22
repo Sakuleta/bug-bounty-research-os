@@ -93,15 +93,19 @@ TECHNIQUE_RESULTS = {"CONFIRMED", "FALSE_POSITIVE", "NOT_APPLICABLE", "INCONCLUS
 GENERATED_HEADER = "# GENERATED — do not edit by hand; rebuild via tools/researchctl.py (control plane)"
 # High-confidence secret shapes. The ledger must never carry them raw: redact() scrubs on
 # write, and audit.py re-scans the ledger so a hand edit cannot smuggle one back in.
+# BEGIN-GENERATED-SECRET-PATTERNS
+# Source of truth: tools/secret-patterns.json — do not hand-edit; run python3 tools/generate_secret_patterns.py.
 _SECRET_PATTERNS = [
     re.compile(r"glpat-[A-Za-z0-9_.-]{16,}"),
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
-    re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{16,}"),
     re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
     re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-    re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\."),
+    re.compile(r"eyJ[A-Za-z0-9_-]{6,}\.eyJ[A-Za-z0-9_-]{6,}\."),
 ]
+# END-GENERATED-SECRET-PATTERNS
 
 
 def secret_pattern_hits(value: str) -> list[str]:

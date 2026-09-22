@@ -47,6 +47,12 @@ secret-shaped strings in bodies/logs are scrubbed from captures and tool output.
 `tools/audit.py` fails a workspace whose registered evidence still carries a
 secret-shaped value.
 
+Scan bound (deliberate): the evidence secret scan covers text-like files up to
+1 MB — files larger than 1 MB and files containing a NUL byte (non-binary
+heuristic) are skipped, so a large or binary capture is not proof of cleanliness.
+Keep captures small and text-shaped; secrets in skipped files still violate the
+RAW -> SANITIZE -> REFERENCE contract when discovered.
+
 Residual (deliberate): **path segments are NOT masked** — the masker keeps scheme,
 host, port and path byte-for-byte. Never put a credential in a URL path; a secret in a
 path reaches captures, tool text and logs verbatim (`?`/`#` values and sensitive
