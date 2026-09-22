@@ -463,8 +463,12 @@ def identity_binding(root: Path) -> dict[str, Any] | str | None:
     closed — a garbled contract must never read as "no binding").
     """
     path = Path(root) / IDENTITY_BINDING_REL
-    if not path.is_file():
+    if not os.path.lexists(path):
         return None
+    if not path.is_file():
+        # A non-file at the binding path (directory, fifo, dangling symlink) is
+        # a garbled contract, not an absent one — fail closed, never warn-and-allow.
+        return IDENTITY_MALFORMED
     try:
         lines = path.read_text(errors="strict").splitlines()
     except (OSError, ValueError):

@@ -3467,6 +3467,23 @@ _sub4r = subprocess.run(
 check("v8.2 fix M4: researchctl names the undecodable binding malformed",
       _sub4r.returncode != 0 and "malformed" in (_sub4r.stdout + _sub4r.stderr))
 
+# Backlog B9: a non-file at the binding path (directory, fifo, dangling link)
+# is a garbled contract, not an absent one — fail closed, never warn-and-allow.
+_nrbf, _ncbf = _w2_root("expected_identity:\n  account_reference: alice\n")
+(_nrbf / "00_control/identity-binding.yaml").unlink()
+(_nrbf / "00_control/identity-binding.yaml").mkdir()
+check("backlog B9: a directory at the binding path reads as malformed",
+      identity_binding(_nrbf) == "malformed")
+try:
+    _ncbf.prepare_action({**_w7_action(), "account": "alice"})
+    check("backlog B9: non-file binding fails prepare closed", False)
+except ValueError as exc:
+    check("backlog B9: non-file binding fails prepare closed", "malformed" in str(exc))
+_subbf = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nrbf)],
+                        capture_output=True, text=True)
+check("backlog B9: the audit errors on a non-file binding",
+      _subbf.returncode != 0 and "malformed" in (_subbf.stdout + _subbf.stderr))
+
 # v8.2 fix M2: the nonce guard keys on token-store existence, not on issued
 # nonces — an existing-but-empty (or blank/garbled-only) store refuses forgeries.
 _nr7e, _nc7e = _w7_root()
