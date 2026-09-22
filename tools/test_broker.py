@@ -127,6 +127,17 @@ def call(op: str, **payload) -> dict:
         raise AssertionError(f"broker call {op} unavailable: {exc}") from exc
 
 
+def rev(n: int, tag: str = "rev") -> str:
+    """A synthetic scope revision (`EV-seq:hash`, the set_scope event identity)."""
+    return f"EV-{n:06d}:" + hashlib.sha256(f"{tag}-{n}".encode()).hexdigest()
+
+
+def next_rev(policy: dict, tag: str = "rev") -> str:
+    """The revision after a stored policy's revision (monotonic per workspace)."""
+    seq = int(str(policy.get("scope_revision") or "EV-000000:0").split(":")[0].split("-")[1])
+    return rev(seq + 1, tag)
+
+
 def run_scope_check(root: Path, url: str) -> tuple[subprocess.CompletedProcess, dict]:
     """The runner-facing CLI seam: `researchctl <root> scope-check <url>`."""
     run = subprocess.run(
@@ -246,7 +257,7 @@ check("policy.put refuses an empty asset list in assets mode",
       refused["ok"] is False and "assets" in refused["error"])
 
 put = call("policy.put", workspace=ws, assets=["example.test", "*.lab.example"],
-           gate="assets", source_reference="policy://program/scope")
+           gate="assets", source_reference="policy://program/scope", scope_revision=rev(1))
 check("first policy.put needs no human_reference", put["ok"] is True)
 check("policy.put stores provenance and a sequence",
       put["policy"]["assets"] == ["example.test", "*.lab.example"]
@@ -260,7 +271,8 @@ check("re-recording an existing policy requires human_reference",
       refused["ok"] is False and "human_reference" in refused["error"])
 
 put2 = call("policy.put", workspace=ws, assets=["example.test", "*.lab.example"],
-            gate="assets", source_reference="policy://program/scope", human_reference="ticket-42")
+            gate="assets", source_reference="policy://program/scope", human_reference="ticket-42",
+            scope_revision=rev(2))
 check("human_reference records the re-record and bumps the sequence",
       put2["ok"] is True and put2["policy"]["human_reference"] == "ticket-42"
       and put2["policy"]["sequence"] == 2)
@@ -268,6 +280,42 @@ check("human_reference records the re-record and bumps the sequence",
 got = call("policy.get", workspace=ws)
 check("policy.get returns the stored policy",
       got["ok"] is True and got["policy"]["assets"] == ["example.test", "*.lab.example"])
+
+# --- policy.put scope revisions (stale-push protection) ------------------------
+
+rev_ws = str(tmpdir("ro-broker-rev-").resolve())
+refused = call("policy.put", workspace=rev_ws, assets=["example.test"], gate="assets",
+               source_reference="policy://x")
+check("policy.put requires a scope_revision",
+      refused["ok"] is False and "scope_revision" in refused["error"])
+refused = call("policy.put", workspace=rev_ws, assets=["example.test"], gate="assets",
+               source_reference="policy://x", scope_revision="not-a-revision")
+check("policy.put refuses a malformed scope_revision",
+      refused["ok"] is False and "scope_revision" in refused["error"])
+first = call("policy.put", workspace=rev_ws, assets=["example.test"], gate="assets",
+             source_reference="policy://x", scope_revision=rev(1))
+check("the first revisioned put is stored",
+      first["ok"] is True and first["policy"]["scope_revision"] == rev(1))
+same = call("policy.put", workspace=rev_ws, assets=["example.test"], gate="assets",
+            source_reference="policy://x", human_reference="ticket-rev",
+            scope_revision=rev(1))
+check("an identical revision re-put is idempotent",
+      same["ok"] is True and same["policy"]["scope_revision"] == rev(1))
+conflict = call("policy.put", workspace=rev_ws, assets=["other.example"], gate="assets",
+                source_reference="policy://x", human_reference="ticket-rev",
+                scope_revision=rev(1))
+check("the same revision with different content is refused",
+      conflict["ok"] is False and "scope_revision" in conflict["error"])
+second = call("policy.put", workspace=rev_ws, assets=["example.test", "more.example"],
+              gate="assets", source_reference="policy://x", human_reference="ticket-rev",
+              scope_revision=rev(2))
+check("a newer revision supersedes",
+      second["ok"] is True and second["policy"]["scope_revision"] == rev(2))
+stale = call("policy.put", workspace=rev_ws, assets=["example.test"], gate="assets",
+             source_reference="policy://x", human_reference="ticket-rev",
+             scope_revision=rev(1))
+check("an out-of-order (older) revision push is refused",
+      stale["ok"] is False and "scope_revision" in stale["error"])
 check("policy.get on an unknown workspace returns no policy",
       call("policy.get", workspace=str(tmpdir("ro-broker-unknown-")))["policy"] is None)
 check("policy.get never leaks key material", KEY_BYTES.hex() not in json.dumps(got))
@@ -312,7 +360,8 @@ check("token.mint refuses an out-of-policy host with the canonical shape",
       and "broker policy assets" in out["error"] and "evil.example" in out["error"])
 
 gate_none_ws = str(tmpdir("ro-broker-none-").resolve())
-call("policy.put", workspace=gate_none_ws, assets=[], gate="none", source_reference="policy://none")
+call("policy.put", workspace=gate_none_ws, assets=[], gate="none", source_reference="policy://none",
+     scope_revision=rev(1, "none"))
 minted_none = call("token.mint", workspace=gate_none_ws,
                    preflight={**preflight, "target": "https://anywhere.example/x"},
                    request_shape={**shape_in, "url": "https://anywhere.example/x"})
@@ -320,7 +369,8 @@ check("an explicit gate none policy allows any host",
       minted_none["ok"] is True and minted_none["token"]["tool_family"] == "http")
 
 unenf_ws = str(tmpdir("ro-broker-unenf-").resolve())
-call("policy.put", workspace=unenf_ws, assets=["example.test"], gate="assets", source_reference="policy://x")
+call("policy.put", workspace=unenf_ws, assets=["example.test"], gate="assets", source_reference="policy://x",
+     scope_revision=rev(1, "unenf"))
 # Rewrite the stored policy to an unenforceable asset list: the broker must fail closed.
 (HOME / "policies" / f"{wsid_of(unenf_ws)}.json").write_text(json.dumps(
     {"assets": [], "gate": "assets", "source_reference": "policy://x",
@@ -332,7 +382,8 @@ check("an unenforceable policy refuses to mint",
 # --- token.mint ttl bounds (no silent clamping) -------------------------------
 
 ttl_ws = str(tmpdir("ro-broker-ttl-").resolve())
-call("policy.put", workspace=ttl_ws, assets=["example.test"], gate="assets", source_reference="policy://x")
+call("policy.put", workspace=ttl_ws, assets=["example.test"], gate="assets", source_reference="policy://x",
+     scope_revision=rev(1, "ttl"))
 for bad in (0, 3601, -5, "300", 3.5, True, None):
     resp = call("token.mint", workspace=ttl_ws, preflight=preflight, request_shape=shape_in,
                 ttl_seconds=bad)
@@ -359,7 +410,7 @@ check("token.mint refuses a missing target", resp["ok"] is False and "target" in
 
 budget_ws = str(tmpdir("ro-broker-budget-").resolve())
 put = call("policy.put", workspace=budget_ws, assets=["example.test"], gate="assets",
-           source_reference="policy://x",
+           source_reference="policy://x", scope_revision=rev(1, "budget"),
            budget={"max_actions_per_cycle": 1, "max_actions_per_engagement": 3})
 check("policy.put records the budget caps", put["ok"] is True
       and put["policy"]["budget"] == {"max_actions_per_cycle": 1, "max_actions_per_engagement": 3})
@@ -404,7 +455,8 @@ check("budget: malformed caps in the stored policy refuse to mint",
 
 # A later policy.put refreshes (here: clears) the caps.
 call("policy.put", workspace=budget_ws, assets=["example.test"], gate="assets",
-     source_reference="policy://x", human_reference="ticket-budget", budget=None)
+     source_reference="policy://x", human_reference="ticket-budget", budget=None,
+     scope_revision=rev(2, "budget"))
 check("budget: a later policy.put refreshes the caps", bmint("C-0009")["ok"] is True)
 
 # --- scope.check: the broker-side decision the runner CLI delegates to ---------
@@ -557,7 +609,7 @@ try:
 finally:
     os.chmod(audit_path, 0o600)
 resp = call("policy.put", workspace=hard_ws, assets=["example.test"], gate="assets",
-            source_reference="policy://x")
+            source_reference="policy://x", scope_revision=rev(1, "hard"))
 check("a repaired audit log lets the broker work again", resp["ok"] is True)
 
 # Ledger decode failures are counted and surfaced in status, never silent.
@@ -706,7 +758,8 @@ except ValueError as exc:
 
 # Broker authority: a broker policy narrower than the workspace file refuses at prepare.
 call("policy.put", workspace=str(ws_root.resolve()), assets=["other.example"], gate="assets",
-     source_reference="policy://program/scope", human_reference="ticket-9")
+     source_reference="policy://program/scope", human_reference="ticket-9",
+     scope_revision=next_rev(call("policy.get", workspace=str(ws_root.resolve()))["policy"]))
 try:
     cp.prepare_action(prepare_payload("https://example.test/x"))
     check("the broker policy refuses a workspace-allowed host", False)
@@ -715,7 +768,8 @@ except ValueError as exc:
           "outside the engagement scope" in str(exc) and "broker policy" in str(exc)
           and "other.example" in str(exc))
 call("policy.put", workspace=str(ws_root.resolve()), assets=["example.test"], gate="assets",
-     source_reference="policy://program/scope", human_reference="ticket-9")
+     source_reference="policy://program/scope", human_reference="ticket-9",
+     scope_revision=next_rev(call("policy.get", workspace=str(ws_root.resolve()))["policy"]))
 
 # --- a broken broker install fails closed, never silently local ----------------
 
@@ -766,19 +820,34 @@ check("scope-check delegates to the broker when its socket is present",
       and scope_out["authority"] == "broker" and scope_out["gate"] == "assets")
 
 call("policy.put", workspace=str(ws_root.resolve()), assets=["other.example"], gate="assets",
-     source_reference="policy://program/scope", human_reference="ticket-cli")
+     source_reference="policy://program/scope", human_reference="ticket-cli",
+     scope_revision=next_rev(call("policy.get", workspace=str(ws_root.resolve()))["policy"], "cli"))
 scope_run, scope_out = run_scope_check(ws_root, "https://example.test/x")
 check("the broker policy overrides the local binding in the scope-check CLI",
       scope_run.returncode == 3 and scope_out["in_scope"] is False
       and scope_out["authority"] == "broker"
       and "example.test" in (ws_root / "00_control/engagement.yaml").read_text())
 call("policy.put", workspace=str(ws_root.resolve()), assets=["example.test"], gate="assets",
-     source_reference="policy://program/scope", human_reference="ticket-cli")
+     source_reference="policy://program/scope", human_reference="ticket-cli",
+     scope_revision=next_rev(call("policy.get", workspace=str(ws_root.resolve()))["policy"], "cli"))
+
+# Intersection: a narrowed local binding with a stale broader broker policy denies
+# the removed host — local AND broker must allow.
+(ws_root / "00_control/engagement.yaml").write_text('scope:\n  assets: ["narrowed.example"]\n')
+scope_run, scope_out = run_scope_check(ws_root, "https://example.test/x")
+check("a narrowed local binding denies despite a broader broker policy (intersection)",
+      scope_run.returncode == 3 and scope_out["in_scope"] is False
+      and scope_out["authority"] == "broker")
+(ws_root / "00_control/engagement.yaml").write_text('scope:\n  assets: ["example.test"]\n')
+scope_run, scope_out = run_scope_check(ws_root, "https://example.test/x")
+check("the intersection allows again once both agree",
+      scope_run.returncode == 0 and scope_out["in_scope"] is True)
 
 # prepare keeps BOTH checks: a broker policy wider than the local binding still refuses
 # on the local engagement.yaml scope (the broker mint alone is not the whole gate).
 call("policy.put", workspace=str(ws_root.resolve()), assets=["example.test", "other.example"],
-     gate="assets", source_reference="policy://program/scope", human_reference="ticket-cli")
+     gate="assets", source_reference="policy://program/scope", human_reference="ticket-cli",
+     scope_revision=next_rev(call("policy.get", workspace=str(ws_root.resolve()))["policy"], "cli"))
 try:
     cp.prepare_action(prepare_payload("https://other.example/x"))
     check("prepare keeps the local binding as a second gate", False)
@@ -786,7 +855,8 @@ except ValueError as exc:
     check("prepare keeps the local binding as a second gate",
           "outside the engagement scope" in str(exc) and "engagement.yaml" in str(exc))
 call("policy.put", workspace=str(ws_root.resolve()), assets=["example.test"], gate="assets",
-     source_reference="policy://program/scope", human_reference="ticket-cli")
+     source_reference="policy://program/scope", human_reference="ticket-cli",
+     scope_revision=next_rev(call("policy.get", workspace=str(ws_root.resolve()))["policy"], "cli"))
 
 # --- researchctl broker status ----------------------------------------------
 
@@ -908,4 +978,53 @@ local_run, local_out = run_scope_check(ws_root, "https://example.test/x")
 check("scope-check keeps the local behavior when no socket exists",
       local_run.returncode == 0 and local_out["in_scope"] is True
       and local_out["authority"] == "local")
+
+# =============================================================================
+# Phase D — scope-sync DIRTY: a failed broker push blocks browser dispatch
+# until resync.
+# =============================================================================
+
+sync_home = tmpdir("ro-broker-sync-home-")
+set_home(sync_home)
+sync_proc = spawn_broker(sync_home)
+sync_root, sync_cp = fixture_root()
+(sync_root / "00_control/engagement.yaml").write_text(
+    "budget:\n  max_actions_per_cycle: 4\n  max_actions_per_engagement: 9\n")
+sync_cp.set_scope(["example.test"], "policy://program/scope")
+check("a clean scope-set leaves no DIRTY marker",
+      not (sync_root / "11_runtime" / ".scope-sync-dirty").exists())
+
+# Kill the broker: the socket file stays (stale) so pushes are attempted and fail.
+sync_proc.kill()
+sync_proc.wait(timeout=10)
+try:
+    sync_cp.set_scope(["example.test", "other.example"], "policy://program/scope",
+                      human_reference="ticket-sync")
+    check("a dead broker fails scope-set closed", False)
+except ValueError as exc:
+    check("a dead broker fails scope-set closed", "broker" in str(exc).lower())
+check("the failed push marks scope-sync DIRTY",
+      (sync_root / "11_runtime" / ".scope-sync-dirty").exists())
+check("the local scope commit stands despite the failed push",
+      "other.example" in (sync_root / "00_control/engagement.yaml").read_text())
+
+sync_cli = subprocess.run(
+    [sys.executable, str(RESEARCHCTL), str(sync_root), "scope-sync"],
+    capture_output=True, text=True, env=dict(os.environ))
+check("scope-sync fails while the broker is unreachable",
+      sync_cli.returncode != 0
+      and (sync_root / "11_runtime" / ".scope-sync-dirty").exists())
+
+sync_proc = spawn_broker(sync_home)
+sync_cli = subprocess.run(
+    [sys.executable, str(RESEARCHCTL), str(sync_root), "scope-sync"],
+    capture_output=True, text=True, env=dict(os.environ))
+check("scope-sync re-pushes and clears DIRTY",
+      sync_cli.returncode == 0
+      and not (sync_root / "11_runtime" / ".scope-sync-dirty").exists())
+synced = call("policy.get", workspace=str(sync_root.resolve()))
+check("the resynced broker policy matches the committed binding",
+      synced["ok"] is True and sorted(synced["policy"]["assets"]) == ["example.test", "other.example"])
+stop_broker(sync_proc)
+set_home(HOME)
 print(f"\n{len(passed)} checks passed")

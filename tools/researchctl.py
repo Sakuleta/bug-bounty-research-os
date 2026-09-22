@@ -31,11 +31,13 @@ def load_json(path: str):
 def scope_verdict(root: Path, url: str) -> dict:
     """The authoritative per-URL scope decision for the CLI/runner seam.
 
-    While a broker socket is present the broker's `scope.check` decides (its policy copy
-    is the authority); an unreachable broker or a broker refusal is a DENY — never a
-    silent fallback to the workspace-local scope. With no socket the local
-    `scope_check` behavior is unchanged. The returned shape mirrors `scope_check`
-    (`gate`, `in_scope`, `host`, `assets`) plus an `authority` marker.
+    While a broker socket is present the decision is the INTERSECTION of the broker's
+    `scope.check` and the workspace-local `scope_check`: both must allow, so a stale
+    broader broker policy can never widen a narrowed local binding (and a narrowed
+    broker policy still gates a wider file). An unreachable broker or a broker refusal
+    is a DENY — never a silent fallback to the workspace-local scope. With no socket
+    the local `scope_check` behavior is unchanged. The returned shape mirrors
+    `scope_check` (`gate`, `in_scope`, `host`, `assets`) plus an `authority` marker.
     """
     client = load_broker_client()
     if client is None:
@@ -57,8 +59,24 @@ def scope_verdict(root: Path, url: str) -> dict:
             "authority": "broker",
             "reason": f"the broker refused the scope check (fail closed): {response.get('error')}",
         }
+    if response.get("in_scope") is not True:
+        return {
+            "gate": response.get("gate"), "in_scope": False,
+            "host": response.get("host") or "", "assets": response.get("assets"),
+            "authority": "broker",
+        }
+    local = scope_check(root, url)
+    if local["in_scope"] is not True:
+        return {
+            "gate": local["gate"], "in_scope": False, "host": local["host"],
+            "assets": local["assets"], "authority": "broker",
+            "reason": ("the workspace-local scope denies this target while the broker copy "
+                       "allows it (stale broader broker policy?) — refusing (fail closed); "
+                       "resync with `researchctl scope-sync` after repairing the scope via "
+                       "`researchctl scope-set`"),
+        }
     return {
-        "gate": response.get("gate"), "in_scope": response.get("in_scope") is True,
+        "gate": response.get("gate"), "in_scope": True,
         "host": response.get("host") or "", "assets": response.get("assets"),
         "authority": "broker",
     }
@@ -172,6 +190,10 @@ def main() -> int:
     ss.add_argument("json", help='{"assets": [...], "source_reference": "...", "gate": "assets"|"none", '
                                  '"human_reference": "ticket-id (required to re-record an existing scope)"}')
     ss.set_defaults(fn="scope-set")
+    sy = sub.add_parser("scope-sync", help="re-push the committed scope binding to the broker "
+                                           "and clear a scope-sync DIRTY marker (no new event, "
+                                           "no human_reference — a heal, not a re-record)")
+    sy.set_defaults(fn="scope-sync")
     tr = sub.add_parser("triage")
     tr.add_argument("question")
     tr.set_defaults(fn="triage")
@@ -273,6 +295,8 @@ def main() -> int:
             data = load_json(ns.json)
             out = cp.set_scope(data.get("assets", []), data.get("source_reference", ""),
                                gate=data.get("gate"), human_reference=data.get("human_reference", ""))
+        elif ns.fn == "scope-sync":
+            out = cp.sync_scope()
         elif ns.fn == "triage":
             out = triage_suggest(Path(ns.root), ns.question)
         elif ns.fn == "claims-check":

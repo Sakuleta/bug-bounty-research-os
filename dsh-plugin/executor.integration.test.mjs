@@ -445,6 +445,28 @@ check('browser capture command line masks query secrets',
 const br2 = await runControlledBrowser({ root, args: { url: browserUrl, principal: 'researcher-A' } })
 check('browser token is single-use', br2.ok === false && br2.text.includes('no matching unconsumed browser preflight token'))
 
+// 8c. Scope-sync DIRTY: with a broker socket in force, browser dispatch refuses
+//     until resync — before token selection, before the runner starts.
+craftToken(browserShapeFromArgs({ url: browserUrl, principal: 'researcher-A' }), 'browser')
+writeFileSync(join(root, '11_runtime', '.scope-sync-dirty'),
+  JSON.stringify({ revision: 'EV-000001:0', reason: 'executor integration probe' }))
+const savedSocket8c = process.env.RESEARCH_OS_BROKER_SOCKET
+const savedHome8c = process.env.RESEARCH_OS_BROKER_HOME
+const staleSocket8c = join(root, 'stale-broker.sock')
+writeFileSync(staleSocket8c, '')
+delete process.env.RESEARCH_OS_BROKER_HOME
+process.env.RESEARCH_OS_BROKER_SOCKET = staleSocket8c
+const runsBeforeDirty = runnerRuns()
+const brDirty = await runControlledBrowser({ root, args: { url: browserUrl, principal: 'researcher-A' } })
+check('DIRTY scope with a broker socket refuses browser dispatch before the runner starts',
+  brDirty.ok === false && brDirty.text.includes('scope-sync') && runnerRuns() === runsBeforeDirty)
+rmSync(join(root, '11_runtime', '.scope-sync-dirty'), { force: true })
+rmSync(staleSocket8c, { force: true })
+if (savedSocket8c === undefined) delete process.env.RESEARCH_OS_BROKER_SOCKET
+else process.env.RESEARCH_OS_BROKER_SOCKET = savedSocket8c
+if (savedHome8c === undefined) delete process.env.RESEARCH_OS_BROKER_HOME
+else process.env.RESEARCH_OS_BROKER_HOME = savedHome8c
+
 writeFileSync(engagementPath, 'scope:\n  assets: ["allowed.example"]\n')
 const runsBefore = runnerRuns()
 craftToken(browserShapeFromArgs({ url: browserUrl, principal: 'researcher-A' }), 'browser')

@@ -65,6 +65,13 @@ class Refused(Exception):
     """A deliberate refusal the client sees as {"ok": false, "error": …}."""
 
 
+# A scope revision binds one broker policy to one local SCOPE_CHANGED event:
+# `EV-<zero-padded ledger sequence>:<64-hex event hash>`. The hash is the identity
+# (tamper-evident, equal revisions name the same event); the sequence orders
+# concurrent pushes (hashes alone are unordered, and receipt order is not recency).
+_SCOPE_REVISION = re.compile(r"^EV-(\d{6}):([0-9a-f]{64})$")
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -273,6 +280,7 @@ class Broker:
                 "policy.put requires a non-empty source_reference (policy URL/section; never a secret)")
         human = str(req.get("human_reference") or "").strip()
         budget = _parse_budget_caps(req.get("budget"))
+        revision = str(req.get("scope_revision") or "").strip()
         with self._lock:
             present = self._policy_file(workspace).exists()
             existing = self._read_policy(workspace)
@@ -281,11 +289,39 @@ class Broker:
                     "policy.put requires human_reference (a ticket/message id from the human who "
                     "authorized the change) — this re-records an existing broker policy; only the "
                     "first record may omit it")
+            revision_match = _SCOPE_REVISION.fullmatch(revision)
+            if not revision_match:
+                raise Refused(
+                    "policy.put requires scope_revision as EV-<sequence>:<event-hash> (the "
+                    "SCOPE_CHANGED event identity from `researchctl scope-set`) — pushes without "
+                    "a revision cannot be ordered and are refused")
+            revision_seq = int(revision_match.group(1))
+            stored = (existing or {}).get("scope_revision")
+            stored_match = _SCOPE_REVISION.fullmatch(str(stored or ""))
+            stored_seq = int(stored_match.group(1)) if stored_match else 0
+            if stored and revision_seq < stored_seq:
+                raise Refused(
+                    f"policy.put scope_revision {revision} is older than the stored revision "
+                    f"{stored} — refusing the stale push; re-read the current scope and push again")
+            if stored and revision_seq == stored_seq and revision != stored:
+                raise Refused(
+                    f"policy.put scope_revision {revision} reuses the stored sequence with a "
+                    f"different event hash ({stored}) — refusing the conflicting push")
+            if revision == stored:
+                # Idempotent retry (e.g. scope-sync re-pushing the current binding):
+                # the stored content must be identical, and nothing is rewritten.
+                if (items != list(existing.get("assets") or []) or gate != existing.get("gate")
+                        or budget != existing.get("budget")):
+                    raise Refused(
+                        f"policy.put reuses scope_revision {revision} with different content — "
+                        "refusing: one revision names exactly one scope record")
+                return {"ok": True, "workspace": workspace, "policy": existing}, (
+                    f"workspace={workspace} assets={len(items)} gate={gate} seq={existing.get('sequence')} (idempotent)")
             policy = {
                 "assets": items, "gate": gate, "source_reference": reference,
                 "human_reference": human, "updated_at": _now_iso(),
                 "sequence": (int(existing.get("sequence") or 0) + 1) if existing else 1,
-                "budget": budget,
+                "budget": budget, "scope_revision": revision,
             }
             self._write_policy(workspace, policy)
         return {"ok": True, "workspace": workspace, "policy": policy}, (

@@ -417,6 +417,13 @@ def external_judgment_allowed(root: Path) -> bool:
 BUDGET_MALFORMED = "malformed"
 BUDGET_KEYS = ("max_actions_per_cycle", "max_actions_per_engagement")
 
+# Durable scope-sync marker (11_runtime/.scope-sync-dirty): present while the local
+# scope binding was committed but the broker push failed or was refused. Browser
+# dispatch refuses while it exists and a broker socket is in force; `researchctl
+# scope-sync` (or a successful scope-set push) clears it. Control-plane-owned: the
+# enforcer denies direct writes to it like the other runtime files.
+SCOPE_SYNC_DIRTY = ".scope-sync-dirty"
+
 
 def budget_limits(root: Path) -> dict[str, int | None] | str | None:
     """Parse the top-level `budget:` block in 00_control/engagement.yaml.
@@ -1828,11 +1835,21 @@ class ControlPlane:
                     "human_reference": human,
                 },
             )
-        self._push_broker_policy(items, mode, reference, human)
+            revision = f"{event['event_id']}:{event['event_hash']}"
+        try:
+            self._push_broker_policy(items, mode, reference, human, revision)
+        except ValueError as exc:
+            # The local commit stands; the broker copy is now stale (or was never
+            # written). Mark scope-sync DIRTY so browser dispatch refuses until a
+            # resync, then re-raise so the CLI reports the failed push.
+            self._mark_scope_dirty(revision, str(exc))
+            raise
+        self._clear_scope_dirty()
         self.refresh()
         return event
 
-    def _push_broker_policy(self, items: list[str], mode: str, reference: str, human: str) -> None:
+    def _push_broker_policy(self, items: list[str], mode: str, reference: str, human: str,
+                            revision: str) -> None:
         """Push the recorded scope (and the current budget caps) to the broker when its
         socket is present.
 
@@ -1840,6 +1857,9 @@ class ControlPlane:
         and the SCOPE_CHANGED event stands); a present-but-failing push raises, because
         `prepare_action` refuses while a broker socket is present without a matching
         policy — keeping the two copies silently apart is the failure this seam prevents.
+        The push carries the SCOPE_CHANGED event identity as `scope_revision`
+        (`EV-<sequence>:<hash>`); the broker stores it and refuses updates older than
+        the stored revision, so concurrent scope-sets cannot land out of order.
         The budget caps are read at push time (`budget_limits`), so re-running scope-set
         refreshes the broker's enforced limits; a malformed local budget block refuses
         the push rather than storing an uncapped policy.
@@ -1856,7 +1876,7 @@ class ControlPlane:
         try:
             response = client.call("policy.put", timeout=5, workspace=str(self.root), assets=items,
                                    gate=mode, source_reference=reference, human_reference=human,
-                                   budget=limits)
+                                   budget=limits, scope_revision=revision)
         except client.BrokerUnavailable as exc:
             raise ValueError(
                 f"engagement scope was recorded locally, but the broker policy push failed "
@@ -1867,6 +1887,77 @@ class ControlPlane:
             raise ValueError(
                 f"the broker refused the policy push (fail closed): {response.get('error')} — "
                 "the local SCOPE_CHANGED record stands; repair the broker policy before preparing")
+
+    def _scope_dirty_path(self) -> Path:
+        return self.rt / SCOPE_SYNC_DIRTY
+
+    def scope_sync_state(self) -> dict[str, Any] | None:
+        """The durable scope-sync DIRTY marker, or None when broker and binding agree."""
+        try:
+            raw = self._scope_dirty_path().read_text(encoding="utf-8")
+        except OSError:
+            return None
+        try:
+            state = json.loads(raw)
+        except ValueError:
+            return {"revision": "", "reason": "unreadable scope-sync marker", "time": ""}
+        return state if isinstance(state, dict) else None
+
+    def _mark_scope_dirty(self, revision: str, reason: str) -> None:
+        """Record that the local binding was committed but the broker push failed."""
+        try:
+            self._scope_dirty_path().write_text(
+                _json_dump({"revision": revision, "reason": redact(reason)[:300],
+                            "time": now()}),
+                encoding="utf-8")
+        except OSError:
+            pass
+
+    def _clear_scope_dirty(self) -> None:
+        try:
+            self._scope_dirty_path().unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def sync_scope(self, actor: str = "controller") -> dict[str, Any]:
+        """Re-push the committed scope binding to the broker and clear DIRTY.
+
+        The resync path for a failed push: reads the live engagement binding (assets,
+        gate) and budget caps, and pushes them under the LATEST SCOPE_CHANGED event's
+        identity — no new event, no new human_reference (this changes nothing, it
+        heals the broker copy). Refuses when no scope was ever recorded
+        (`researchctl scope-set` first) or when no broker socket is present (nothing
+        to sync to — clears a stale marker and reports local mode).
+        """
+        latest = None
+        for event in self._read_events():
+            if event.get("type") == "SCOPE_CHANGED":
+                latest = event
+        if latest is None:
+            raise ValueError(
+                "no recorded engagement scope to sync — record it first with "
+                "`researchctl scope-set`")
+        client = broker_client()
+        if client is None:
+            self._clear_scope_dirty()
+            return {"synced": False, "mode": "local",
+                    "note": "no broker socket present — local mode governs, DIRTY cleared"}
+        payload = latest.get("payload") or {}
+        items = engagement_assets(self.root)
+        if items is None:
+            raise ValueError(
+                "no scope configured — record it with `researchctl scope-set` before syncing")
+        if items == []:
+            raise ValueError(
+                "engagement assets are present but not a simple string list — scope is "
+                "unenforceable; repair 00_control/engagement.yaml before syncing")
+        mode = str(payload.get("gate") or "assets").lower()
+        revision = f"{latest.get('event_id')}:{latest.get('event_hash')}"
+        self._push_broker_policy(
+            items, mode, str(payload.get("source_reference") or ""),
+            str(payload.get("human_reference") or ""), revision)
+        self._clear_scope_dirty()
+        return {"synced": True, "revision": revision, "assets": items, "gate": mode}
 
     @staticmethod
     def _leading_ws(line: str) -> str:

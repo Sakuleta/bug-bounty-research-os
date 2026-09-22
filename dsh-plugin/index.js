@@ -98,6 +98,7 @@ const inject = ['tools']
 const OS_MARKER = 'OS_VERSION'
 const LEDGER_REL = '11_runtime/events.jsonl'
 const TOKENS_REL = '11_runtime/action-tokens.jsonl'
+const SCOPE_DIRTY_REL = '11_runtime/.scope-sync-dirty'
 
 // The engagement binding files are bootstrap-conditional: the agent fills them during
 // BOOTSTRAP; afterwards only direct human edits are legitimate.
@@ -106,6 +107,7 @@ const BOOTSTRAP_CONDITIONAL = /^00_control\/(engagement|identity-binding)\.yaml$
 // Paths the control plane owns. Matched against a workspace-relative POSIX path.
 const PROTECTED_PATTERNS = [
   /^11_runtime\/(events\.jsonl|run-status\.yaml|active-cycle\.yaml|evidence-index\.jsonl|current-context\.md|last-result\.md|action-tokens\.jsonl)$/,
+  /^11_runtime\/\.scope-sync-dirty$/,
   /^11_runtime\/human-gates\/[^/]+\.yaml$/,
   /^11_runtime\/evidence-store\//,
   /^04_cycles\/[^/]+\/plan\.yaml$/,
@@ -127,7 +129,7 @@ const PROTECTED_MARKERS = [
   'freshness.yaml', 'evidence-store', 'engagement.yaml', 'identity-binding.yaml',
   'technique-discoveries.md', '04_cycles', '03_hypotheses',
   'knowledge-usage.yaml', 'knowledge-proposals.yaml', 'knowledge-proposals/',
-  'os_version',
+  'os_version', 'scope-sync-dirty',
 ]
 
 // Static protected files and directories the control plane owns. A destructive target
@@ -135,7 +137,7 @@ const PROTECTED_MARKERS = [
 // control-plane-owned material just as surely as writing one protected file.
 const PROTECTED_TARGETS = [
   '11_runtime/events.jsonl', '11_runtime/run-status.yaml', '11_runtime/active-cycle.yaml',  '11_runtime/evidence-index.jsonl', '11_runtime/current-context.md', '11_runtime/last-result.md',
-  '11_runtime/action-tokens.jsonl', '11_runtime/human-gates', '11_runtime/evidence-store',
+  '11_runtime/action-tokens.jsonl', '11_runtime/.scope-sync-dirty', '11_runtime/human-gates', '11_runtime/evidence-store',
   '04_cycles', '03_hypotheses/active', '03_hypotheses/archive',
   '06_audits/closure-readiness.yaml', '10_learning/technique-discoveries.md',
   '10_learning/freshness.yaml', '10_learning/knowledge-usage.yaml',
@@ -1839,6 +1841,23 @@ async function runControlledRequest({ root, args, fetchImpl }) {
   return { ok: status !== null, text: `${base}\n\n${trunc(redactSecrets(bodyText), 4000)}`, ...(partial ? { partial: true } : {}) }
 }
 
+/** Scope-sync DIRTY gate for browser dispatch: the local binding was committed but
+ *  the broker push failed, so the broker copy is stale — refuse until resync. Only
+ *  while a broker socket is in force (no socket means local mode governs). Returns
+ *  undefined when dispatch may proceed, else the refusal text. */
+function scopeSyncDirtyReason(root) {
+  try {
+    if (!existsSync(join(root, SCOPE_DIRTY_REL))) return undefined
+  } catch {
+    return undefined
+  }
+  if (brokerPath() === undefined) return undefined
+  return 'research_os_browser: the workspace scope is not synced to the policy broker ' +
+    '(scope-sync DIRTY — a scope record was committed locally but the broker push failed, ' +
+    'so the broker copy is stale). Resync with `researchctl scope-sync` (or re-run ' +
+    '`researchctl scope-set`); browser dispatch refuses until the broker copy is current.'
+}
+
 /** Canonical browser request shape (digest input): {url, principal}. */
 function browserShapeFromArgs(args) {
   return {
@@ -1858,6 +1877,11 @@ async function runControlledBrowser({ root, args }) {
   const shape = browserShapeFromArgs(args)
   if (!shape.url || !shape.principal) {
     return { ok: false, text: 'research_os_browser requires url and principal (the account label used in the preflight).' }
+  }
+  const dirtyDenied = scopeSyncDirtyReason(root)
+  if (dirtyDenied) {
+    log('DENY(executor) dirty browser ' + redactUrlSecrets(shape.url) + ' :: ' + dirtyDenied)
+    return { ok: false, text: `research_os_browser: ${dirtyDenied}` }
   }
   const digest = canonicalDigest(shape)
   const safeUrl = redactUrlSecrets(shape.url)
@@ -2052,3 +2076,4 @@ export { name, inject, apply }
 export { canonicalDigest, shapeFromArgs, browserShapeFromArgs, loadTokenStates, selectToken, runControlledRequest, runControlledBrowser, scopeReasonFor, redactSecrets, redactHeaderLine, redactUrlSecrets, redactShapeForText, mentionsProtected }
 export { brokerPath, brokerWorkspace, brokerCall, brokerConsumeToken, consumeBrokerToken, brokerPolicyGet, brokerScopeReason }
 export { dispatchHostReason }
+export { scopeSyncDirtyReason }

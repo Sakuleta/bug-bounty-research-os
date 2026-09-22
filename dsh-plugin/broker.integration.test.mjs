@@ -87,9 +87,12 @@ writeFileSync(setupPy, [
 execFileSync('python3', [setupPy, root, join(root, 'tools')], { encoding: 'utf8', timeout: 60000 })
 
 const workspaceKey = realpathSync(root)
+const REV1 = 'EV-000001:0000000000000000000000000000000000000000000000000000000000000001'
+const REV2 = 'EV-000002:0000000000000000000000000000000000000000000000000000000000000002'
+const REV3 = 'EV-000003:0000000000000000000000000000000000000000000000000000000000000003'
 const policyPut = pyBroker('policy.put', {
   workspace: workspaceKey, assets: ['lab.example'], gate: 'assets',
-  source_reference: 'policy://program/scope',
+  source_reference: 'policy://program/scope', scope_revision: REV1,
 })
 check('the broker records the workspace policy', policyPut.ok === true && policyPut.policy.assets[0] === 'lab.example')
 
@@ -213,6 +216,7 @@ const t5 = mint()
 pyBroker('policy.put', {
   workspace: workspaceKey, assets: ['other.example'], gate: 'assets',
   source_reference: 'policy://program/scope', human_reference: 'ticket-js-1',
+  scope_revision: REV2,
 })
 writeToken(t5)
 const r5 = await callExecutor()
@@ -245,6 +249,7 @@ check('a wider broker policy still meets the local binding',
 pyBroker('policy.put', {
   workspace: workspaceKey, assets: ['lab.example'], gate: 'assets',
   source_reference: 'policy://program/scope', human_reference: 'ticket-js-2',
+  scope_revision: REV3,
 })
 delete process.env.RESEARCH_OS_BROKER_SOCKET
 process.env.RESEARCH_OS_BROKER_HOME = brokerHome

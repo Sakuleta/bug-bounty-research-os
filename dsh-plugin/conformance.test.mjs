@@ -8,7 +8,7 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { apply, canonicalDigest, dispatchHostReason, mentionsProtected, redactHeaderLine, redactSecrets, redactUrlSecrets, scopeReasonFor, selectToken, shapeFromArgs } from './index.js'
+import { apply, canonicalDigest, dispatchHostReason, mentionsProtected, redactHeaderLine, redactSecrets, redactUrlSecrets, scopeReasonFor, scopeSyncDirtyReason, selectToken, shapeFromArgs } from './index.js'
 
 let passed = 0
 const failures = []
@@ -566,6 +566,35 @@ check('dispatch guard refuses a backslash authority without sending',
   !!dispatchHostReason('http://127.0.0.1:9\\@t.example/'))
 check('dispatch guard refuses an encoded-backslash authority',
   !!dispatchHostReason('http://t.example%5Cevil/'))
+
+// ---- W13: scope-sync DIRTY blocks browser dispatch while a broker is in force ----
+check('no DIRTY marker allows dispatch', scopeSyncDirtyReason(osRoot) === undefined)
+writeFileSync(join(osRoot, '11_runtime', '.scope-sync-dirty'),
+  JSON.stringify({ revision: 'EV-000001:0', reason: 'probe' }))
+{
+  const savedSocket = process.env.RESEARCH_OS_BROKER_SOCKET
+  const savedHome = process.env.RESEARCH_OS_BROKER_HOME
+  const emptyHome = mkdtempSync(join(tmpdir(), 'enforcer-no-broker-'))
+  try {
+    delete process.env.RESEARCH_OS_BROKER_SOCKET
+    process.env.RESEARCH_OS_BROKER_HOME = emptyHome
+    check('DIRTY without a broker socket allows dispatch (local mode governs)',
+      scopeSyncDirtyReason(osRoot) === undefined)
+    const fakeSocket = join(sandbox, 'stale-broker.sock')
+    writeFileSync(fakeSocket, '')
+    process.env.RESEARCH_OS_BROKER_SOCKET = fakeSocket
+    const dirtyReason = scopeSyncDirtyReason(osRoot)
+    check('DIRTY with a broker socket refuses dispatch until resync',
+      !!dirtyReason && dirtyReason.includes('scope-sync'))
+  } finally {
+    if (savedSocket === undefined) delete process.env.RESEARCH_OS_BROKER_SOCKET
+    else process.env.RESEARCH_OS_BROKER_SOCKET = savedSocket
+    if (savedHome === undefined) delete process.env.RESEARCH_OS_BROKER_HOME
+    else process.env.RESEARCH_OS_BROKER_HOME = savedHome
+    rmSync(emptyHome, { recursive: true, force: true })
+  }
+}
+rmSync(join(osRoot, '11_runtime', '.scope-sync-dirty'), { force: true })
 writeFileSync(engagement, 'scope:\n  assets:\n    - t.example\n    - 127.0.0.1:9443\n')
 check('block-list assets parsed', scopeReasonFor(osRoot, 'https://127.0.0.1:9443/lab') === undefined)
 check('host with port requires port in assets', !!scopeReasonFor(osRoot, 'https://127.0.0.1:9444/lab'))
