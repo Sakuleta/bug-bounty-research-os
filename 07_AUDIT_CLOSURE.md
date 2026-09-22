@@ -138,6 +138,8 @@ The closure proof should be generated only after the control plane audit confirm
   is normalized to `REVIEWED` on read);
 - every cited E-* reference resolves to a registered artifact whose hash still matches;
 - pending human gates are resolved or explicitly dispositioned;
+- the closure proof binds a resolved APPROVED closure-review gate (id + reference);
+- a recorded current PASS agrees with the freshly re-derived class result;
 - no forbidden direct lifecycle edits are detected;
 - required freshness and cleanup ledgers exist;
 - versioned actions carry their consumed preflight `token_nonce`.
@@ -148,3 +150,27 @@ Record PASS through the control plane for all seven classes: `scope`, `coverage`
 `negative`, `open-hypothesis`, `novelty-duplicate`, `hygiene-cleanup`, and
 `method-self-attack`. A later material research event makes earlier declarations stale;
 closure must re-run them.
+
+## Closure-review gate attestation
+
+Prose cannot close: `06_audits/CLOSURE-PROOF.md` must bind a resolved human gate
+(`Closure-Gate: G-xxxx (reference: <human ticket>)`), and the ledger must hold the
+matching `HUMAN_GATE_RESOLVED` event with decision `APPROVED` and the same reference.
+Request the gate while a cycle runs (`researchctl gate request` with `what_is_needed`
+naming the closure review); `--closure` refuses a proof with no binding, an unknown
+gate, a non-APPROVED resolution, or a reference mismatch, however polished the
+sections are. Twenty characters of filler pass the section form check by design — the
+gate is what makes the proof load-bearing.
+
+## Fresh-result contradiction
+
+`--closure` re-derives each machine-verifiable class result from freshly performed
+checks and fails when a recorded current PASS contradicts them (`closure
+contradiction: <class> ...`): scope, coverage, hygiene-cleanup and method-self-attack
+contradict on their fresh error domains; negative contradicts when a CLOSED cycle has
+no `TECHNIQUE_EVALUATED`; open-hypothesis contradicts when an open hypothesis is
+neither named nor closed out by the latest open-hypothesis audit. Novelty-duplicate
+and the remaining judgment content are backed by the closure-review gate attestation
+above. The ledger hash chain stays unkeyed (`15_TOOLING.md` known limits) — it proves
+accidental corruption and lazy tampering, not authorship; the gate reference (a human
+ticket) is the out-of-band trail, not a cryptographic proof.

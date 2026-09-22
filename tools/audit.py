@@ -39,6 +39,18 @@ CLOSURE_WORD_SPLIT_RE = re.compile(r"[\s\u200b-\u200f\u2060\ufeff]+")
 CLOSURE_LETTER_RE = re.compile(r"[A-Za-z]")
 CLOSURE_MIN_CHARS = 20
 CLOSURE_MIN_WORDS = 3
+# The closure-review attestation binding: the proof names the resolved human gate
+# (id + human reference) whose APPROVED resolution is the closure review. Filler
+# prose cannot substitute for it — the gate event must exist in the ledger.
+CLOSURE_GATE_RE = re.compile(r"^Closure-Gate:\s*(G-\d+)\s*\(reference:\s*([^)]+)\)", re.M | re.I)
+
+
+def closure_gate_binding(text: str) -> tuple[str, str] | None:
+    """The (gate id, reference) bound in the closure proof, or None when absent."""
+    m = CLOSURE_GATE_RE.search(text or "")
+    if not m:
+        return None
+    return m.group(1).strip(), m.group(2).strip()
 
 
 def closure_body_problem(name: str, body: str) -> str | None:
@@ -177,6 +189,11 @@ def closure_proof_text(root: Path) -> str:
         "Machine-emitted skeleton (`tools/audit.py --emit-proof`); replace every `TODO` prompt "
         "line with the judgment it asks for. `python3 tools/audit.py <root> --closure` must pass "
         "before closure; re-running with `--force` regenerates the skeleton and discards the prose.",
+        "",
+        f"{CLOSURE_TODO}: Closure-Gate: request a closure-review human gate "
+        "(what_is_needed names the closure review), resolve it APPROVED with a human reference, "
+        "then replace this line with `Closure-Gate: G-xxxx (reference: <human ticket>)` — "
+        "closure is refused without a resolved gate binding, however polished the prose is.",
         "",
     ]
     for name in CLOSURE_PROOF_SECTIONS:
@@ -1161,6 +1178,75 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
     if closure:
         for problem in proof_failures:
             errors.append(f"closure proof: {problem}")
+        # Closure-review attestation: the proof binds a resolved human gate (id +
+        # reference); filler prose cannot substitute. The gate must be RESOLVED as
+        # APPROVED with the same human reference the proof cites.
+        try:
+            proof_text = (root / CLOSURE_PROOF_PATH).read_text(errors="ignore")
+        except OSError:
+            proof_text = ""
+        binding = closure_gate_binding(proof_text)
+        if binding is None:
+            errors.append(
+                "closure proof names no Closure-Gate binding (`Closure-Gate: G-xxxx "
+                "(reference: <human ticket>)`) — closure needs a resolved human gate "
+                "attesting the closure review, in addition to the prose sections"
+            )
+        else:
+            gid, reference = binding
+            gate = cp.gate(gid)
+            if gate is None:
+                errors.append(f"closure gate {gid} names no recorded human gate")
+            elif gate.get("status") != "RESOLVED" or gate.get("decision") != "APPROVED":
+                errors.append(
+                    f"closure gate {gid} is not an APPROVED closure review "
+                    f"(status={gate.get('status') or 'unknown'}, decision={gate.get('decision') or 'unknown'})"
+                )
+            elif not reference or str(gate.get("reference") or "").strip() != reference:
+                errors.append(
+                    f"closure gate {gid} reference does not match the proof "
+                    f"(gate={str(gate.get('reference') or '')!r}, proof={reference!r})"
+                )
+        # Fresh-result contradiction: a recorded current PASS that the machine's own
+        # fresh checks refute fails closure. Machine-verifiable classes re-derive
+        # from the errors above plus targeted fresh predicates; judgment-only
+        # classes (open-hypothesis dispositions naming their hypotheses,
+        # novelty-duplicate) are backed by the closure-review gate attestation.
+        fresh_problems: dict[str, str] = {}
+        for cls, keywords in {"scope": ("scope", "endpoints"),
+                              "coverage": ("knowledge_triage",),
+                              "hygiene-cleanup": ("secret",),
+                              "method-self-attack": ("method-self-attack", "matrix")}.items():
+            hit = next((e for e in errors if any(k in e.lower() for k in keywords)), None)
+            if hit:
+                fresh_problems[cls] = hit
+        for cid in cp.all_cycle_ids():
+            if cp.cycle_status(cid) == "CLOSED" and not any(
+                    e.get("type") == "TECHNIQUE_EVALUATED" and e.get("cycle_id") == cid
+                    for e in events):
+                fresh_problems["negative"] = (
+                    f"cycle {cid} is CLOSED with no TECHNIQUE_EVALUATED — no cycle "
+                    "closes without a recorded technique outcome")
+                break
+        open_hids = [hid for hid in cp.all_hypothesis_ids()
+                     if (cp.hypothesis_status(hid) or "") not in
+                     {"VERIFIED", "FALSE_POSITIVE", "NOT_APPLICABLE", "CLOSED"}]
+        if open_hids:
+            open_audits = [e for e in events
+                           if e.get("type") == "AUDIT_RECORDED"
+                           and (e.get("payload") or {}).get("class") == "open-hypothesis"]
+            summary = str((((open_audits or [{}])[-1].get("payload")) or {}).get("summary", ""))
+            unnamed = [hid for hid in open_hids
+                       if hid not in summary and "none" not in summary.lower()]
+            if unnamed:
+                fresh_problems["open-hypothesis"] = (
+                    f"hypotheses {', '.join(sorted(unnamed))} are still open and neither named "
+                    "nor closed out by the latest open-hypothesis audit")
+        for cls, problem in sorted(fresh_problems.items()):
+            if closure_checks.get(f"{cls}_audit_current"):
+                errors.append(
+                    f"closure contradiction: {cls} records a current PASS but the fresh "
+                    f"check fails — {problem}")
         if not all(closure_checks.values()):
             errors.append("closure proof failed: " + ", ".join(k for k, v in closure_checks.items() if not v))
 
@@ -1216,7 +1302,7 @@ def main() -> int:
             print(f"WARN: {w}")
         print(f"events={result['event_count']} evidence={result['evidence_count']} pending_gates={len(result['pending_gates'])}")
         if ns.closure:
-            print("closure=" + ("READY" if all(result["closure_checks"].values()) else "NOT_READY"))
+            print("closure=" + ("READY" if ok and all(result["closure_checks"].values()) else "NOT_READY"))
     return 0 if ok else 1
 
 

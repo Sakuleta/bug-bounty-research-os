@@ -198,7 +198,8 @@ def recording_workspace(cid: str = "C-0001") -> tuple[Path, ControlPlane, str]:
     return r, c, eid
 
 
-def close_workspace(with_action: bool = False, token_nonce: str | None = None) -> tuple[Path, ControlPlane, str]:
+def close_workspace(with_action: bool = False, token_nonce: str | None = None,
+                    with_closure_gate: bool = False) -> tuple[Path, ControlPlane, str]:
     """Minimal CLOSED workspace: one false-positive cycle, auditable evidence, no gates."""
     r = fresh_root()
     c = ControlPlane(r)
@@ -206,6 +207,14 @@ def close_workspace(with_action: bool = False, token_nonce: str | None = None) -
     write_objective(r, "C-0010")
     c.transition_cycle("C-0010", "READY", reason="ready")
     c.transition_cycle("C-0010", "RUNNING", reason="run")
+    if with_closure_gate:
+        # The closure-review attestation on the real path: requested while RUNNING,
+        # resolved APPROVED with a human reference, then the cycle resumes.
+        c.request_gate("G-0001", {"cycle_id": "C-0010",
+                                 "what_is_needed": "Closure review: confirm the false-positive disposition and the audit set before closure",
+                                 "why_human_only": "Only the researcher can attest that closure was reviewed",
+                                 "resume_after": "Gate resolution"})
+        c.resolve_gate("G-0001", decision="APPROVED", reference="ticket-closure-1")
     if with_action:
         action = {
             "id": "A-CLOSURE", "cycle_id": "C-0010",
@@ -266,10 +275,25 @@ def fill_proof(root: Path) -> None:
     """Emit the closure proof and replace every TODO(human) line with rehearsal prose."""
     _audit.emit_closure_proof(root, force=True)
     path = root / "06_audits/CLOSURE-PROOF.md"
+    gate_binding = ""
+    try:
+        cp = ControlPlane(root)
+        for gid in cp.all_gate_ids():
+            gate = cp.gate(gid) or {}
+            if gate.get("status") == "RESOLVED" and gate.get("decision") == "APPROVED" \
+                    and str(gate.get("reference") or "").strip():
+                gate_binding = (f"Closure-Gate: {gid} "
+                                f"(reference: {str(gate['reference']).strip()})")
+                break
+    except (OSError, ValueError):
+        gate_binding = ""
     lines = []
     for line in path.read_text().splitlines():
         if line.startswith("TODO(human):"):
-            lines.append(f"Rehearsal judgment: {line.split(':', 1)[1].strip()} (satisfied by this fixture)")
+            if "Closure-Gate" in line and gate_binding:
+                lines.append(gate_binding)
+            else:
+                lines.append(f"Rehearsal judgment: {line.split(':', 1)[1].strip()} (satisfied by this fixture)")
         else:
             lines.append(line)
     path.write_text("\n".join(lines) + "\n")
@@ -1914,6 +1938,11 @@ cp4.create_cycle("C-0010", cycle_fixture("C-0010", "close", root=root4))
 write_objective(root4, "C-0010")
 cp4.transition_cycle("C-0010", "READY", reason="ready")
 cp4.transition_cycle("C-0010", "RUNNING", reason="run")
+cp4.request_gate("G-0001", {"cycle_id": "C-0010",
+                            "what_is_needed": "Closure review: confirm the false-positive disposition and the audit set before closure",
+                            "why_human_only": "Only the researcher can attest that closure was reviewed",
+                            "resume_after": "Gate resolution"})
+cp4.resolve_gate("G-0001", decision="APPROVED", reference="ticket-closure-8")
 proof4 = root4 / "scope-proof.txt"; proof4.write_text("audit proof\n")
 e4 = cp4.register_evidence("scope-proof.txt", kind="audit", source="researcher-owned", cycle_id="C-0010")["payload"]["id"]
 write_results(root4, "C-0010", e4, disposition="FALSE_POSITIVE")
@@ -2101,7 +2130,7 @@ except ValueError as exc:
     check("record_audit mirrors the summary rule at write time", "summary" in str(exc))
 
 # 14. Closure proof: machine-checked sections, TODO(human) markers, emit/refresh flow.
-pr_root, pr_cp, pr_eid = close_workspace()
+pr_root, pr_cp, pr_eid = close_workspace(with_closure_gate=True)
 record_all_audits(pr_cp, pr_eid)
 proof_path = pr_root / "06_audits/CLOSURE-PROOF.md"
 sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pr_root), "--closure"], capture_output=True, text=True)
@@ -2173,7 +2202,7 @@ sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(proof_root), 
 check("stale emit-proof output is deterministic", sub.returncode == 0 and proof_file.read_text() == text)
 
 # 15. Action ↔ token provenance: controlled-executor actions carry the preflight nonce.
-tok_root, tok_cp, tok_eid = close_workspace(with_action=True)
+tok_root, tok_cp, tok_eid = close_workspace(with_action=True, with_closure_gate=True)
 sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(tok_root)], capture_output=True, text=True)
 check("versioned action without token_nonce warns",
       sub.returncode == 0 and "WARN" in sub.stdout and "token_nonce" in sub.stdout)
@@ -2185,7 +2214,7 @@ check("closure requires token provenance for versioned actions",
 legacyize(tok_root)
 sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(tok_root), "--closure"], capture_output=True, text=True)
 check("legacy actions without token_nonce are tolerated at closure", sub.returncode == 0)
-ok_root, ok_cp, ok_eid = close_workspace(with_action=True, token_nonce="a" * 32)
+ok_root, ok_cp, ok_eid = close_workspace(with_action=True, token_nonce="a" * 32, with_closure_gate=True)
 record_all_audits(ok_cp, ok_eid)
 fill_proof(ok_root)
 sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(ok_root), "--closure"], capture_output=True, text=True)
@@ -2206,7 +2235,7 @@ check("closure readiness is NOT_READY without method-self-attack", 'status: "NOT
 
 # 17. Closure-proof bodies must carry real content: case/space-insensitive TODO
 # detection, an invisible-stripped minimum, and a word/letter requirement.
-pr2_root, pr2_cp, pr2_eid = close_workspace()
+pr2_root, pr2_cp, pr2_eid = close_workspace(with_closure_gate=True)
 record_all_audits(pr2_cp, pr2_eid)
 fill_proof(pr2_root)
 for label, body in [
@@ -2228,6 +2257,31 @@ fill_proof(pr2_root)
 sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pr2_root), "--closure"],
                      capture_output=True, text=True)
 check("closure proof accepts the filled rehearsal bodies", sub.returncode == 0)
+
+# v8.2 W11: closure needs a resolved human gate (filler cannot substitute), and a
+# recorded PASS contradicting a fresh check fails closure.
+_ng_root, _ng_cp, _ng_eid = close_workspace()
+record_all_audits(_ng_cp, _ng_eid)
+fill_proof(_ng_root)
+_ng_sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_ng_root), "--closure"],
+                         capture_output=True, text=True)
+check("v8.2 W11: a gateless filled proof is refused at closure",
+      _ng_sub.returncode != 0 and "Closure-Gate" in (_ng_sub.stdout + _ng_sub.stderr))
+_cd_root, _cd_cp, _cd_eid = close_workspace(with_closure_gate=True)
+_cd_cp.set_scope(["example.test"], "policy://closure-scope")
+record_all_audits(_cd_cp, _cd_eid)
+fill_proof(_cd_root)
+_cd_ok = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_cd_root), "--closure"],
+                        capture_output=True, text=True)
+check("v8.2 W11: attested closure with fresh agreement is READY",
+      _cd_ok.returncode == 0 and "closure=READY" in _cd_ok.stdout)
+(_cd_root / "00_control/engagement.yaml").write_text(
+    'scope:\n  assets:\n  - "example.test"\n  - "evil.example"\n')
+_cd_bad = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_cd_root), "--closure"],
+                         capture_output=True, text=True)
+check("v8.2 W11: a recorded PASS contradicting a fresh check fails closure",
+      _cd_bad.returncode != 0
+      and "closure contradiction: scope" in (_cd_bad.stdout + _cd_bad.stderr))
 
 # 18. Version stamps are monotone: once an event carries os_version, every later event must.
 vs_root = fresh_root(); vs_cp = ControlPlane(vs_root)
@@ -2352,7 +2406,7 @@ check("both versioned axes missing run_id produce per-axis errors",
 
 # 23. Closure-proof parser: fences are opaque, unknown subheadings stay body text,
 # duplicate required headings fail.
-pp_root, pp_cp, pp_eid = close_workspace()
+pp_root, pp_cp, pp_eid = close_workspace(with_closure_gate=True)
 record_all_audits(pp_cp, pp_eid)
 fill_proof(pp_root)
 pp_proof = pp_root / "06_audits/CLOSURE-PROOF.md"

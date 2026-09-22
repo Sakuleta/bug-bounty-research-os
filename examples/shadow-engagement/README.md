@@ -9,8 +9,10 @@ and records the legacy `VERIFIED` transition, which the audit normalizes on read
 
 Read in this order:
 
-1. `11_runtime/events.jsonl` — the canonical ledger, 27 events, hash-chained
-   (`event_hash`/`prev_hash`); every projection below is derived from it.
+1. `11_runtime/events.jsonl` — the canonical ledger, 36 events, hash-chained
+   (`event_hash`/`prev_hash`); every projection below is derived from it. (27
+   archival events plus the v8.2 closure-review gate pair `G-0001` and the
+   re-recorded current audit declarations.)
 2. `04_cycles/C-0001/` — `objective.md`, `plan.yaml` (incl. `knowledge_triage`),
    `results.md`: projected cycle state.
 3. `03_hypotheses/archive/H-0001.yaml` — the closed hypothesis with
@@ -20,7 +22,8 @@ Read in this order:
 5. `06_audits/CLOSURE-PROOF.md` — the filled, machine-checked closure proof:
    `python3 tools/audit.py examples/shadow-engagement --closure` exits 0 (the
    proof was emitted with `--emit-proof` and its judgment prompts completed from
-   the ledger).
+   the ledger). The proof binds closure-review gate `G-0001` (`reference:
+   shadow-closure-review`), resolved APPROVED — filler prose alone cannot close.
 6. `11_runtime/current-context.md` — the smallest useful state, rebuilt by
    `tools/build_context.py` (never hand-edited).
 7. `10_learning/` — `technique-discoveries.md`, `freshness.yaml`,

@@ -2,6 +2,8 @@
 
 Machine-emitted skeleton (`tools/audit.py --emit-proof`); the judgment sections below were filled from the ledger for this rehearsal. `python3 tools/audit.py examples/shadow-engagement --closure` passes.
 
+Closure-Gate: G-0001 (reference: shadow-closure-review)
+
 ## SCOPE_PROOF
 
 - gate: assets

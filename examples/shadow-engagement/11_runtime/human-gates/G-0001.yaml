@@ -1,0 +1,10 @@
+# GENERATED — do not edit by hand; rebuild via tools/researchctl.py (control plane)
+cycle_id: "C-0001"
+resume_after: "Gate resolution"
+status: "RESOLVED"
+what_is_needed: "Closure review: confirm the session-regeneration disposition and the audit set before closure"
+why_human_only: "Only the researcher can attest that closure was reviewed"
+id: "G-0001"
+time: "2026-09-22T15:09:59Z"
+decision: "APPROVED"
+reference: "shadow-closure-review"

@@ -246,11 +246,19 @@ summaries name a current asset / cycle / hypothesis (or say `no assets` / `no cy
 `none`); closure also requires the method self-attack with its six-row matrix
 (`researchctl audit-record method-self-attack PASS "<summary>" --matrix matrix.json
 --evidence <E-id>`). Closure needs `06_audits/CLOSURE-PROOF.md`, current PASS on all
-seven required classes, and a clean machine audit (`07_AUDIT_CLOSURE.md`). The proof is
+seven required classes, a clean machine audit (`07_AUDIT_CLOSURE.md`), and a resolved
+human gate attesting the closure review: request it while a cycle runs (`researchctl
+gate request`, `what_is_needed` names the closure review), resolve it APPROVED with a
+human reference, and record `Closure-Gate: G-xxxx (reference: <ticket>)` in the proof —
+filler prose cannot substitute for that binding, and `--closure` re-derives each
+machine-verifiable class result from fresh checks, failing when a recorded PASS
+contradicts them. The proof is
 machine-checked: `python3 tools/audit.py <root> --emit-proof` writes the skeleton
 (mechanical facts + `TODO(human)` judgment prompts), you fill the prompts, and
-`--closure` fails on a missing file, a missing/empty section, or an unanswered
-`TODO(human)`. Never close from intuition.
+`--closure` fails on a missing file, a missing/empty section, an unanswered
+`TODO(human)`, or a missing/unresolved gate binding. Never close from intuition. The
+ledger hash chain stays unkeyed by design (`15_TOOLING.md` known limits): it proves
+accidental corruption, not authorship — cross-check out-of-band ledger copies for that.
 
 ## 9. Secrets
 
