@@ -18,7 +18,8 @@ from control_plane import (CYCLE_EDGES, EVENT_TYPES, HYP_EDGES, KNOWLEDGE_RESOLU
                            METHOD_SELF_ATTACK_ROWS, REQUIRED_AUDIT_CLASSES, TECHNIQUE_RESULTS,
                            ControlPlane, asset_hosts, broker_consumed_nonces, budget_limits,
                            engagement_assets, evidence_id_ok, host_in_scope, identity_binding,
-                           never_considered_in_window, normalize_cycle_state, pack_change_problem,
+                           IDENTITY_BINDING_REL, never_considered_in_window, normalize_cycle_state,
+                           pack_change_problem,
                            review_packet_digest, review_quote_problem, scope_check,
                            secret_pattern_hits, sha256_file, snapshot_demands)
 from knowledge_index import index_problem, parse_index, selection_cap, selection_query, top_packs  # noqa: E402
@@ -794,6 +795,34 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
                     errors.append(message)
                 else:
                     warnings.append(f"legacy action record (pre-7.3, no os_version): {message}")
+        # Identity provenance: a declared binding needs a ledger IDENTITY_BOUND
+        # record, and the live file must still match its recorded digest — a hand
+        # rewrite of `account_reference` (or any other byte) behind the ledger's
+        # back fails until re-recorded through `researchctl identity-set`, the
+        # same drift contract as scope/budget.
+        id_records = [e for e in events if e.get("type") == "IDENTITY_BOUND"]
+        if not id_records:
+            errors.append(
+                "the declared research identity binding has no IDENTITY_BOUND provenance — "
+                "record the engagement identity with `researchctl identity-set` "
+                "(a writer can otherwise rewrite account_reference behind the ledger)"
+            )
+        else:
+            recorded_digest = str((id_records[-1].get("payload") or {}).get("binding_digest") or "")
+            try:
+                current_digest = sha256_file(root / IDENTITY_BINDING_REL)
+            except OSError as exc:
+                errors.append(
+                    "the declared research identity binding cannot be re-read for its "
+                    f"provenance check ({exc}) — repair 00_control/identity-binding.yaml"
+                )
+                current_digest = ""
+            if current_digest and recorded_digest != current_digest:
+                errors.append(
+                    "00_control/identity-binding.yaml changed behind the ledger's back (digest "
+                    "no longer matches the latest IDENTITY_BOUND record) — re-record the "
+                    "engagement identity with `researchctl identity-set`"
+                )
         # Session binding: a browser receipt names the profile it ran under; it
         # must be the bound session.browser_profile while cross-engagement reuse
         # stays off (default) — drift errors. An explicit
