@@ -320,7 +320,8 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
     """Check each {id, claim, evidence_ref} against its registered evidence.
 
     Returns {"source": "typesafe"|"unavailable", "auto_accept": float, "results": [...],
-    "summary": {...}, "model": ..., "usage": {...}}. Each result carries verdict,
+    "summary": {...}, "model": ..., "usage": {...}, "judgments_recorded": bool,
+    "judgments_error": str (only when the ledger write failed)}. Each result carries verdict,
     confidence and `auto` (confidence >= auto_accept). With `triage=True` a passage
     selection question runs first (skipped when the evidence is a single passage); a
     `none` selection yields `says_nothing` with TRIAGE_NOTE and no relation call, a
@@ -463,8 +464,13 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
            "model": resp.get("model"), "usage": {"input_tokens": usage_in, "output_tokens": usage_out}}
     try:
         record_judgments(root, judgments)
-    except OSError:
-        pass
+    except OSError as exc:
+        # Replay coverage must never be lost silently: the judgments still return,
+        # but the output says the ledger write failed so the gap is visible.
+        out["judgments_recorded"] = False
+        out["judgments_error"] = f"judgment ledger write failed ({exc}) — replay coverage lost"
+    else:
+        out["judgments_recorded"] = True
     return out
 
 

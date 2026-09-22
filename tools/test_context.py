@@ -962,5 +962,14 @@ _w14_denied = _w14_check(POLICY_DENY, {'claims': [{'id': 'v9', 'claim': 'x', 'ev
                          client=_w14_support_stub, verify=True)
 check('v8.2 W14: verify stays gated by external_judgment ALLOWED',
       _w14_denied['source'] == 'unavailable' and _w14_denied['results'] == [])
+with mock.patch.object(ts_claims, "record_judgments", side_effect=OSError("injected ledger failure")):
+    _w14_lost = _w14_check(_w14root, {'claims': [{'id': 'vL', 'claim': 'HTTP 200 was observed',
+                                                  'evidence_ref': 'E-000001'}]},
+                           client=_w14_support_stub, verify=True)
+check('backlog B10: a judgment-ledger write failure is surfaced, not swallowed',
+      bool(_w14_lost['results']) and _w14_lost.get('judgments_recorded') is False
+      and 'judgment' in str(_w14_lost.get('judgments_error', '')).lower())
+check('backlog B10: the happy path reports recorded judgments',
+      _w14_out.get('judgments_recorded') is True)
 
 print(f'\n{len(passed)}/{len(passed)} passed')
