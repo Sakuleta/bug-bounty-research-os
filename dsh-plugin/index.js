@@ -61,6 +61,12 @@
  *       action. Install-shaped commands and explicit-localhost work stay allowed;
  *       install shape is judged per command segment (`&&`/`||`/`;`/`|`), so an install
  *       segment cannot stand the gate down for a later browser segment.
+ *   R7  Broker policy (tools/broker/): when a broker socket is present the broker is
+ *       MANDATORY — a token without `broker_sig` is refused (re-prepare), BOTH the local
+ *       engagement binding and the broker policy copy must allow the target, and the
+ *       token is consumed THROUGH THE BROKER before dispatch (a broker refusal or an
+ *       unreachable broker fails closed — no dispatch). The local trust path survives
+ *       only when no broker socket exists.
  *
  * v1 limits (documented, deliberate): the digest canonicalizes the shape (method
  * uppercased, lowercase header keys, body folded into body_sha256) exactly as the
@@ -81,7 +87,8 @@
  */
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import net from 'node:net'
 import { homedir, tmpdir } from 'node:os'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 
@@ -814,6 +821,171 @@ function consumeToken(root, token) {
   }) + '\n')
 }
 
+// ---------- policy broker (R7) ----------
+//
+// The broker (tools/broker/) keeps the policy snapshot, the signing key and the
+// single-use token ledger OUTSIDE the workspace. Discovery is env-first, then the
+// default home socket when the file exists; an absent socket is advisory local mode,
+// but any transport/parse failure on a present socket fails closed at the call site.
+
+const BROKER_SOCKET_REL = ['.dsh', 'research-os-broker', 'broker.sock']
+const BROKER_MAX_LINE = 1024 * 1024
+
+/** Broker socket path when one is configured AND present, else undefined. */
+function brokerPath() {
+  const env = process.env.RESEARCH_OS_BROKER_SOCKET
+  if (env && existsSync(env)) return env
+  const fallback = join(homedir(), ...BROKER_SOCKET_REL)
+  return existsSync(fallback) ? fallback : undefined
+}
+
+/** Canonical workspace identity the broker signs: the symlink-resolved absolute path.
+ *
+ *  macOS `/var` is a symlink to `/private/var`; the Python side resolves with
+ *  `Path.resolve()`, so a lexical `path.resolve()` here would not match the signature. */
+function brokerWorkspace(root) {
+  try { return realpathSync(root) } catch { return resolve(root) }
+}
+
+/** One newline-delimited JSON call against the broker. Throws on any failure (a broker
+ *  refusal is a normal `{ok:false}` response; transport and parse errors are not). */
+function brokerCall(op, payload = {}, timeoutMs = 3000) {
+  return new Promise((resolvePromise, reject) => {
+    const path = brokerPath()
+    if (!path) {
+      reject(new Error('no broker socket (start one: researchctl broker serve)'))
+      return
+    }
+    const sock = net.connect({ path })
+    let buf = ''
+    let settled = false
+    let timer = null
+    const finish = (err, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      try { sock.destroy() } catch {}
+      if (err) reject(err)
+      else resolvePromise(value)
+    }
+    timer = setTimeout(
+      () => finish(new Error(`broker ${op} timed out after ${timeoutMs}ms`)), timeoutMs)
+    sock.on('connect', () => {
+      const line = JSON.stringify({ op, ...payload }) + '\n'
+      if (line.length > BROKER_MAX_LINE) {
+        finish(new Error(`broker ${op} request exceeds the ${BROKER_MAX_LINE} byte line bound`))
+        return
+      }
+      sock.write(line)
+    })
+    sock.on('data', (chunk) => {
+      buf += chunk
+      if (buf.length > BROKER_MAX_LINE) {
+        finish(new Error(`broker ${op} response exceeds the ${BROKER_MAX_LINE} byte line bound`))
+        return
+      }
+      const end = buf.indexOf('\n')
+      if (end < 0) return
+      try {
+        finish(null, JSON.parse(buf.slice(0, end)))
+      } catch (e) {
+        finish(new Error(`broker ${op} response is not JSON: ${e && e.message ? e.message : e}`))
+      }
+    })
+    sock.on('error', (e) => finish(e))
+    sock.on('close', () => finish(new Error(`broker ${op} closed the connection without a response`)))
+  })
+}
+
+/** Consume a broker-signed token through the broker. Never falls back silently: any
+ *  transport failure returns `{ok:false, unreachable:true}` with an actionable error. */
+async function brokerConsumeToken(root, token, shape, family) {
+  try {
+    const resp = await brokerCall('token.consume', {
+      workspace: brokerWorkspace(root),
+      digest: canonicalDigest(shape),
+      tool_family: family,
+      nonce: String(token.broker_nonce || token.nonce || ''),
+      sig: String(token.broker_sig || ''),
+    })
+    if (!resp || typeof resp !== 'object') return { ok: false, error: 'broker returned a non-object response' }
+    return resp
+  } catch (e) {
+    return {
+      ok: false,
+      unreachable: true,
+      error: `broker unreachable (${e && e.message ? e.message : e}) — refusing the request; start it with ` +
+        '`researchctl broker serve` (or remove the stale socket), then prepare a fresh preflight',
+    }
+  }
+}
+
+/** The broker's policy copy for this workspace (one read per call). Throws fail-closed. */
+async function brokerPolicyGet(root) {
+  const resp = await brokerCall('policy.get', { workspace: brokerWorkspace(root) })
+  if (!resp || resp.ok !== true) throw new Error(resp && resp.error ? resp.error : 'broker policy.get failed')
+  return resp.policy
+}
+
+/** R7 scope decision from the BROKER policy copy (the authority while a broker is up). */
+function brokerScopeReason(policy, url) {
+  if (!policy) {
+    return 'research-os-enforcer: the broker holds no policy for this workspace — register the scope with the broker (researchctl scope-set), then prepare a fresh preflight.'
+  }
+  if (String(policy.gate) === 'none') return undefined
+  const assets = Array.isArray(policy.assets) ? policy.assets : null
+  if (assets === null || assets.length === 0) {
+    return 'research-os-enforcer: the broker policy is unenforceable (empty or non-list assets) — repair it with researchctl scope-set; refusing the request.'
+  }
+  const host = hostFromUrl(url)
+  if (!host || !hostInScope(host, assetHosts(assets))) {
+    return `research-os-enforcer: target host '${host || url}' is outside the engagement scope (broker policy assets=${JSON.stringify(assets)}) — refusing the request; update the broker policy through researchctl scope-set.`
+  }
+  return undefined
+}
+
+/** The shared broker-mode gate for one controlled call (both executor arms).
+ *
+ *  While a broker socket exists the broker is the authority, never an optional extra:
+ *   - a token without `broker_sig` is refused (the operator must re-prepare);
+ *   - BOTH scope checks run — the local engagement binding and the broker policy copy —
+ *     and either denial stops the dispatch (belt and braces);
+ *   - the token then consumes through the broker; a refusal retires the local record,
+ *     a transport failure leaves it retryable, and neither dispatches.
+ *  Returns `undefined` when the call may proceed, else the refusal text. The local
+ *  trust path survives only when no socket exists. */
+async function consumeBrokerToken(root, token, shape, family) {
+  if (brokerPath() === undefined) return scopeReasonFor(root, shape.url)
+  if (!token.broker_sig) {
+    consumeToken(root, token)
+    return 'the policy broker is running; re-prepare so the token is broker-signed ' +
+      '(python3 tools/researchctl.py . prepare payload.json)'
+  }
+  const localDenied = scopeReasonFor(root, shape.url)
+  if (localDenied) {
+    consumeToken(root, token)
+    return localDenied
+  }
+  let policy
+  try {
+    policy = await brokerPolicyGet(root)
+  } catch (e) {
+    return `broker unreachable — the broker policy could not be read (${e && e.message ? e.message : e}) — ` +
+      'refusing the request (fail closed); start it with `researchctl broker serve` and prepare a fresh preflight'
+  }
+  const brokerDenied = brokerScopeReason(policy, shape.url)
+  if (brokerDenied) {
+    consumeToken(root, token)
+    return brokerDenied
+  }
+  const consumed = await brokerConsumeToken(root, token, shape, family)
+  if (consumed.ok !== true) {
+    if (!consumed.unreachable) consumeToken(root, token)
+    return String(consumed.error || 'broker refused the token')
+  }
+  return undefined
+}
+
 function trunc(s, n) {
   const text = String(s == null ? '' : s)
   return text.length > n ? text.slice(0, n) + `\n…[truncated ${text.length - n} chars]` : text
@@ -1012,12 +1184,17 @@ async function runControlledRequest({ root, args, fetchImpl }) {
   if (!token) {
     return { ok: false, text: 'research_os_request: no matching unconsumed preflight token (tokens are single-use and expire). Prepare one first:\n  python3 tools/researchctl.py . prepare payload.json\nwith request_shape:\n  ' + JSON.stringify(redactShapeForText(shape)) }
   }
-  consumeToken(root, token)
-  const scopeDenied = scopeReasonFor(root, shape.url)
-  if (scopeDenied) {
-    log('DENY(executor) ' + shape.method + ' ' + safeUrl + ' :: ' + scopeDenied)
-    return { ok: false, text: redactUrlSecrets(scopeDenied) }
+  // R7: while a broker socket exists the broker is mandatory — unsigned tokens are
+  // refused, both scope checks (local + broker) must pass, and the token consumes
+  // through the broker before dispatch. Any denial means no dispatch, no fallback.
+  const brokerDenial = await consumeBrokerToken(root, token, shape, 'http')
+  if (brokerDenial) {
+    const reason = redactUrlSecrets(brokerDenial)
+    const where = brokerPath() === undefined ? 'executor' : 'executor broker'
+    log(`DENY(${where}) ${shape.method} ${safeUrl} :: ${reason}`)
+    return { ok: false, text: `research_os_request: ${reason}` }
   }
+  consumeToken(root, token)
   const lifecycleDenied = cycleLiveReason(root, token)
   if (lifecycleDenied) {
     log('DENY(executor) lifecycle ' + shape.method + ' ' + safeUrl + ' :: ' + lifecycleDenied)
@@ -1125,12 +1302,16 @@ async function runControlledBrowser({ root, args }) {
   if (!token) {
     return { ok: false, text: 'research_os_browser: no matching unconsumed browser preflight token (tokens are single-use and expire). Prepare one first:\n  python3 tools/researchctl.py . prepare payload.json\nwith "tool_family": "browser" and request_shape:\n  ' + JSON.stringify(redactShapeForText(shape)) }
   }
-  consumeToken(root, token)
-  const scopeDenied = scopeReasonFor(root, shape.url)
-  if (scopeDenied) {
-    log('DENY(executor) browser ' + safeUrl + ' :: ' + scopeDenied)
-    return { ok: false, text: redactUrlSecrets(scopeDenied) }
+  // R7: same mandatory broker gate as the HTTP arm — unsigned refusal, both scope
+  // checks, broker consume; no dispatch on any denial.
+  const brokerDenial = await consumeBrokerToken(root, token, shape, 'browser')
+  if (brokerDenial) {
+    const reason = redactUrlSecrets(brokerDenial)
+    const where = brokerPath() === undefined ? 'executor browser' : 'executor broker browser'
+    log(`DENY(${where}) ${safeUrl} :: ${reason}`)
+    return { ok: false, text: `research_os_browser: ${reason}` }
   }
+  consumeToken(root, token)
   const lifecycleDenied = cycleLiveReason(root, token)
   if (lifecycleDenied) {
     log('DENY(executor) lifecycle browser ' + safeUrl + ' :: ' + lifecycleDenied)
@@ -1288,3 +1469,4 @@ function apply(ctx) {
 export { name, inject, apply }
 // Test surface (pure helpers + executor core): conformance and integration suites.
 export { canonicalDigest, shapeFromArgs, browserShapeFromArgs, loadTokenStates, selectToken, runControlledRequest, runControlledBrowser, scopeReasonFor, redactSecrets, redactHeaderLine, redactUrlSecrets, redactShapeForText, mentionsProtected }
+export { brokerPath, brokerWorkspace, brokerCall, brokerConsumeToken, consumeBrokerToken, brokerPolicyGet, brokerScopeReason }

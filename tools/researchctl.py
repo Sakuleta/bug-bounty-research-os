@@ -4,17 +4,96 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from control_plane import ControlPlane, never_considered_packs, scope_check  # noqa: E402
+try:
+    from broker import client as broker_client  # noqa: E402
+except ImportError:
+    # A partial workspace copy (the replay fixture carries only the tool files it
+    # needs) keeps every non-broker command working; `broker` commands then refuse.
+    broker_client = None
+from control_plane import (  # noqa: E402
+    ControlPlane, broker_client as load_broker_client, never_considered_packs, scope_check,
+)
 from ts_triage import suggest as triage_suggest  # noqa: E402
 from ts_claims import check_claims, check_draft  # noqa: E402
+
+BROKER_SCRIPT = Path(__file__).resolve().parent / "broker" / "broker.py"
 
 
 def load_json(path: str):
     return json.loads(Path(path).read_text())
+
+
+def scope_verdict(root: Path, url: str) -> dict:
+    """The authoritative per-URL scope decision for the CLI/runner seam.
+
+    While a broker socket is present the broker's `scope.check` decides (its policy copy
+    is the authority); an unreachable broker or a broker refusal is a DENY — never a
+    silent fallback to the workspace-local scope. With no socket the local
+    `scope_check` behavior is unchanged. The returned shape mirrors `scope_check`
+    (`gate`, `in_scope`, `host`, `assets`) plus an `authority` marker.
+    """
+    client = load_broker_client()
+    if client is None:
+        return {**scope_check(root, url), "authority": "local"}
+    path = client.broker_path()
+    try:
+        response = client.call("scope.check", timeout=3,
+                               workspace=client.workspace_key(root), url=url)
+    except client.BrokerUnavailable as exc:
+        return {
+            "gate": "broker-unreachable", "in_scope": False, "host": "", "assets": None,
+            "authority": "broker",
+            "reason": (f"the broker socket {path} is present but unreachable (fail closed): {exc} — "
+                       "start the broker (`researchctl broker serve`) or remove the stale socket"),
+        }
+    if not response.get("ok"):
+        return {
+            "gate": "broker-refused", "in_scope": False, "host": "", "assets": None,
+            "authority": "broker",
+            "reason": f"the broker refused the scope check (fail closed): {response.get('error')}",
+        }
+    return {
+        "gate": response.get("gate"), "in_scope": response.get("in_scope") is True,
+        "host": response.get("host") or "", "assets": response.get("assets"),
+        "authority": "broker",
+    }
+
+
+def broker_status(root: Path) -> dict:
+    """Socket, availability, policy/key presence and version — fail closed on a stale socket."""
+    if broker_client is None:
+        raise ValueError("tools/broker/ is not present in this workspace copy — the broker is unavailable")
+    path = broker_client.broker_path()
+    home = broker_client.broker_home()
+    out = {
+        "socket": str(path) if path else str(home / broker_client.SOCKET_NAME),
+        "home": str(home),
+        "available": broker_client.available(),
+        "key_present": (home / "key").exists(),
+        "version": None,
+        "policy_present": None,
+        "policy": None,
+    }
+    if not out["available"]:
+        return out
+    try:
+        response = broker_client.call("status", timeout=3, workspace=broker_client.workspace_key(root))
+    except broker_client.BrokerUnavailable as exc:
+        raise ValueError(
+            f"broker socket {path} is present but unreachable (fail closed): {exc} — start the "
+            "broker (`researchctl broker serve`) or remove the stale socket") from exc
+    if not response.get("ok"):
+        raise ValueError(f"broker status failed: {response.get('error')}")
+    out["version"] = response.get("version")
+    out["policy_present"] = response.get("policy_present")
+    out["policy"] = response.get("policy")
+    out["key_present"] = bool(response.get("key_present", out["key_present"]))
+    return out
 
 
 def refs(ns):
@@ -127,6 +206,15 @@ def main() -> int:
     w = sub.add_parser("worker")
     w.add_argument("json")
     w.set_defaults(fn="worker")
+    br = sub.add_parser("broker")
+    brs = br.add_subparsers(dest="op", required=True)
+    x = brs.add_parser("status", help="broker socket, availability, policy/key presence and version")
+    x.set_defaults(fn="broker-status")
+    x = brs.add_parser("serve", help="run the policy broker in the foreground "
+                                     "(delegates to tools/broker/broker.py --serve)")
+    x.add_argument("--home", default=None, help="broker home override (default RESEARCH_OS_BROKER_HOME "
+                                                "or ~/.dsh/research-os-broker)")
+    x.set_defaults(fn="broker-serve")
 
     au = sub.add_parser("audit-record")
     au.add_argument("audit_class")
@@ -180,7 +268,7 @@ def main() -> int:
         elif ns.fn == "prepare":
             out = cp.prepare_action(load_json(ns.json))
         elif ns.fn == "scope-check":
-            out = scope_check(Path(ns.root), ns.url)
+            out = scope_verdict(Path(ns.root), ns.url)
         elif ns.fn == "scope-set":
             data = load_json(ns.json)
             out = cp.set_scope(data.get("assets", []), data.get("source_reference", ""),
@@ -201,6 +289,15 @@ def main() -> int:
             out = cp.set_budget(load_json(ns.json))
         elif ns.fn == "worker":
             out = cp.merge_worker(load_json(ns.json))
+        elif ns.fn == "broker-status":
+            out = broker_status(cp.root)
+        elif ns.fn == "broker-serve":
+            if not BROKER_SCRIPT.exists():
+                raise ValueError(f"tools/broker/broker.py is missing from this workspace copy ({BROKER_SCRIPT})")
+            argv = [sys.executable, str(BROKER_SCRIPT), "--serve"]
+            if ns.home:
+                argv += ["--home", ns.home]
+            os.execv(sys.executable, argv)
         elif ns.fn == "audit-record":
             out = cp.record_audit(ns.audit_class, ns.status, ns.summary, cycle_id=ns.cycle,
                                   evidence_refs=ns.evidence,

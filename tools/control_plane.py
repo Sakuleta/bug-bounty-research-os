@@ -694,6 +694,54 @@ def _lock(root: Path, timeout: float = 10.0):
         shutil.rmtree(lock, ignore_errors=True)
 
 
+def _broker_dir() -> Path:
+    return Path(__file__).resolve().parent / "broker"
+
+
+def _broker_socket_hint() -> Path | None:
+    """Socket discovery that does not need tools/broker/client.py (broken installs).
+
+    Mirrors `broker.client.broker_path()`: RESEARCH_OS_BROKER_SOCKET wins, else the
+    socket under RESEARCH_OS_BROKER_HOME (default ~/.dsh/research-os-broker).
+    """
+    env = os.environ.get("RESEARCH_OS_BROKER_SOCKET")
+    if env:
+        return Path(env).expanduser()
+    home = os.environ.get("RESEARCH_OS_BROKER_HOME")
+    base = Path(home).expanduser() if home else Path.home() / ".dsh" / "research-os-broker"
+    return base / "broker.sock"
+
+
+def broker_client():
+    """The broker client module when a broker socket is present, else None.
+
+    The broker (`tools/broker/`) holds the policy snapshot, the signing key and the
+    single-use token ledger OUTSIDE the workspace. `None` means no socket is present and
+    callers keep the workspace-local behavior (advisory mode, `tools/broker/README.md`);
+    a present-but-unreachable socket is NOT "no broker" — callers fail closed on
+    `BrokerUnavailable`.
+
+    Only a missing `tools/broker/` DIRECTORY may degrade to advisory local mode (a
+    partial workspace copy without the broker). A `tools/broker/` directory whose client
+    cannot be imported while a broker socket is present is a broken install: this raises
+    (fail closed) instead of silently dropping to the workspace-local trust path.
+    """
+    if not _broker_dir().is_dir():
+        return None
+    try:
+        from broker import client
+    except ImportError as exc:
+        hint = _broker_socket_hint()
+        if hint is not None and hint.exists():
+            raise ValueError(
+                "tools/broker/ exists but its client cannot be imported — the broker install "
+                f"is broken (fail closed; a broker socket is present at {hint}): {exc} — repair "
+                "tools/broker/client.py, or remove the tools/broker directory to run in advisory "
+                "local mode") from exc
+        return None
+    return client if client.available() else None
+
+
 class ControlPlane:
     """Deep module hiding event storage, state machines, integrity checks and projections."""
 
@@ -1692,6 +1740,11 @@ class ControlPlane:
         a recorded SCOPE_CHANGED, a non-empty parsed asset list, or an explicit depth-1
         `gate:` line (deliberate configuration). The first bootstrap record on a pristine
         template may omit it.
+
+        When a broker socket is present (tools/broker/), the same record is pushed to the
+        broker after the local write; a present-but-failing push raises (fail closed)
+        because `prepare_action` refuses while the broker holds no policy for this
+        workspace. No socket means advisory local mode.
         """
         reference = str(source_reference or "").strip()
         if not reference:
@@ -1739,8 +1792,45 @@ class ControlPlane:
                     "human_reference": human,
                 },
             )
+        self._push_broker_policy(items, mode, reference, human)
         self.refresh()
         return event
+
+    def _push_broker_policy(self, items: list[str], mode: str, reference: str, human: str) -> None:
+        """Push the recorded scope (and the current budget caps) to the broker when its
+        socket is present.
+
+        The local record is written first (it remains the human-visible engagement binding
+        and the SCOPE_CHANGED event stands); a present-but-failing push raises, because
+        `prepare_action` refuses while a broker socket is present without a matching
+        policy — keeping the two copies silently apart is the failure this seam prevents.
+        The budget caps are read at push time (`budget_limits`), so re-running scope-set
+        refreshes the broker's enforced limits; a malformed local budget block refuses
+        the push rather than storing an uncapped policy.
+        """
+        client = broker_client()
+        if client is None:
+            return
+        limits = budget_limits(self.root)
+        if limits == BUDGET_MALFORMED:
+            raise ValueError(
+                "the engagement budget block is malformed (fail closed) — repair it with "
+                "`researchctl budget set` before the broker policy push; the local SCOPE_CHANGED "
+                "record stands, but the broker copy was not updated")
+        try:
+            response = client.call("policy.put", timeout=5, workspace=str(self.root), assets=items,
+                                   gate=mode, source_reference=reference, human_reference=human,
+                                   budget=limits)
+        except client.BrokerUnavailable as exc:
+            raise ValueError(
+                f"engagement scope was recorded locally, but the broker policy push failed "
+                f"(fail closed): {exc} — start the broker (`researchctl broker serve`) or unset "
+                "RESEARCH_OS_BROKER_SOCKET before retrying; prepare refuses while a broker socket "
+                "is present without a policy") from exc
+        if not response.get("ok"):
+            raise ValueError(
+                f"the broker refused the policy push (fail closed): {response.get('error')} — "
+                "the local SCOPE_CHANGED record stands; repair the broker policy before preparing")
 
     @staticmethod
     def _leading_ws(line: str) -> str:
@@ -2258,6 +2348,14 @@ class ControlPlane:
         `body_sha256 = sha256(body)` with `body` dropped — see
         `canonical_request_shape`. The token's preflight carries the normalized shape,
         so a hand-built prepare and a tool call cannot disagree about the digest bytes.
+
+        When a broker socket is present (tools/broker/), the broker is the token
+        authority: the workspace must already hold a broker policy (`researchctl
+        scope-set` pushes it), the broker performs its own scope check and signs the
+        minted record, and the local store mirrors it with `broker_sig` /
+        `broker_nonce` / `broker_workspace` so the enforcer consumes through the
+        broker before dispatch. A present-but-unreachable broker, a missing policy or a
+        broker refusal raises (fail closed); no socket means advisory local mode.
         """
         required = [
             "target", "scope_status", "account", "object_owner", "purpose", "hypothesis",
@@ -2300,23 +2398,10 @@ class ControlPlane:
             )
         digest = hashlib.sha256(_json_dump(shape).encode("utf-8")).hexdigest()
         normalized = {**action, "request_shape": shape}
+        client = broker_client()
+        if client is not None:
+            self._require_broker_policy(client)
         issued = time.time()
-        token = {
-            "action_id": "",
-            "nonce": secrets.token_hex(16),
-            "issued_at": now(),
-            "expires_at": datetime.fromtimestamp(issued + max(30, int(ttl_seconds)),
-                                                 tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "tool_family": str(action.get("tool_family", "http")),
-            "argument_digest": digest,
-            "cycle_id": cycle_id,
-            "hypothesis": hyp,
-            "target": str(action.get("target", "")),
-            "consumed": False,
-            # The full validated preflight travels with the token so the controlled
-            # executor can write ACTION_RECORDED after the call without re-typing it.
-            "preflight": redact(dict(normalized)),
-        }
         with _lock(self.root):
             # The budget check shares the critical section with the token write: two
             # concurrent prepares cannot both slip past the last available slot.
@@ -2341,12 +2426,30 @@ class ControlPlane:
                     f"engagement budget exhausted ({counts['engagement']}/{cap_total}) — record a "
                     "human-approved raise via `researchctl budget set`"
                 )
-            existing = self._read_events()
-            prepared = 0
-            if self._tokens_file().exists():
-                prepared = sum(1 for line in self._tokens_file().read_text(errors="ignore").splitlines() if line.strip())
-            aid = f"A-{sum(1 for e in existing if e.get('type') == 'ACTION_RECORDED') + prepared + 1:06d}"
-            token["action_id"] = aid
+            if client is None:
+                existing = self._read_events()
+                prepared = 0
+                if self._tokens_file().exists():
+                    prepared = sum(1 for line in self._tokens_file().read_text(errors="ignore").splitlines() if line.strip())
+                aid = f"A-{sum(1 for e in existing if e.get('type') == 'ACTION_RECORDED') + prepared + 1:06d}"
+                token = {
+                    "action_id": aid,
+                    "nonce": secrets.token_hex(16),
+                    "issued_at": now(),
+                    "expires_at": datetime.fromtimestamp(issued + max(30, int(ttl_seconds)),
+                                                         tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "tool_family": str(action.get("tool_family", "http")),
+                    "argument_digest": digest,
+                    "cycle_id": cycle_id,
+                    "hypothesis": hyp,
+                    "target": str(action.get("target", "")),
+                    "consumed": False,
+                    # The full validated preflight travels with the token so the controlled
+                    # executor can write ACTION_RECORDED after the call without re-typing it.
+                    "preflight": redact(dict(normalized)),
+                }
+            else:
+                token = self._broker_token(client, normalized, shape, digest, cycle_id, hyp, ttl_seconds)
             # The token store and the prepare output are audit-visible: scrub the same
             # secret shapes and sensitive query/fragment values the ledger uses, so a
             # target URL cannot smuggle a credential into either surface. The digest
@@ -2356,6 +2459,63 @@ class ControlPlane:
                 fh.write(_json_dump(token) + "\n")
         self.refresh()
         return token
+
+    def _require_broker_policy(self, client) -> None:
+        """A present broker is the token authority: no policy means no token (fail closed)."""
+        try:
+            response = client.call("policy.get", timeout=5, workspace=str(self.root))
+        except client.BrokerUnavailable as exc:
+            raise ValueError(
+                f"broker socket is present but unreachable (fail closed): {exc} — start the broker "
+                "(`researchctl broker serve`) or unset RESEARCH_OS_BROKER_SOCKET before preparing") from exc
+        if not response.get("ok"):
+            raise ValueError(
+                f"the broker refused to read the workspace policy (fail closed): {response.get('error')}")
+        if response.get("policy") is None:
+            raise ValueError(
+                "the broker holds no policy for this workspace — register the scope with the broker: "
+                "run `researchctl scope-set` (the broker is the token authority while its socket is present)")
+
+    def _broker_token(self, client, normalized: dict[str, Any], shape: dict[str, Any], digest: str,
+                      cycle_id: str, hyp: str, ttl_seconds: int) -> dict[str, Any]:
+        """Mint through the broker; returns the local token-store record.
+
+        The broker performs the scope check from its OWN policy copy and signs the record.
+        The local store mirrors the returned fields plus `broker_sig` / `broker_nonce` /
+        `broker_workspace`, so the enforcer can consume through the broker before dispatch.
+        """
+        family = str(normalized.get("tool_family", "http"))
+        try:
+            response = client.call("token.mint", timeout=5, workspace=str(self.root),
+                                   preflight=redact(dict(normalized)), request_shape=shape,
+                                   tool_family=family, ttl_seconds=max(30, int(ttl_seconds)))
+        except client.BrokerUnavailable as exc:
+            raise ValueError(
+                f"broker socket is present but the mint call failed (fail closed): {exc} — "
+                "start the broker (`researchctl broker serve`) and prepare again") from exc
+        if not response.get("ok"):
+            raise ValueError(f"the broker refused the preflight token (fail closed): {response.get('error')}")
+        minted = response["token"]
+        if minted.get("digest") != digest:
+            raise ValueError(
+                "the broker digest disagrees with the local canonical digest — refusing the token "
+                "(canonicalization drift between prepare and the broker)")
+        return {
+            "action_id": minted["action_id"],
+            "nonce": minted["nonce"],
+            "broker_nonce": minted["nonce"],
+            "broker_sig": minted["sig"],
+            "broker_workspace": minted["workspace"],
+            "issued_at": now(),
+            "expires_at": minted["expires_at"],
+            "tool_family": minted["tool_family"],
+            "argument_digest": minted["digest"],
+            "cycle_id": cycle_id,
+            "hypothesis": hyp,
+            "target": str(normalized.get("target", "")),
+            "consumed": False,
+            "preflight": redact(dict(normalized)),
+        }
 
     def request_gate(self, gid: str, request: dict[str, Any], actor: str = "controller") -> dict[str, Any]:
         if not gate_id_ok(gid):

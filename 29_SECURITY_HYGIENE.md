@@ -64,6 +64,18 @@ and `tools/ts_claims.py` before any network call; no CLI flag overrides it. Opt 
 after confirming the provider's data-handling terms for the engagement (see the provider
 data boundary above).
 
+## Signing-key boundary (policy broker)
+
+The policy broker's HMAC key lives only at `<home>/key` (0600, created once, never
+leaves the home). It is never copied into a workspace, never registered as evidence,
+never quoted into the ledger or agent context, never returned by `status`/`hello`, and
+never written to `audit.log`. The boundary is honest about its limit: a same-UID agent
+that can read files can still read the key — keeping the broker home out of the agent's
+reach requires OS isolation, not file modes. Treat any read of `<home>/key`,
+`<home>/tokens.jsonl` or `<home>/audit.log` outside the broker as an incident. Rotate by
+removing the broker home: it invalidates every outstanding token and the audit trail
+with it, so keep an out-of-band copy of anything that must survive.
+
 ## Cost / budget boundary
 
 Live actions burn a finite engagement budget, so capacity is capped in code, not by

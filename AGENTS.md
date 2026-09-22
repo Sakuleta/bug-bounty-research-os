@@ -124,6 +124,14 @@ the audit does not check this; the loop above does.
   explicit human opt-out for non-target work. In-scope hosts are reachable only through
   the controlled executors (`research_os_request`/`research_os_browser`) — web tools are
   gated for in-scope hosts.
+- Scope has a second, out-of-workspace authority when the policy broker is running:
+  `researchctl scope-set` pushes the same record (plus the budget caps) to `tools/broker/`;
+  `researchctl prepare` refuses unless the broker holds a policy and mints the token there
+  (signed, `B-…`, single-use in the broker's own ledger); the enforcer refuses unsigned
+  tokens whenever the socket is present, consumes through the broker before dispatch, and
+  re-checks the host against both the local binding and the broker policy (unreachable
+  broker ⇒ no dispatch). `researchctl broker status` / `broker serve`; no socket ⇒
+  advisory local mode.
 - Register evidence immediately (`researchctl evidence register`); every important
   claim traces to an observation. Register immutable SNAPSHOTS (slice files), never
   living documents — registration stores a content-addressed copy under
@@ -158,6 +166,15 @@ Verify the machine-level enforcer is actually present and current with
 `python3 tools/harness_check.py` — per profile OK/MISSING/DRIFT against
 `dsh-plugin/index.js`, plus a restart-pending warning when the last `APPLY` predates
 the installed plugin; an absent or drifted install enforces nothing.
+
+On macOS, egress containment below the tool layer is available for the agent host:
+`tools/containment/generate_profile.py` emits a deterministic `sandbox-exec` profile
+(`(deny default)`, loopback host spec, `--workspace`-restricted writes) and
+`tools/containment/selftest.py` proves it on the machine with in-machine probes only
+(an OS-rejected profile is a FAIL). Wrap the host with
+`sandbox-exec -f <profile> -- <host command>` so off-host egress is closed at the
+kernel; the API is deprecated and the profile cannot pin literal non-loopback IPs on
+macOS 26 — defense-in-depth.
 
 ## 5. Browser (BUA) pattern
 
@@ -207,10 +224,12 @@ disclosure, or third-party contact without explicit human approval, ever.
 
 ## 8. Audits (prove it, don't feel it)
 
-Run `tools/audit.py` regularly; all suites under `tools/test_*.py` must stay green
-and so must the node suites (`node tools/bua/run.test.mjs`, the guarded
+Run `tools/audit.py` regularly; all suites under `tools/test_*.py` (incl.
+`tools/test_broker.py` and `tools/test_containment.py`) must stay green and so must the
+node suites (`node tools/bua/run.test.mjs`, the guarded
 `node tools/bua/run.e2e.test.mjs` which SKIPs without a provisioned browser,
-`node dsh-plugin/conformance.test.mjs`, `node dsh-plugin/executor.integration.test.mjs`).
+`node dsh-plugin/conformance.test.mjs`, `node dsh-plugin/executor.integration.test.mjs`,
+`node dsh-plugin/broker.integration.test.mjs`).
 `tools/test_replay.py` replays a fixture set of canonical shapes through the JS executor
 core twice against a local canned server and diffs HTTP status, the post-redaction
 header set and the body hash per capture; with a workspace argument it re-scans every

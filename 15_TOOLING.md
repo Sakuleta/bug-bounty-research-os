@@ -442,6 +442,26 @@ pending). Exit 0 when at least one profile is OK and none DRIFT, else 1 — a dr
 install is an unenforced workspace. To disable it, delete its row in
 `~/.dsh/profiles/web/cordis.patch.yml` and restart the host.
 
+### Policy broker (scope/token authority outside the workspace, optional)
+
+`tools/broker/` runs a stdlib Unix-socket daemon (`python3 tools/broker/broker.py --serve`, or `researchctl broker serve`) that owns what workspace files cannot be trusted with: the scope snapshot (`<home>/policies/<sha256(workspace)>.json`), the HMAC signing key (`<home>/key`, 0600, never leaves the home), the single-use mint/consume ledger (`tokens.jsonl`) and every decision (`audit.log`). Home is `RESEARCH_OS_BROKER_HOME` or `~/.dsh/research-os-broker`.
+
+- `researchctl scope-set` pushes the recorded policy (including the workspace budget caps) to the broker whenever the socket is present; a failing push raises (fail closed).
+- `researchctl prepare` refuses unless the broker holds a policy for the workspace, and mints the token there (`B-…` carrying `broker_sig`/`broker_nonce`/`broker_workspace`); the broker re-checks scope, the target host, TTL bounds (1–3600 s, default 300) and the action budget from its own mint ledger.
+- `researchctl scope-check` — and therefore the BUA runner's per-request seam — delegates to the broker policy when a policy is present, and fails closed when the socket exists but the broker is unreachable.
+- The enforcer requires a broker-signed token whenever the socket is present (an unsigned token is refused — no silent local trust), consumes it through the broker before dispatch, and re-checks the host against BOTH the local binding and the broker policy; a refusal or an unreachable broker means no dispatch.
+- `researchctl broker status` reports socket/availability/policy/key/version; connections are bounded (5 s read timeout, 32 concurrent, 1 MiB frames), and a failed audit append refuses the operation.
+- Honest limit: same-UID access to the broker home still defeats it — a wrapped agent that can read files can read the key (`file-read*` is not restricted by the containment profile), and removing the socket downgrades enforcement. Keeping the broker home out of the agent's reach requires OS isolation. Protocol + threat model: `tools/broker/README.md`.
+
+### Egress containment below the tool layer (macOS, `tools/containment/`)
+
+The DSH plugin's egress gate is advisory interception at the tool layer; interpreter one-liners bypass it. On macOS, wrap the agent host process tree in a `sandbox-exec` profile instead of trusting tool-call inspection:
+
+    python3 tools/containment/generate_profile.py --print --workspace "$PWD" > /tmp/egress.sb
+    sandbox-exec -f /tmp/egress.sb -- <host command>
+
+`(deny default)` plus the loopback host spec closes off-host egress at the kernel: non-loopback connects (TCP and UDP) fail with `EPERM` regardless of how they are made, so the controlled executors and the loopback proxy become the sole path off-host. `--workspace DIR` (repeatable) restricts `file-write*` to those dirs + `$TMPDIR`; without it writes stay unrestricted and the header says so. `--allow IP:PORT` pins literal-IP exceptions (ipaddress-validated; hostnames refused); on builds whose SBPL parser accepts only `*`/`localhost` a non-loopback pin is refused rather than emitted, and the generator's support probe reflects the parser's verdict. Prove the layer with `python3 tools/containment/selftest.py [--json]` (in-machine probes only: loopback allowed, off-host refused, allowed/denied writes; an OS-rejected generated profile is a FAIL, never a silent SKIP) and keep `python3 tools/test_containment.py` green. `sandbox-exec` is a deprecated macOS API (defense-in-depth, not a supported boundary); on macOS 26 the `localhost` host spec matches every address of the host, so the guarantee there is "off-host closed", and same-UID file protection is not this layer's job.
+
 ### Residual risks (v1, accepted)
 
 - Interpreter one-liners (`python3 -c`, node, php) and bash-invoked CLIs bypass the
