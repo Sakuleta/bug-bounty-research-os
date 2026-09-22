@@ -144,9 +144,50 @@ const PROTECTED_TARGETS = [
   'OS_VERSION',
 ]
 
-// Commands that reach the network. Deliberately narrow: package installs and
-// git operations are provisioning, not target access.
-const NET_CMD = /(^|[;&|(]\s*|\s)(curl|wget|http|httpie|nc|ncat|nmap|socat|dig|nslookup|host)\b|openssl\s+s_client|\bssh\b|\bscp\b/
+// Commands that reach the network (see hasNetCommand). Deliberately narrow:
+// package installs and git operations are provisioning, not target access.
+const NET_COMMANDS = new Set(['curl', 'wget', 'http', 'httpie', 'nc', 'ncat', 'nmap',
+  'socat', 'dig', 'nslookup', 'host', 'ssh', 'scp'])
+/** True when any command segment starts a network binary: quotes stripped, basename
+ *  after the last `/` (so `'curl'` and `/usr/bin/curl` both count), `env`/`sudo`
+ *  and `VAR=x` prefixes skipped, `openssl` only with `s_client`. */
+function hasNetCommand(cmd) {
+  const segments = String(cmd).replace(/["']/g, '').split(/&&|\|\||[;|&()\n]/)
+  for (const seg of segments) {
+    const words = seg.trim().split(/\s+/).filter(Boolean)
+    while (words.length > 1 && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0])
+      || words[0].toLowerCase() === 'env' || words[0].toLowerCase() === 'sudo')) words.shift()
+    if (words.length === 0) continue
+    const base = words[0].toLowerCase().split(/[/\\]/).pop()
+    if (NET_COMMANDS.has(base)) return true
+    if (base === 'openssl' && /\bs_client\b/.test(seg)) return true
+  }
+  return false
+}
+/** True for exactly the loopback exemption: `localhost`, `*.localhost`,
+ *  `127.0.0.0/8` or `[::1]` — a path substring never qualifies. */
+function isLoopbackHostname(name) {
+  let h = String(name || '').toLowerCase()
+  if (h.endsWith('.')) h = h.slice(0, -1)
+  if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1)
+  if (h === 'localhost' || h.endsWith('.localhost') || h === '::1') return true
+  const octets = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/)
+  return !!octets && Number(octets[1]) === 127 && octets.slice(2).every((o) => Number(o) <= 255)
+}
+/** True when the URL's authority is unambiguously a loopback host: the manual
+ *  authority parse (WHATWG-cross-checked, "" on ambiguity) reduced to its hostname,
+ *  WHATWG-normalized (so `127.1` and hex/octal forms judge as the loopback they are). */
+function urlLoopbackExempt(url) {
+  const host = hostFromUrl(url)
+  if (!host) return false
+  let name = host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : host.split(':')[0]
+  try {
+    name = new URL(`http://${name}/`).hostname.toLowerCase()
+  } catch {
+    return false
+  }
+  return isLoopbackHostname(name)
+}
 const LOCAL_HOST = /(^|[\s/@:.])(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0|::1|\.local|\.internal)([\s/:'"]|$)/i
 const WRITE_TOKEN = /(>>?|\btee\b|sed\s+-i|\btruncate\b|\bcp\b|\bmv\b|\bdd\b|\binstall\b|python3?\s+-\s*<<|cat\s*<<)/
 const BROWSER_LAUNCH = /\b(playwright|puppeteer|selenium|selenium-webdriver|chromedriver|geckodriver)\b|--headless\b|--remote-debugging-port\b|chrome-headless-shell/
@@ -536,12 +577,15 @@ function liveGateReason(exec) {
     const args = exec.arguments || {}
     if (typeof args.command !== 'string') return undefined
     const cmd = args.command
-    if (!NET_CMD.test(cmd)) return undefined
+    if (!hasNetCommand(cmd)) return undefined
     const root = findOsRoot(sessionCwd(exec))
     if (!root) return undefined
     const urls = cmd.match(/https?:\/\/[^\s'"]+/g) || []
-    if (urls.length > 0 && urls.every((u) => LOCAL_HOST.test(u))) return undefined
-    if (urls.length === 0 && LOCAL_HOST.test(cmd)) return undefined
+    if (urls.length > 0) {
+      // Every URL's parsed HOSTNAME must be loopback: a `/localhost` path or a
+      // `user@localhost@evil` userinfo never exempts.
+      if (urls.every(urlLoopbackExempt)) return undefined
+    } else if (LOCAL_HOST.test(cmd)) return undefined
     const st = osStatus(root)
     if (!st || st.engagement === 'BOOTSTRAP') {
       return 'research-os-enforcer: this Research OS workspace has no active engagement — no live target traffic before the engagement is configured and a cycle is RUNNING. Bootstrap first (START.md), advance a cycle through tools/researchctl.py, then use the research_os_request tool for target traffic. Localhost/lab traffic is never blocked.'

@@ -274,6 +274,16 @@ check('RUNNING cycle + ssh to a remote host denied',
   (await h.preExecute(exec('bash', { command: 'ssh user@host.example -p 22' }, osRoot))).kind === 'deny')
 check('RUNNING cycle + localhost curl still allowed',
   (await h.preExecute(exec('bash', { command: 'curl http://127.0.0.1:3000/api' }, osRoot))).kind === 'allow')
+check('quoted curl binary denied',
+  (await h.preExecute(exec('bash', { command: `'curl' http://evil.test/` }, osRoot))).kind === 'deny')
+check('absolute-path curl binary denied',
+  (await h.preExecute(exec('bash', { command: '/usr/bin/curl http://evil.test/' }, osRoot))).kind === 'deny')
+check('localhost in the URL path does not exempt',
+  (await h.preExecute(exec('bash', { command: 'curl http://evil.example/localhost' }, osRoot))).kind === 'deny')
+check('userinfo confusion does not exempt',
+  (await h.preExecute(exec('bash', { command: 'curl http://127.0.0.1@evil.example/x' }, osRoot))).kind === 'deny')
+check('127/8 loopback allowed',
+  (await h.preExecute(exec('bash', { command: 'curl http://127.0.0.2/x' }, osRoot))).kind === 'allow')
 
 // ---- R6: raw browser automation is not the live path ------------------------
 const browserDeny = await h.preExecute(exec('bash', { command: 'npx playwright codegen https://target.example/app' }, osRoot))
