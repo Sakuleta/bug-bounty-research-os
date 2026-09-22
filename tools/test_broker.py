@@ -1256,6 +1256,23 @@ try:
     check("backlog B3: producer_run_id rewritten after issue is refused", False)
 except ValueError as exc:
     check("backlog B3: producer_run_id rewritten after issue is refused", "digest" in str(exc))
+# Backlog B4: write-side voucher nonce-distinctness — two merged axes attested by
+# one shared voucher nonce cannot transition to REVIEWED.
+_vr4, _vc4, _ve4, _vq4 = _w1_review_root()
+_shared_att = {"nonce": "cc" * 16}
+for _ax in ("objective", "method"):
+    _pkt4 = {"cycle_id": "C-0001", "evidence_refs": [_ve4], "next_step": f"{_ax} review",
+             "review": {"axis": _ax, "verdict": "pass", "reviewer": f"rev-{_ax}",
+                        "run_id": f"run-{_ax}",
+                        "evidence_quotes": [{"evidence_ref": _ve4, "quote": _vq4}],
+                        "attestation": dict(_shared_att)}}
+    _vc4.append("WORKER_RESULT", "worker_result", f"WR-{_ax}", cycle_id="C-0001",
+                evidence_refs=[_ve4], payload=_pkt4)
+try:
+    _vc4.transition_cycle("C-0001", "REVIEWED", reason="shared voucher nonce", evidence_refs=[_ve4])
+    check("backlog B4: axes sharing one voucher nonce are refused", False)
+except ValueError as exc:
+    check("backlog B4: axes sharing one voucher nonce are refused", "distinct single-use" in str(exc))
 stop_broker(_w1_proc)
 set_home(HOME)
 

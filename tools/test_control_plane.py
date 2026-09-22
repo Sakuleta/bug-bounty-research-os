@@ -20,7 +20,8 @@ import control_plane as _control_plane  # noqa: E402
 from control_plane import (CYCLE_EDGES, GENERATED_HEADER, ControlPlane,  # noqa: E402
                            METHOD_SELF_ATTACK_ROWS, REQUIRED_AUDIT_CLASSES, asset_hosts,
                            engagement_assets, external_judgment_allowed, host_in_scope,
-                           identity_binding, never_considered_packs, redact, scope_check)
+                           identity_binding, never_considered_packs, redact,
+                           review_packet_digest, scope_check)
 
 passed: list[str] = []
 
@@ -3103,6 +3104,53 @@ try:
     check("v8.2 W1: run_id differing only by case is refused", False)
 except ValueError as exc:
     check("v8.2 W1: run_id differing only by case is refused", "distinct runs" in str(exc))
+
+# Backlog B4: isolating reviewer-casefold test — reviewers differing ONLY by case
+# (runs distinct) are refused. The coupled case-variant fixture above cannot catch
+# a reviewer-fold-only revert (the run fold still refuses); this one can.
+_wra, _wca, _wea = _w1_root()
+_wca.merge_worker(_w1_packet(_wea, "objective", "Run-A", "session-1"))
+_wca.merge_worker(_w1_packet(_wea, "method", "run-a", "session-2"))
+try:
+    _wca.transition_cycle("C-0001", "REVIEWED", reason="reviewer case variant", evidence_refs=[_wea])
+    check("backlog B4: reviewer differing only by case is refused", False)
+except ValueError as exc:
+    check("backlog B4: reviewer differing only by case is refused", "distinct reviewers" in str(exc))
+
+# Backlog B4: audit-side casefold isolation — hand-appended REVIEWED with a
+# reviewer case-variant pair (runs distinct) errors independence at audit time.
+_wrb, _wcb, _web = _w1_root()
+_wcb.append("WORKER_RESULT", "worker_result", "WR-000101", cycle_id="C-0001",
+            evidence_refs=[_web],
+            payload=_w1_packet(_web, "objective", "Run-A", "session-1"))
+_wcb.append("WORKER_RESULT", "worker_result", "WR-000102", cycle_id="C-0001",
+            evidence_refs=[_web],
+            payload=_w1_packet(_web, "method", "run-a", "session-2"))
+_wcb.append("CYCLE_TRANSITIONED", "cycle", "C-0001", cycle_id="C-0001",
+            payload={"from": "RESULT_READY", "to": "REVIEWED"})
+_subrb = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_wrb)],
+                        capture_output=True, text=True)
+check("backlog B4: the audit rejects a reviewer case-variant pair",
+      _subrb.returncode != 0 and "not independent" in _subrb.stdout)
+
+# Backlog B4: audit voucher nonce-distinctness — two axes attested by one shared
+# voucher nonce error, even when reviewers, runs and digests all check out.
+_wrd, _wcd, _wed = _w1_root()
+_shared_nonce = "dc" * 16
+for _axis, _reviewer, _run in (("objective", "rev-a", "run-1"), ("method", "rev-b", "run-2")):
+    _pkt = _w1_packet(_wed, _axis, _reviewer, _run)
+    _pkt["review"]["attestation"] = {
+        "axis": _axis, "reviewer": _reviewer, "run_id": _run, "cycle_id": "C-0001",
+        "hypothesis_id": "H-0001",
+        "packet_sha256": review_packet_digest(_pkt),
+        "nonce": _shared_nonce,
+    }
+    _wcd.merge_worker(_pkt)
+_wcd.transition_cycle("C-0001", "REVIEWED", reason="local voucher-less", evidence_refs=[_wed])
+_subrd = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_wrd)],
+                        capture_output=True, text=True)
+check("backlog B4: the audit rejects axes sharing one voucher nonce",
+      _subrd.returncode != 0 and "share nonce" in _subrd.stdout)
 
 _wr3, _wc3, _we3 = _w1_root()
 try:
