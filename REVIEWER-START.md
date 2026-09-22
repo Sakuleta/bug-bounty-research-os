@@ -19,7 +19,7 @@ are in the request you received.
 - Cite findings as `path:line` (repo-relative) and label each as
   `[code-verified]`, `[inferred]`, or `[assumption]`.
 - Line counts below are exact `wc -l` values for this tree on the v8.2 provenance
-  branch (parent tag `v8.1`, `OS_VERSION` 8.1; verified programmatically when the
+  branch (parent tag `v8.1`, `OS_VERSION` 8.2; verified programmatically when the
   tree moved); re-derive them if
   the tree moved.
 
@@ -29,18 +29,18 @@ are in the request you received.
 |---|---|---|
 | `ARCHITECTURE.md` | 102 | The claimed shape: event log → projections → guards |
 | `START.md` | 153 | The engagement entry contract: loop, gates, closure |
-| `AGENTS.md` | 304 | The operational flow an agent must follow |
-| `tools/control_plane.py` | 3874 | **The single policy seam**: event schema (incl. `os_version` stamping), state machine, projections (incl. `knowledge-usage`/`knowledge-proposals`), guards, audit/freshness/evidence/technique/budget records, `KNOWLEDGE_PROPOSED`/`KNOWLEDGE_RESOLVED`, and the broker integration (`set_scope` policy push, `prepare` minting signed single-use tokens through `tools/broker/`, `scope_check` delegation) |
-| `tools/audit.py` | 1510 | What the machine audit actually checks (and what it does not): reviewed-cycle binding, audit content, budget caps, closure-proof parsing, `--emit-proof` |
-| `dsh-plugin/index.js` | 2678 | Enforcement R1–R7: write protection, raw-egress gate, single-use preflight tokens, executor-side scope, browser-launch gate, capture redaction, broker-minted token consumption (R7) |
-| `tools/test_control_plane.py` | 3791 | Executable spec for the seam |
+| `AGENTS.md` | 299 | The operational flow an agent must follow |
+| `tools/control_plane.py` | 3718 | **The single policy seam**: event schema (incl. `os_version` stamping), state machine, projections (incl. `knowledge-usage`/`knowledge-proposals`), guards, audit/freshness/evidence/technique/budget records, `KNOWLEDGE_PROPOSED`/`KNOWLEDGE_RESOLVED`, and the broker integration (`set_scope` policy push, `prepare` minting signed single-use tokens through `tools/broker/`, `scope_check` delegation) |
+| `tools/audit.py` | 1404 | What the machine audit actually checks (and what it does not): reviewed-cycle binding, audit content, budget caps, closure-proof parsing, `--emit-proof` |
+| `dsh-plugin/index.js` | 2673 | Enforcement R1–R7: write protection, raw-egress gate, single-use preflight tokens, executor-side scope, browser-launch gate, capture redaction, broker-minted token consumption (R7) |
+| `tools/test_control_plane.py` | 3714 | Executable spec for the seam |
 | `tools/test_scope_parity.py` | 131 | Cross-language scope parity: Python `scope_check` vs the enforcer `scopeReasonFor` (SKIPs when node is unavailable) |
 | `tools/test_replay.py` | 367 | Executor replay diff (two identical runs over a canned local server) + capture integrity (secret scan, masker idempotence) in one harness |
-| `tools/test_broker.py` | 1389 | Executable spec for the policy broker (real daemon on a temp home, real Unix socket: protocol, policy, mint/consume, fail-closed paths, control-plane integration) |
+| `tools/test_broker.py` | 1308 | Executable spec for the policy broker (real daemon on a temp home, real Unix socket: protocol, policy, mint/consume, fail-closed paths, control-plane integration) |
 | `tools/test_containment.py` | 306 | Executable spec for the SBPL generator (determinism, deny-default, literal-IP pins, `--print`/`--out` equivalence) and the containment selftest |
 | `tools/test_masker_parity.py` | 98 | Executable spec for the single secret-pattern source (`tools/secret-patterns.json` rendered into all three maskers) |
 | `dsh-plugin/conformance.test.mjs` | 1002 | Executable spec for the enforcer |
-| `dsh-plugin/executor.integration.test.mjs` | 735 | Executable spec for the executors |
+| `dsh-plugin/executor.integration.test.mjs` | 730 | Executable spec for the executors |
 | `dsh-plugin/broker.integration.test.mjs` | 317 | Broker R7 end to end against the real Python broker: signed mint, consume-through-broker before dispatch, tamper/replay/narrowed-policy refusals |
 | `tools/bua/run.test.mjs` | 491 | Executable spec for the browser runner: per-request scope routes (`route`/`routeWebSocket`), blocked-request and redirect-hop records |
 | `tools/bua/run.e2e.test.mjs` | 354 | Guarded end-to-end browser suite — SKIPs without a provisioned browser |
@@ -60,9 +60,9 @@ check whether the audit's PASS is earned.
 
 `02_WORKFLOW.md` (112) · `03_ORCHESTRATOR.md` (87) · `04_CYCLE_PROTOCOL.md` (76) ·
 `05_HYPOTHESIS_ENGINE.md` (61) · `06_EVIDENCE_VALIDATION.md` (84) ·
-`07_AUDIT_CLOSURE.md` (179) · `08_human_gates.md` (68) · `09_RESEARCH_PROTOCOL.md` (61) ·
+`07_AUDIT_CLOSURE.md` (178) · `08_human_gates.md` (68) · `09_RESEARCH_PROTOCOL.md` (61) ·
 `10_STATE_MODEL.md` (91) · `11_WORKER_PROTOCOL.md` (120) · `12_REPORT_PROTOCOL.md` (85) ·
-`13_RUNTIME.md` (61) · `15_TOOLING.md` (615) · `16_RESEARCH_LANES.md` (33) ·
+`13_RUNTIME.md` (61) · `15_TOOLING.md` (617) · `16_RESEARCH_LANES.md` (33) ·
 `17_DYNAMIC_TECHNIQUE_ENGINE.md` (101) · `18_MODERN_SURFACES.md` (49) ·
 `19_PROGRAM_LEARNING.md` (41) · `22_CONTEXT_MANIFEST.md` (32) ·
 `24_ADVANCED_TRADECRAFT.md` (39) · `25_MINIMUM_MODEL_OUTPUT.md` (20) ·
@@ -72,7 +72,7 @@ check whether the audit's PASS is earned.
 
 ## Tier 4 — remaining tools, knowledge, skills, schemas
 
-- Tools: `researchctl.py` (426), CLI over the seam (incl. the broker commands:
+- Tools: `researchctl.py` (415), CLI over the seam (incl. the broker commands:
   `scope-set` policy push, broker-minted `prepare`, `scope-check` delegation,
   `review-issue` review vouchers, `identity-binding` readout,
   `broker serve`/`status`), `cycle.py` (159), `build_context.py` (164),
@@ -86,8 +86,8 @@ check whether the audit's PASS is earned.
   `harness_check.py` (146) — per-profile presence/drift + restart-pending check for the
   installed enforcer plugin — and the other `test_*.py` suites, incl.
   `test_harness_check.py` (136) and `test_replay.py` (367, also the capture-integrity
-  harness for a workspace argument). Out-of-workspace layers: `broker/broker.py` (777,
-  Unix-socket policy/key/mint/review-voucher authority) + `broker/client.py` (102), and
+  harness for a workspace argument). Out-of-workspace layers: `broker/broker.py` (781,
+  Unix-socket policy/key/mint/review-voucher authority) + `broker/client.py` (92), and
   `containment/generate_profile.py` (349) + `containment/selftest.py` (335) — macOS
   `sandbox-exec` egress containment with an in-machine proof (deprecated API,
   defense-in-depth; READMEs in both directories).
