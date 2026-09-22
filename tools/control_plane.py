@@ -1203,12 +1203,17 @@ class ControlPlane:
             patch = dict(patch)
             if "status" in patch or "id" in patch:
                 raise ValueError("cycle status/id are immutable; use lifecycle methods")
-            current_snapshot = (self.cycle_data(cid) or {}).get("knowledge_triage_snapshot")
-            if "objective" in patch and current_snapshot is not None:
+            current = self.cycle_data(cid) or {}
+            current_snapshot = current.get("knowledge_triage_snapshot")
+            if ("objective" in patch and current_snapshot is not None
+                    and str(patch["objective"]) != str(current.get("objective"))):
                 # A deliberate objective change re-demands: the snapshot follows the
                 # NEW objective (recorded in this same update), so the coverage guard
                 # still answers the question the cycle now asks. Ambient drift —
-                # env, unknowns, last-result — never moves a stored snapshot.
+                # env, unknowns, last-result — never moves a stored snapshot, and a
+                # no-op patch (the identical string) re-freezes nothing: re-demanding
+                # on identical text would let post-RUNNING INDEX drift move the
+                # frozen goalposts through a one-word-identical update.
                 ranked, cap = triage_demands(self.root, str(patch["objective"]))
                 patch["knowledge_triage_snapshot"] = {"ranked": ranked, "cap": cap}
             elif "knowledge_triage_snapshot" in patch:

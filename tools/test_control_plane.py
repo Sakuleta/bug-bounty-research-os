@@ -3340,6 +3340,19 @@ try:
 except ValueError as exc:
     check("v8.2 W9: the snapshot is immutable", "immutable" in str(exc))
 
+# Backlog B2: a no-op objective patch (identical string) after post-RUNNING INDEX
+# drift must not re-freeze the snapshot — only a real change re-demands.
+_drifted_ranked = [n for n, _ in _top9(_wr9, _q9(_wr9, "test question"), k=_cap9())]
+(_wr9 / "12_knowledge/INDEX.yaml").write_text(
+    "packs:\n" + "".join(f"  {pk}:\n    load_when: [unrelatedwordzzz]\n    files: [{pk}.md]\n"
+                         for pk in ["alpha", "bravo", "charlie", "delta", "echo"]))
+_new_ranked = [n for n, _ in _top9(_wr9, _q9(_wr9, "test question"), k=_cap9())]
+check("backlog B2: the drift really moved the live ranking",
+      _new_ranked != _drifted_ranked)
+_wc9.update_cycle("C-0001", {"objective": "test question"})
+check("backlog B2: an identical-objective patch leaves the frozen snapshot alone",
+      (_wc9.cycle_data("C-0001") or {}).get("knowledge_triage_snapshot") == _snap9)
+
 # v8.2 W2: identity binding — declared accounts enforced at prepare, malformed
 # fails closed, absent/placeholder allows with an audit warning; the browser
 # profile rides the token explicitly and outside-root profiles are refused.
