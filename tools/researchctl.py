@@ -10,7 +10,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from control_plane import ControlPlane, scope_check  # noqa: E402
 from ts_triage import suggest as triage_suggest  # noqa: E402
-from ts_claims import check_claims  # noqa: E402
+from ts_claims import check_claims, check_draft  # noqa: E402
 
 
 def load_json(path: str):
@@ -77,6 +77,17 @@ def main() -> int:
     cc = sub.add_parser("claims-check")
     cc.add_argument("packet_json")
     cc.set_defaults(fn="claims-check")
+    cd = sub.add_parser("claims-draft")
+    cd.add_argument("draft", help="report draft markdown; cited sentences are audited against "
+                                  "registered evidence (an aid, never a gate)")
+    cd.add_argument("--triage", action="store_true",
+                    help="ask which evidence passage is most relevant before the relation question")
+    cd.add_argument("--fail-on-flag", action="store_true",
+                    help="exit 1 only when any verdict is flagged; unknown refs (reported "
+                         "under `errors`), an unavailable seam (no key or policy denied) and "
+                         "a draft with no cited claims always exit 0; a missing/unreadable "
+                         "draft file is an error and exits 1 regardless of this flag")
+    cd.set_defaults(fn="claims-draft")
     fr = sub.add_parser("freshness")
     frs = fr.add_subparsers(dest="op", required=True)
     x = frs.add_parser("record"); x.add_argument("json"); x.set_defaults(fn="freshness-record")
@@ -145,6 +156,8 @@ def main() -> int:
             out = triage_suggest(Path(ns.root), ns.question)
         elif ns.fn == "claims-check":
             out = check_claims(Path(ns.root), load_json(ns.packet_json))
+        elif ns.fn == "claims-draft":
+            out = check_draft(Path(ns.root), ns.draft, triage=ns.triage)
         elif ns.fn == "freshness-record":
             out = cp.record_freshness(load_json(ns.json))
         elif ns.fn == "freshness-status":
@@ -162,6 +175,15 @@ def main() -> int:
         else:
             raise ValueError(ns.fn)
         print(json.dumps(out, ensure_ascii=False, indent=2))
+        if ns.fn == "claims-draft":
+            s = out["summary"]
+            print(f"claims-draft: checked={s['checked']} flagged={s['flagged']} "
+                  f"supports={s.get('supports', 0)} contradicts={s.get('contradicts', 0)} "
+                  f"says_nothing={s.get('says_nothing', 0)} invalid={s.get('invalid_choice', 0)} "
+                  f"skipped={len(out.get('skipped', []))} "
+                  f"errors={len(out.get('errors', []))} (aid, not a gate)", file=sys.stderr)
+            if ns.fail_on_flag and s["flagged"]:
+                return 1
         if (ns.fn == "budget-set" and isinstance(out, dict)
                 and out.get("payload", {}).get("below_current_count")):
             print("warning: the new caps are below the current recorded action counts — "

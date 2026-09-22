@@ -54,6 +54,25 @@ bound draft. Lessons from triage feed back into `10_learning/` (LEARNING stage).
 
  Researchers should verify scope and duplicates before submission.
 
+## Draft claim audit — aid, not a gate
+
+A finding's `report-draft.md` can be audited before human review with
+`researchctl claims-draft <root> <draft.md> [--triage]`. It extracts every
+sentence carrying a registered-evidence citation (`E-\d{6,}`) — fenced code,
+indented code and headings are skipped, table rows count as their own sentences
+— and checks each claim against the content-addressed evidence copy (supports /
+contradicts / says_nothing, auto-accepted at >= 0.8 confidence, below that
+flagged); refs absent from the evidence index are reported as errors, never
+crashes. With `--triage` the evidence is split into bounded passages and one
+selection question narrows the relation check to the most relevant passage
+(`none` -> `says_nothing` with `triage: no relevant passage`, no relation call;
+the result records `passage_index`, `triage_confidence` and
+`dropped_passages`). The audit honours the engagement's `external_judgment`
+policy (DENIED -> `source: unavailable`, the default posture) and is an aid for
+the reviewer packets: it exits 0 with flagged verdicts unless `--fail-on-flag`
+is passed, and it never gates closure, hypotheses, REVIEWED, submission or
+authorization.
+
 ## Submission gate
 
 The reporting platform/form is itself a live source of current constraints. Read it immediately before submission and verify the newest validation/check output.

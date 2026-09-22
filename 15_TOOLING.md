@@ -327,7 +327,23 @@ Screenshots are lab tooling, never evidence — sanitize before persistence.
 Bound to the executor discipline: the canonical read-only runner is
 `tools/bua/run.mjs` (dedicated profile under `lab/`, scope guard via
 `researchctl scope-check` against `00_control/engagement.yaml`, navigate + screenshot +
-JSON summary, no cookie values). Flow: `researchctl prepare` with
+JSON summary, no cookie values).
+
+> Scope is enforced per request, not only per run: the runner installs
+> `context.route('**/*')` and `context.routeWebSocket('**/*')` before the
+> first navigation and decides each http(s)/ws(s) request against the same
+> `researchctl scope-check` seam (one verdict per authority per run, cached;
+> failures and the 64-distinct-host cap fail closed;
+> `data:`/`blob:`/`about:`/`filesystem:` exempt). Non-verified requests are
+> aborted/closed and recorded (`blocked_requests` cap 50 with masked URLs,
+> plus `blocked_count`). Redirect hops are the known limit (Playwright does
+> not route redirects): every out-of-scope hop is recorded
+> (`out_of_scope_hops`, masked) and warned in the run log, an out-of-scope
+> main-frame landing sets `scope_violation: true` and skips the
+> screenshot/title, but a hop cannot be blocked — preflight a redirect target
+> as its own action. Downloads are disabled.
+
+Flow: `researchctl prepare` with
 `"tool_family": "browser"` and `request_shape` `{"url": …, "principal": …}` → the
 `research_os_browser` tool consumes the token, re-checks scope, runs the runner, and the
 run log is registered as evidence with `ACTION_RECORDED`. Controlled-executor actions
@@ -452,6 +468,10 @@ install is an unenforced workspace. To disable it, delete its row in
   cryptographic proof.
 - Host matching is literal `host[:port]` plus `*.domain` — no CIDR, no DNS resolution.
 - The browser arm is read-only (navigate + capture).
+- The browser runner records but cannot block redirect hops (Playwright treats a
+  request and its redirects as one unit); out-of-scope hops land in
+  `out_of_scope_hops` with a run-log warning and out-of-scope main-frame landings are
+  not captured as normal artifacts.
 - `source_reference` is only pattern-redacted, never guaranteed secret-free.
 - URL **path segments are not masked** by the capture/query masker (by design: scheme,
   host, port and path stay byte-for-byte). Never put a credential in a path; query and
@@ -548,3 +568,7 @@ unanswerable claim flagged at 0.45 confidence; the script and raw output are com
 under `tools/ts-eval/` (rerun needs `TS_EVAL_ROOT` on a workspace holding the three
 registered captures — see its README). Reviewers use it to corroborate claims; the two
 independent review packets remain the gate.
+
+`researchctl claims-draft <root> <draft.md> [--triage] [--fail-on-flag]` —
+report-draft claim audit: extracts `E-` citations, policy-gated, aid-only, never a
+gate; `--triage` narrows the relation check to the most relevant evidence passage.

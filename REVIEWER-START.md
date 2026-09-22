@@ -18,8 +18,8 @@ are in the request you received.
   on. Do not stall and do not invent evidence.
 - Cite findings as `path:line` (repo-relative) and label each as
   `[code-verified]`, `[inferred]`, or `[assumption]`.
-- Line counts below are exact `wc -l` values for this tree at tag `v7.5`
-  (`OS_VERSION` 7.5; verified programmatically when the tree moved); re-derive them if
+- Line counts below are exact `wc -l` values for this tree at tag `v7.6`
+  (`OS_VERSION` 7.6; verified programmatically when the tree moved); re-derive them if
   the tree moved.
 
 ## Tier 1 — the load-bearing seam (read these first)
@@ -28,7 +28,7 @@ are in the request you received.
 |---|---|---|
 | `ARCHITECTURE.md` | 102 | The claimed shape: event log → projections → guards |
 | `START.md` | 154 | The engagement entry contract: loop, gates, closure |
-| `AGENTS.md` | 198 | The operational flow an agent must follow |
+| `AGENTS.md` | 220 | The operational flow an agent must follow |
 | `tools/control_plane.py` | 2388 | **The single policy seam**: event schema (incl. `os_version` stamping), state machine, projections, guards, audit/freshness/evidence/technique/budget records |
 | `tools/audit.py` | 934 | What the machine audit actually checks (and what it does not): reviewed-cycle binding, audit content, budget caps, closure-proof parsing, `--emit-proof` |
 | `dsh-plugin/index.js` | 1281 | Enforcement R1–R6: write protection, raw-egress gate, single-use preflight tokens, executor-side scope, browser-launch gate, capture redaction |
@@ -37,6 +37,8 @@ are in the request you received.
 | `tools/test_replay.py` | 367 | Executor replay diff (two identical runs over a canned local server) + capture integrity (secret scan, masker idempotence) in one harness |
 | `dsh-plugin/conformance.test.mjs` | 639 | Executable spec for the enforcer |
 | `dsh-plugin/executor.integration.test.mjs` | 526 | Executable spec for the executors |
+| `tools/bua/run.test.mjs` | 368 | Executable spec for the browser runner: per-request scope routes (`route`/`routeWebSocket`), blocked-request and redirect-hop records |
+| `tools/bua/run.e2e.test.mjs` | 280 | Guarded end-to-end browser suite — SKIPs without a provisioned browser |
 
 ## Tier 2 — worked run (judge coherence vs ceremony)
 
@@ -52,8 +54,8 @@ check whether the audit's PASS is earned.
 `02_WORKFLOW.md` (112) · `03_ORCHESTRATOR.md` (87) · `04_CYCLE_PROTOCOL.md` (76) ·
 `05_HYPOTHESIS_ENGINE.md` (61) · `06_EVIDENCE_VALIDATION.md` (84) ·
 `07_AUDIT_CLOSURE.md` (150) · `08_human_gates.md` (68) · `09_RESEARCH_PROTOCOL.md` (61) ·
-`10_STATE_MODEL.md` (91) · `11_WORKER_PROTOCOL.md` (111) · `12_REPORT_PROTOCOL.md` (66) ·
-`13_RUNTIME.md` (61) · `15_TOOLING.md` (550) · `16_RESEARCH_LANES.md` (33) ·
+`10_STATE_MODEL.md` (91) · `11_WORKER_PROTOCOL.md` (111) · `12_REPORT_PROTOCOL.md` (85) ·
+`13_RUNTIME.md` (61) · `15_TOOLING.md` (574) · `16_RESEARCH_LANES.md` (33) ·
 `17_DYNAMIC_TECHNIQUE_ENGINE.md` (101) · `18_MODERN_SURFACES.md` (49) ·
 `19_PROGRAM_LEARNING.md` (26) · `22_CONTEXT_MANIFEST.md` (32) ·
 `24_ADVANCED_TRADECRAFT.md` (39) · `25_MINIMUM_MODEL_OUTPUT.md` (20) ·
@@ -63,9 +65,9 @@ check whether the audit's PASS is earned.
 
 ## Tier 4 — remaining tools, knowledge, skills, schemas
 
-- Tools: `researchctl.py` (179), CLI over the seam, `cycle.py` (159),
+- Tools: `researchctl.py` (201), CLI over the seam, `cycle.py` (159),
   `build_context.py` (164), `knowledge_index.py` (165), `ts_triage.py` (130),
-  `ts_claims.py` (135), `bua/run.mjs` (235), browser runner, `provision.py` (50),
+  `ts_claims.py` (355), `bua/run.mjs` (532), browser runner, `provision.py` (50),
   `validate_workspace.py` (95), `state.py` (45), `new_cycle.py` (16),
   `harness_check.py` (146) — per-profile presence/drift + restart-pending check for the
   installed enforcer plugin — and the other `test_*.py` suites, incl.

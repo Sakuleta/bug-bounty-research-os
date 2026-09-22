@@ -152,6 +152,25 @@ Browser traffic runs through the executor's browser arm: prepare (`tool_family`
 "browser") → `research_os_browser` → `tools/bua/run.mjs` (read-only navigate + capture);
 raw browser launches are denied, and interactive flows extend the runner with a task
 script carrying its documented precondition.
+
+Before the first navigation the runner installs a context-wide
+`context.route('**/*')` handler and a `context.routeWebSocket('**/*')` handler:
+every http(s) request and every ws/wss handshake is decided through the same
+`researchctl scope-check` seam (one verdict per authority per run, cached;
+failures cached fail-closed; `data:`/`blob:`/`about:`/`filesystem:` exempt; a
+per-run cap of 64 distinct-host checks fails closed past the cap). A request
+that is not a verified `in_scope: true` is aborted (`blockedbyclient`) or the
+socket closed, and recorded (`blocked_requests`, cap 50, masked;
+`blocked_count`). Redirect hops are the known limit: Playwright does not route
+redirects (a request and its redirects are one unit), so a followed hop reaches
+its target; the runner records every out-of-scope hop (main-frame and
+subresource, `out_of_scope_hops`, masked, with a loud run-log warning) and,
+when the main-frame navigation ends out of scope, sets `scope_violation: true`
+and skips screenshot/title instead of capturing it as a normal artifact.
+Redirect targets must be preflighted as their own action. Downloads are
+disabled (`acceptDownloads: false`); the runner's own actions are read-only,
+while page-initiated requests to in-scope hosts are in scope by definition.
+
 OTP/MFA/CAPTCHA/PII/verification links are human-owned: drive to the wall, ask
 narrowly with the question tool, resume immediately. Attaching to a user-owned
 browser (CDP) is allowed only on explicit instruction: touch scoped tabs only,
@@ -172,7 +191,10 @@ disclosure, or third-party contact without explicit human approval, ever.
 
 ## 8. Audits (prove it, don't feel it)
 
-Run `tools/audit.py` regularly; all suites under `tools/test_*.py` must stay green.
+Run `tools/audit.py` regularly; all suites under `tools/test_*.py` must stay green
+and so must the node suites (`node tools/bua/run.test.mjs`, the guarded
+`node tools/bua/run.e2e.test.mjs` which SKIPs without a provisioned browser,
+`node dsh-plugin/conformance.test.mjs`, `node dsh-plugin/executor.integration.test.mjs`).
 `tools/test_replay.py` replays a fixture set of canonical shapes through the JS executor
 core twice against a local canned server and diffs HTTP status, the post-redaction
 header set and the body hash per capture; with a workspace argument it re-scans every
