@@ -467,7 +467,11 @@ def identity_binding(root: Path) -> dict[str, Any] | str | None:
         return None
     try:
         lines = path.read_text(errors="strict").splitlines()
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError covers undecodable bytes (UnicodeDecodeError): a garbled
+        # contract must read as malformed (fail closed), never raise — one place
+        # fixes the CLI readout, prepare, the audit and the executor's fail-closed
+        # match (which keys on "malformed") simultaneously.
         return IDENTITY_MALFORMED
     section: str | None = None
     fields: dict[str, str] = {}
@@ -491,6 +495,11 @@ def identity_binding(root: Path) -> dict[str, Any] | str | None:
             if not m:
                 return IDENTITY_MALFORMED
             key, value = m.group(1), m.group(2)
+            if value and key in ("expected_identity", "session"):
+                # Block form only: `expected_identity: {account_reference: alice}`
+                # declares a binding the reader below cannot see — reading it as
+                # "no binding" would skip enforcement (fail open).
+                return IDENTITY_MALFORMED
             section = key if not value else None
             if value:
                 fields[f"{key}"] = value
@@ -2788,6 +2797,7 @@ class ControlPlane:
                     )
             self._validate_refs(refs)
             existing = self._read_events()
+            nonce = str(action.get("token_nonce") or "").strip()
             if action.get("id"):
                 aid = str(action["id"])
                 if any(e.get("type") == "ACTION_RECORDED" and e.get("entity_id") == aid
@@ -2797,15 +2807,27 @@ class ControlPlane:
                         "re-recording the same receipt is refused (a retry after a failed "
                         "receipt lands on the same id only while no record exists)"
                     )
+                # A hand-entered id must not steal a prepared token's id: the only
+                # record allowed on a minted id is the genuine receipt carrying that
+                # token's nonce (the executor's path). Anything else would refuse
+                # the real receipt as a duplicate and hide the pending report.
+                token_nonces = self.token_action_nonces()
+                if aid in token_nonces and nonce not in token_nonces[aid]:
+                    raise ValueError(
+                        f"action id {aid} collides with a prepared preflight token — "
+                        "the genuine receipt carries that token's nonce; record through "
+                        "the controlled executors instead of hand-entering the id"
+                    )
             else:
                 aid = self._next_action_id(existing)
             # Nonce provenance: a presented token_nonce must resolve to a prepared
             # token whenever the store exists — a forged nonce cannot buy a receipt.
-            # An absent nonce stays the legacy path (the audit warns, closure holds
-            # versioned actions to the nonce), so template/manual records keep working.
-            nonce = str(action.get("token_nonce") or "").strip()
+            # The gate is store existence, not issued-nonceness: an existing-but-empty
+            # (or truncated/garbled-only) store still refuses. An absent nonce stays
+            # the legacy path (the audit warns, closure holds versioned actions to
+            # the nonce), so template/manual records keep working.
             issued, _consumed = self._known_token_nonces()
-            if nonce and issued and nonce not in issued:
+            if nonce and nonce not in issued and self._tokens_file().exists():
                 raise ValueError(
                     f"action token_nonce {nonce[:12]}… matches no prepared preflight token — "
                     "record actions only through the controlled executors (or prepare first)"
@@ -2846,6 +2868,37 @@ class ControlPlane:
                     if m:
                         maxn = max(maxn, int(m.group(1)))
         return f"A-{maxn + 1:06d}"
+
+    def token_action_nonces(self) -> dict[str, set[str]]:
+        """Prepared-token action ids mapped to their known nonces (the audit seam).
+
+        Both the local `nonce` and the broker mirror's `broker_nonce` count: the
+        executor records `token.nonce`, which is the broker nonce in broker mode.
+        Empty when no token was ever prepared; an id may map to an empty set when
+        its store lines carry no nonce (hand-garbled store — matches nothing).
+        """
+        out: dict[str, set[str]] = {}
+        path = self._tokens_file()
+        if not path.exists():
+            return out
+        for line in path.read_text(errors="ignore").splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            aid = str(rec.get("action_id") or "")
+            if not aid:
+                continue
+            nonces = out.setdefault(aid, set())
+            for key in ("nonce", "broker_nonce"):
+                value = str(rec.get(key) or "").strip()
+                if value:
+                    nonces.add(value)
+        return out
 
     def _tokens_file(self) -> Path:
         return self.rt / "action-tokens.jsonl"

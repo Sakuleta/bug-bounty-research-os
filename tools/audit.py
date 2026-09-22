@@ -698,6 +698,28 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
         else:
             _seen_action_ids[aid] = versioned
 
+    # A recorded id that matches a prepared token id must carry that token's
+    # nonce: otherwise a hand-entered record stole the genuine receipt's id (the
+    # write side refuses this; the audit catches hand appends that bypass it).
+    # The genuine receipt carries the matching nonce and stays clean.
+    _token_id_nonces = cp.token_action_nonces()
+    for e in events:
+        if e.get("type") != "ACTION_RECORDED":
+            continue
+        aid = str(e.get("entity_id") or "")
+        if aid not in _token_id_nonces:
+            continue
+        nonce = str((e.get("payload") or {}).get("token_nonce", "")).strip()
+        if nonce and nonce in _token_id_nonces[aid]:
+            continue
+        message = (f"action {aid} collides with a prepared preflight token id but carries "
+                   "no matching token_nonce — a hand-entered record on a minted id steals "
+                   "the genuine receipt; record through the controlled executors")
+        if e.get("os_version"):
+            errors.append(message)
+        else:
+            warnings.append(f"legacy action record (pre-7.3, no os_version): {message}")
+
     # Nonce provenance is consumption, not presence: every recorded token_nonce must
     # resolve to a consumed token — a consumed record in 11_runtime/action-tokens.jsonl
     # or, while a broker socket exists, the broker consume ledger. A forged nonce on a

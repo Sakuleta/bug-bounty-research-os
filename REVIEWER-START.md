@@ -29,11 +29,11 @@ are in the request you received.
 |---|---|---|
 | `ARCHITECTURE.md` | 102 | The claimed shape: event log → projections → guards |
 | `START.md` | 153 | The engagement entry contract: loop, gates, closure |
-| `AGENTS.md` | 294 | The operational flow an agent must follow |
-| `tools/control_plane.py` | 3652 | **The single policy seam**: event schema (incl. `os_version` stamping), state machine, projections (incl. `knowledge-usage`/`knowledge-proposals`), guards, audit/freshness/evidence/technique/budget records, `KNOWLEDGE_PROPOSED`/`KNOWLEDGE_RESOLVED`, and the broker integration (`set_scope` policy push, `prepare` minting signed single-use tokens through `tools/broker/`, `scope_check` delegation) |
-| `tools/audit.py` | 1334 | What the machine audit actually checks (and what it does not): reviewed-cycle binding, audit content, budget caps, closure-proof parsing, `--emit-proof` |
+| `AGENTS.md` | 295 | The operational flow an agent must follow |
+| `tools/control_plane.py` | 3705 | **The single policy seam**: event schema (incl. `os_version` stamping), state machine, projections (incl. `knowledge-usage`/`knowledge-proposals`), guards, audit/freshness/evidence/technique/budget records, `KNOWLEDGE_PROPOSED`/`KNOWLEDGE_RESOLVED`, and the broker integration (`set_scope` policy push, `prepare` minting signed single-use tokens through `tools/broker/`, `scope_check` delegation) |
+| `tools/audit.py` | 1356 | What the machine audit actually checks (and what it does not): reviewed-cycle binding, audit content, budget caps, closure-proof parsing, `--emit-proof` |
 | `dsh-plugin/index.js` | 2652 | Enforcement R1–R7: write protection, raw-egress gate, single-use preflight tokens, executor-side scope, browser-launch gate, capture redaction, broker-minted token consumption (R7) |
-| `tools/test_control_plane.py` | 3424 | Executable spec for the seam |
+| `tools/test_control_plane.py` | 3528 | Executable spec for the seam |
 | `tools/test_scope_parity.py` | 131 | Cross-language scope parity: Python `scope_check` vs the enforcer `scopeReasonFor` (SKIPs when node is unavailable) |
 | `tools/test_replay.py` | 367 | Executor replay diff (two identical runs over a canned local server) + capture integrity (secret scan, masker idempotence) in one harness |
 | `tools/test_broker.py` | 1262 | Executable spec for the policy broker (real daemon on a temp home, real Unix socket: protocol, policy, mint/consume, fail-closed paths, control-plane integration) |
@@ -79,7 +79,7 @@ check whether the audit's PASS is earned.
   `knowledge_index.py` (165), `ts_triage.py` (130),
   `ts_claims.py` (520, incl. the verify-clause judge, judgment ledger and offline
   replay), `bua/run.mjs` (774), browser runner, `provision.py` (50),
-  `validate_workspace.py` (95, OS-checkout vs engagement-snapshot contract),
+  `validate_workspace.py` (117, OS-checkout vs engagement-snapshot contract),
   `secret-patterns.json` + `generate_secret_patterns.py` (92, the single
   secret-pattern source rendered into all three maskers), `state.py` (45),
   `new_cycle.py` (16),

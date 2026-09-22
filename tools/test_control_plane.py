@@ -20,7 +20,7 @@ import control_plane as _control_plane  # noqa: E402
 from control_plane import (CYCLE_EDGES, GENERATED_HEADER, ControlPlane,  # noqa: E402
                            METHOD_SELF_ATTACK_ROWS, REQUIRED_AUDIT_CLASSES, asset_hosts,
                            engagement_assets, external_judgment_allowed, host_in_scope,
-                           never_considered_packs, redact, scope_check)
+                           identity_binding, never_considered_packs, redact, scope_check)
 
 passed: list[str] = []
 
@@ -3420,5 +3420,109 @@ _nc12.resolve_gate("G-0001", decision="APPROVED", reference="ticket-scope-1")
 _sub12g = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nr12)],
                          capture_output=True, text=True)
 check("v8.2 W12: a gate-dispositioned violation audits clean", _sub12g.returncode == 0)
+
+
+# v8.2 fix M1: a flow-style (inline-map) identity binding is a garbled contract,
+# not an absent one — it fails closed at prepare and errors the audit instead of
+# silently skipping enforcement.
+_nr1f, _nc1f = _w2_root(
+    "expected_identity: {account_reference: alice}\n"
+    "session: {browser_profile: lab/p, session_must_match_identity: true}\n")
+check("v8.2 fix M1: flow-style binding reads as malformed (fail closed)",
+      identity_binding(_nr1f) == "malformed")
+try:
+    _nc1f.prepare_action({**_w7_action(), "account": "TOTALLY-DIFFERENT-USER"})
+    check("v8.2 fix M1: prepare refuses under a flow-style binding", False)
+except ValueError as exc:
+    check("v8.2 fix M1: prepare refuses under a flow-style binding",
+          "malformed" in str(exc))
+_nc1f.record_action({**_w7_action(), "account": "intruder-acct"})
+_sub1f = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nr1f)],
+                        capture_output=True, text=True)
+check("v8.2 fix M1: the audit errors (not warns) on a flow-style binding",
+      _sub1f.returncode != 0 and "malformed" in (_sub1f.stdout + _sub1f.stderr))
+
+# v8.2 fix M4: an invalid-UTF-8 binding is malformed (fail closed), never an
+# exception — prepare refuses, the audit reports a clean error, and the
+# researchctl readout names it malformed (the executor's fail-closed match).
+_nr4u, _nc4u = _w2_root("expected_identity:\n  account_reference: alice\n")
+(_nr4u / "00_control/identity-binding.yaml").write_bytes(
+    b"expected_identity:\n  account_reference: \xff\xfe\n")
+check("v8.2 fix M4: invalid-UTF-8 binding reads as malformed",
+      identity_binding(_nr4u) == "malformed")
+try:
+    _nc4u.prepare_action({**_w7_action(), "account": "alice"})
+    check("v8.2 fix M4: malformed (invalid-UTF-8) binding fails prepare closed", False)
+except ValueError as exc:
+    check("v8.2 fix M4: malformed (invalid-UTF-8) binding fails prepare closed",
+          "malformed" in str(exc))
+_sub4u = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nr4u)],
+                        capture_output=True, text=True)
+check("v8.2 fix M4: the audit reports a clean identity error (no traceback)",
+      _sub4u.returncode != 0 and "Traceback" not in _sub4u.stderr
+      and "malformed" in (_sub4u.stdout + _sub4u.stderr))
+_sub4r = subprocess.run(
+    [sys.executable, str(TOOLS / "researchctl.py"), str(_nr4u), "identity-binding"],
+    capture_output=True, text=True)
+check("v8.2 fix M4: researchctl names the undecodable binding malformed",
+      _sub4r.returncode != 0 and "malformed" in (_sub4r.stdout + _sub4r.stderr))
+
+# v8.2 fix M2: the nonce guard keys on token-store existence, not on issued
+# nonces — an existing-but-empty (or blank/garbled-only) store refuses forgeries.
+_nr7e, _nc7e = _w7_root()
+(_nr7e / "11_runtime/action-tokens.jsonl").write_text("")
+try:
+    _nc7e.record_action({**_w7_action(), "token_nonce": "forged-nonce-empty-store"})
+    check("v8.2 fix M2: forged nonce refused with an existing-but-empty token store", False)
+except ValueError as exc:
+    check("v8.2 fix M2: forged nonce refused with an existing-but-empty token store",
+          "token_nonce" in str(exc))
+_nr7g, _nc7g = _w7_root()
+(_nr7g / "11_runtime/action-tokens.jsonl").write_text("\nnot json at all\n   \n")
+try:
+    _nc7g.record_action({**_w7_action(), "token_nonce": "forged-nonce-garbled-store"})
+    check("v8.2 fix M2: forged nonce refused with a garbled-only token store", False)
+except ValueError as exc:
+    check("v8.2 fix M2: forged nonce refused with a garbled-only token store",
+          "token_nonce" in str(exc))
+
+# v8.2 fix M3: an explicit record id colliding with a prepared token id is
+# refused unless it carries that token's nonce (the genuine receipt); the audit
+# flags a hand-appended collision and stays clean on the genuine receipt.
+_nr8c, _nc8c = _w7_root()
+_t8c = _nc8c.prepare_action(_w7_action())
+try:
+    _nc8c.record_action({**_w7_action(), "id": _t8c["action_id"]})
+    check("v8.2 fix M3: explicit record on an outstanding token id is refused", False)
+except ValueError as exc:
+    check("v8.2 fix M3: explicit record on an outstanding token id is refused",
+          "collides" in str(exc))
+try:
+    _nc8c.record_action({**_w7_action(), "id": _t8c["action_id"],
+                         "token_nonce": "wrong-nonce-for-that-token"})
+    check("v8.2 fix M3: explicit record on a token id with the wrong nonce is refused", False)
+except ValueError as exc:
+    check("v8.2 fix M3: explicit record on a token id with the wrong nonce is refused",
+          "collides" in str(exc))
+_r8c = _nc8c.record_action({**_w7_action(), "id": _t8c["action_id"],
+                            "token_nonce": _t8c["nonce"]})
+check("v8.2 fix M3: the genuine receipt (matching nonce) lands on the minted id",
+      _r8c["entity_id"] == _t8c["action_id"])
+with (_nr8c / "11_runtime/action-tokens.jsonl").open("a", encoding="utf-8") as _fh:
+    _fh.write(json.dumps({"action_id": _t8c["action_id"], "nonce": _t8c["nonce"],
+                          "consumed": True, "consumed_at": "2026-09-01T00:00:01Z"}) + "\n")
+_sub8c = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nr8c)],
+                        capture_output=True, text=True)
+check("v8.2 fix M3: the genuine receipt audits clean (no false collision)",
+      _sub8c.returncode == 0 and "collides" not in (_sub8c.stdout + _sub8c.stderr))
+_nr8d, _nc8d = _w7_root()
+_t8d = _nc8d.prepare_action(_w7_action())
+_nc8d.append("ACTION_RECORDED", "action", _t8d["action_id"], cycle_id="C-0001",
+             reason="hand-built collision fixture",
+             payload={**_w7_action(), "token_nonce": "forged-nonce-not-a-real-token"})
+_sub8d = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nr8d)],
+                        capture_output=True, text=True)
+check("v8.2 fix M3: the audit errors on a recorded id colliding with a prepared token",
+      _sub8d.returncode != 0 and "collides" in (_sub8d.stdout + _sub8d.stderr))
 
 print(f"\n{len(passed)} checks passed")

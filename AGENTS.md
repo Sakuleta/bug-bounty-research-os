@@ -99,7 +99,8 @@ the audit does not check this; the loop above does.
   kernel layer for that is `tools/containment/` (`15_TOOLING.md` residual risks). The
   controlled executors record the consumed nonce as `token_nonce` on every
   `ACTION_RECORDED`, so the action ledger links each call back to the token that
-  authorized it (`researchctl record` refuses a nonce that matches no prepared token;
+  authorized it (`researchctl record` refuses a nonce that matches no prepared token
+  once a token store exists — without one the record lands and the audit errors instead;
   `tools/audit.py` errors on unknown nonces on versioned records, warns on legacy
   ones, and closure requires the nonce on versioned actions). Executor receipts are transactional: if capture
   registration or the `ACTION_RECORDED` write fails after the request was sent, the
