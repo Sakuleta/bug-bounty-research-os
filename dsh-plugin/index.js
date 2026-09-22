@@ -2240,7 +2240,7 @@ function readBrowserSummary(root, stdout) {
 }
 
 /** Register a capture as evidence and record ACTION_RECORDED through the control plane. */
-function registerCapture({ root, relPath, token, source, runFlags, browserProfile }) {
+function registerCapture({ root, relPath, token, source, runFlags }) {
   let evidence = ''
   const python = 'python3'
   const cli = join(root, 'tools', 'researchctl.py')
@@ -2255,11 +2255,6 @@ function registerCapture({ root, relPath, token, source, runFlags, browserProfil
   try {
     const preflight = (token.preflight && typeof token.preflight === 'object') ? token.preflight : {}
     const payload = { ...preflight, id: token.action_id, token_nonce: token.nonce, ...(evidence ? { evidence_refs: [evidence] } : {}) }
-    // The browser receipt names the profile it ran under, so the audit can match
-    // it against the bound session.browser_profile (cross-engagement reuse rule).
-    if (typeof browserProfile === 'string' && browserProfile) {
-      payload.browser_profile = browserProfile
-    }
     // Browser scope signals ride the receipt: a run the runner flagged carries
     // scope_violation + the spec-named `out_of_scope_hops` count, so the audit
     // can demand human disposition.
@@ -2565,7 +2560,7 @@ async function runControlledBrowser({ root, args }) {
   if (runFlags.scope_violation) {
     log(`FLAG(executor browser) ${safeUrl} :: the runner reported scope_violation with ${hopCount} out-of-scope hops — receipt flagged for human review`)
   }
-  const { evidence, recorded } = registerCapture({ root, relPath, token, source: 'browser-executor', runFlags, browserProfile })
+  const { evidence, recorded } = registerCapture({ root, relPath, token, source: 'browser-executor', runFlags })
   const receipted = captureWritten && recorded && Boolean(evidence)
   const summary = exitCode === 0
     ? 'runner exit 0'

@@ -3616,36 +3616,6 @@ _sub4r = subprocess.run(
 check("v8.2 fix M4: researchctl names the undecodable binding malformed",
       _sub4r.returncode != 0 and "malformed" in (_sub4r.stdout + _sub4r.stderr))
 
-# Backlog B15: cross_engagement_session_reuse is enforced — the executor records
-# the used profile on browser receipts and the audit matches it against the bound
-# profile. Default false (engagement-local sessions) errors on drift; an explicit
-# true (deliberate sharing) warns instead. Strictest reading, documented in
-# AGENTS.md §§3/5.
-_nrx, _ncx = _w2_root()
-_ncx.record_action({**_w7_action(), "account": "acct-binding-1",
-                    "browser_profile": "lab/bua-prog"})
-_subx = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nrx)],
-                       capture_output=True, text=True)
-check("backlog B15: the bound profile audits clean",
-      _subx.returncode == 0 and "browser_profile" not in (_subx.stdout + _subx.stderr))
-_ncx.record_action({**_w7_action(), "account": "acct-binding-1",
-                    "browser_profile": "lab/other-profile"})
-_subx2 = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nrx)],
-                        capture_output=True, text=True)
-check("backlog B15: profile drift errors when reuse is false (default)",
-      _subx2.returncode != 0 and "browser_profile" in (_subx2.stdout + _subx2.stderr))
-_nrxt, _ncxt = _w2_root(
-    "binding_version: 1\nengagement: probe\nplatform: DIRECT\nprogram: Probe\n"
-    "expected_identity:\n  public_handle: researcher-x\n  account_reference: acct-binding-1\n"
-    "session:\n  browser_profile: lab/bua-prog\n  session_must_match_identity: true\n"
-    "  cross_engagement_session_reuse: true\n")
-_ncxt.record_action({**_w7_action(), "account": "acct-binding-1",
-                     "browser_profile": "lab/shared-profile"})
-_subxt = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nrxt)],
-                        capture_output=True, text=True)
-check("backlog B15: profile drift warns (not errors) when reuse is explicit",
-      _subxt.returncode == 0 and "browser_profile" in (_subxt.stdout + _subxt.stderr))
-
 # Backlog B1: the audit honors session_must_match_identity: false — the same
 # mismatched accounts prepare allows must not fail the audit (write-side/audit
 # parity; no test covered the flag).

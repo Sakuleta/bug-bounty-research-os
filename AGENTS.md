@@ -178,11 +178,9 @@ the audit does not check this; the loop above does.
   evidence) — an aid, not the gate. `VERIFIED` is the hypothesis/finding state.
 - Researchers' other engagements don't exist here: never reuse identities, sessions,
   credentials, artifacts, or state across programs. [PROCEDURAL — fresh clone per
-  engagement; no tool binds one workspace to another.] Browser sessions are
-  engagement-local while `cross_engagement_session_reuse` is false (the default):
-  the executor records the used profile on every browser receipt and the audit
-  errors on drift from the bound `session.browser_profile`; set the flag true only
-  for deliberate profile sharing, and drift then warns instead of erroring.
+  engagement; no tool binds one workspace to another.] `cross_engagement_session_reuse`
+  is parsed and surfaced (`researchctl identity-binding`) but not enforced — the
+  audit never matches receipts against it.
 
 ## 4. Capabilities (provision, don't wait)
 
