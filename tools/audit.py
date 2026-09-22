@@ -1116,10 +1116,7 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
             if cp.entity_cycle("hypothesis", hypothesis_id) != cid:
                 errors.append(f"cycle {cid} {axis} review voucher names hypothesis "
                               f"{hypothesis_id!r}, which does not belong to cycle {cid}")
-            try:
-                expected_digest = review_packet_digest(packet.get("packet") or {})
-            except (ValueError, TypeError, AttributeError):
-                expected_digest = None
+            expected_digest = review_packet_digest(packet.get("packet") or {})
             if expected_digest is None or str(attestation.get("packet_sha256", "")).lower() != expected_digest:
                 errors.append(f"cycle {cid} {axis} review voucher's packet digest does not match "
                               "the merged packet — the packet was edited after issue")

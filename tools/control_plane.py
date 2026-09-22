@@ -502,7 +502,7 @@ def identity_binding(root: Path) -> dict[str, Any] | str | None:
                 return IDENTITY_MALFORMED
             section = key if not value else None
             if value:
-                fields[f"{key}"] = value
+                fields[key] = value
         else:
             m = re.match(r"^\s+([A-Za-z0-9_.-]+):\s*(.*?)\s*$", line.rstrip())
             if not m or section is None:
