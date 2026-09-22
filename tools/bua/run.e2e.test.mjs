@@ -296,7 +296,7 @@ try {
   const redirected = await run(`http://127.0.0.1:${inPort}/redirect.html`, 'bua-e2e-redirect')
   check('the redirected run exits 0', redirected.status === 0)
   check('the redirect hop is reported loudly',
-    (redirected.stdout || '').includes('WARNING followed redirect hop was out of scope'))
+    (redirected.stdout || '').includes('WARNING followed redirect hop denied (out_of_scope;'))
   const redirectSummary = summaryFor('bua-e2e-redirect')
   check('the out-of-scope navigation hop is recorded',
     redirectSummary.out_of_scope_hop_count >= 1
