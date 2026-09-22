@@ -1517,6 +1517,25 @@ check("budget status with no configured block reports null limits/remaining",
       bstatus["limits"] is None and bstatus["remaining"]["engagement"] is None
       and bstatus["counts"]["engagement"] == 1)
 
+# Budget monotonicity: a consumed-but-unrecorded token (the executor receipt-failure
+# path) still counts as used — consumption can never restore headroom.
+mono_root, mono_cp = budget_workspace(
+    "budget:\n  max_actions_per_cycle: 1\n  max_actions_per_engagement: 10\n")
+tok_mono = mono_cp.prepare_action({**base_action, "tool_family": "http",
+                                   "request_shape": shape, "cycle_id": "C-0001"})
+with (mono_root / "11_runtime/action-tokens.jsonl").open("a", encoding="utf-8") as fh:
+    fh.write(json.dumps({"action_id": tok_mono["action_id"], "consumed": True,
+                         "consumed_at": "2026-01-01T00:00:00Z"}) + "\n")
+st_mono = mono_cp.budget_status()
+check("a consumed-but-unrecorded token still counts as used",
+      st_mono["counts"]["engagement"] == 1 and st_mono["remaining"]["engagement"] == 9)
+try:
+    mono_cp.prepare_action({**base_action, "tool_family": "http",
+                            "request_shape": shape, "cycle_id": "C-0001"})
+    check("consumption never restores headroom", False)
+except ValueError as exc:
+    check("consumption never restores headroom", "cycle budget exhausted (1/1)" in str(exc))
+
 set_budget_root = fresh_root()
 (set_budget_root / "00_control/engagement.yaml").write_text(
     'program:\n  name: "x"\n\nscope:\n  assets: []\n  out_of_scope: []\n\n'

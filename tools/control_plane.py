@@ -2124,21 +2124,49 @@ class ControlPlane:
         """Recorded actions plus outstanding preflight tokens, per cycle and engagement.
 
         The governor's single counting seam: an issued-but-unconsumed token is capacity
-        already promised, so it counts against the same cap as a recorded action.
+        already promised, so it counts against the same cap as a recorded action. And
+        consumption never restores headroom: a consumed token with no matching
+        ACTION_RECORDED (the executor receipt-failure path — the request may have been
+        sent while the receipt write failed) still counts as used.
         """
         cycles: dict[str, int] = {}
         total = 0
+        recorded_ids: set[str] = set()
         for e in self._read_events():
             if e.get("type") != "ACTION_RECORDED":
                 continue
             cid = str(e.get("cycle_id") or "")
             cycles[cid] = cycles.get(cid, 0) + 1
             total += 1
+            recorded_ids.add(str(e.get("entity_id") or ""))
         for rec in self._outstanding_tokens():
             cid = str(rec.get("cycle_id") or "")
             cycles[cid] = cycles.get(cid, 0) + 1
             total += 1
+        for rec in self._consumed_unrecorded_tokens(recorded_ids):
+            cid = str(rec.get("cycle_id") or "")
+            cycles[cid] = cycles.get(cid, 0) + 1
+            total += 1
         return {"cycles": cycles, "engagement": total}
+
+    def _consumed_unrecorded_tokens(self, recorded_ids: set[str]) -> list[dict[str, Any]]:
+        """Latest state per token action_id, keeping only consumed-but-unrecorded ones."""
+        path = self._tokens_file()
+        if not path.exists():
+            return []
+        states: dict[str, dict[str, Any]] = {}
+        for line in path.read_text(errors="ignore").splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(rec, dict) and rec.get("action_id"):
+                key = str(rec["action_id"])
+                states[key] = {**states.get(key, {}), **rec}
+        return [rec for key, rec in states.items()
+                if rec.get("consumed") and key not in recorded_ids]
 
     def budget_status(self) -> dict[str, Any]:
         """Limits, counted actions and remaining capacity — the `budget status` seam."""

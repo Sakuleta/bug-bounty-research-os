@@ -333,6 +333,34 @@ craftToken(shapeFromArgs({ method: 'GET', url, principal: 'researcher-A' }))
 const r5 = await runControlledRequest({ root, args: { method: 'GET', url, principal: 'researcher-A' } })
 check('in-scope host passes the executor scope gate', r5.ok === true && labHits === hitsBefore + 1)
 
+// 7b. Concurrency: two parallel dispatches on one token — exactly one proceeds.
+craftToken(shapeFromArgs({ method: 'GET', url, principal: 'researcher-A' }))
+const raceBefore = labHits
+const [raceA, raceB] = await Promise.all([
+  runControlledRequest({ root, args: { method: 'GET', url, principal: 'researcher-A' } }),
+  runControlledRequest({ root, args: { method: 'GET', url, principal: 'researcher-A' } }),
+])
+check('two parallel dispatches consume one token exactly once',
+  [raceA, raceB].filter((r) => r.ok === true).length === 1 && labHits === raceBefore + 1)
+
+// 7c. An unparseable expires_at is never selectable (fail closed).
+const badShape = shapeFromArgs({ method: 'GET', url: url + '/badexpiry', principal: 'researcher-A' })
+craftedId += 1
+appendFileSync(tokensPath, JSON.stringify({
+  action_id: `A-9${String(craftedId).padStart(5, '0')}`,
+  nonce: `crafted-${craftedId}`,
+  argument_digest: canonicalDigest(badShape),
+  tool_family: 'http',
+  expires_at: 'not-a-date-at-all',
+  consumed: false,
+  cycle_id: 'C-0001',
+  preflight: preparePayload,
+}) + '\n')
+const rBad = await runControlledRequest({ root, args: { method: 'GET', url: url + '/badexpiry', principal: 'researcher-A' } })
+check('a token with an unparseable expiry is not selectable',
+  rBad.ok === false && rBad.text.includes('no matching unconsumed preflight token')
+  && labHits === raceBefore + 1)
+
 // 7b. Lifecycle re-check at dispatch: prepare proved the cycle RUNNING, but the token
 //     can sit in the store while a gate/close moves the cycle on — the executor must
 //     refuse and the refusal still consumes the token (single-use, crash-safe).

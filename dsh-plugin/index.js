@@ -87,7 +87,7 @@
  */
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
 import { homedir, tmpdir } from 'node:os'
 import { isAbsolute, join, resolve, sep } from 'node:path'
@@ -1092,14 +1092,17 @@ function loadTokenStates(root) {
   return states
 }
 
-/** First unconsumed, unexpired, digest-matching token of the requested family (FIFO). */
+/** First unconsumed, unexpired, digest-matching token of the requested family (FIFO).
+ *
+ *  Fail closed on expiry: a missing or unparseable `expires_at` is never selectable
+ *  (it must count as outstanding budget-side, but it can never dispatch). */
 function selectToken(states, digest, nowMs, family = 'http') {
   for (const st of states.values()) {
     if (st.consumed === true) continue
     if (st.argument_digest !== digest) continue
     if (String(st.tool_family || 'http') !== family) continue
     const exp = Date.parse(String(st.expires_at || ''))
-    if (Number.isFinite(exp) && exp <= nowMs) continue
+    if (!Number.isFinite(exp) || exp <= nowMs) continue
     return st
   }
   return undefined
@@ -1112,6 +1115,31 @@ function consumeToken(root, token) {
     consumed: true,
     consumed_at: new Date().toISOString(),
   }) + '\n')
+}
+
+/** Atomically claim a token for this dispatch (`O_EXCL` under `.token-claims/`,
+ *  keyed by nonce). Two parallel dispatches on one token: exactly one claim wins;
+ *  the loser refuses before any scope, broker or network effect. The claim is
+ *  released only on definite non-dispatch (a refusal before the fetch runs); once
+ *  the request is sent the claim stays with the consumed marker. */
+function claimToken(root, token) {
+  const nonce = String(token.nonce || '').replace(/[^A-Za-z0-9_-]/g, '')
+  if (!nonce) {
+    return { ok: false, error: 'the preflight token has no usable nonce — refusing the request' }
+  }
+  const path = join(root, '11_runtime', '.token-claims', nonce)
+  try {
+    mkdirSync(join(root, '11_runtime', '.token-claims'), { recursive: true })
+    const fd = openSync(path, 'wx')
+    try { closeSync(fd) } catch {}
+    return { ok: true, path }
+  } catch {
+    return { ok: false, error: 'the preflight token is already claimed by a concurrent dispatch — preflight tokens are single-use' }
+  }
+}
+
+function releaseClaim(path) {
+  try { rmSync(path, { force: true }) } catch {}
 }
 
 // ---------- policy broker (R7) ----------
@@ -1489,11 +1517,17 @@ async function runControlledRequest({ root, args, fetchImpl }) {
   if (!token) {
     return { ok: false, text: 'research_os_request: no matching unconsumed preflight token (tokens are single-use and expire). Prepare one first:\n  python3 tools/researchctl.py . prepare payload.json\nwith request_shape:\n  ' + JSON.stringify(redactShapeForText(shape)) }
   }
+  const claim = claimToken(root, token)
+  if (!claim.ok) {
+    log(`DENY(executor) ${shape.method} ${safeUrl} :: ${claim.error}`)
+    return { ok: false, text: `research_os_request: ${claim.error}` }
+  }
   // R7: while a broker socket exists the broker is mandatory — unsigned tokens are
   // refused, both scope checks (local + broker) must pass, and the token consumes
   // through the broker before dispatch. Any denial means no dispatch, no fallback.
   const brokerDenial = await consumeBrokerToken(root, token, shape, 'http')
   if (brokerDenial) {
+    releaseClaim(claim.path)
     const reason = redactUrlSecrets(brokerDenial)
     const where = brokerPath() === undefined ? 'executor' : 'executor broker'
     log(`DENY(${where}) ${shape.method} ${safeUrl} :: ${reason}`)
@@ -1502,11 +1536,13 @@ async function runControlledRequest({ root, args, fetchImpl }) {
   consumeToken(root, token)
   const lifecycleDenied = cycleLiveReason(root, token)
   if (lifecycleDenied) {
+    releaseClaim(claim.path)
     log('DENY(executor) lifecycle ' + shape.method + ' ' + safeUrl + ' :: ' + lifecycleDenied)
     return { ok: false, text: lifecycleDenied }
   }
   const dispatchDenied = dispatchHostReason(shape.url)
   if (dispatchDenied) {
+    releaseClaim(claim.path)
     log('DENY(executor) dispatch-host ' + shape.method + ' ' + safeUrl + ' :: ' + dispatchDenied)
     return { ok: false, text: dispatchDenied }
   }
@@ -1612,10 +1648,16 @@ async function runControlledBrowser({ root, args }) {
   if (!token) {
     return { ok: false, text: 'research_os_browser: no matching unconsumed browser preflight token (tokens are single-use and expire). Prepare one first:\n  python3 tools/researchctl.py . prepare payload.json\nwith "tool_family": "browser" and request_shape:\n  ' + JSON.stringify(redactShapeForText(shape)) }
   }
+  const claim = claimToken(root, token)
+  if (!claim.ok) {
+    log(`DENY(executor browser) ${safeUrl} :: ${claim.error}`)
+    return { ok: false, text: `research_os_browser: ${claim.error}` }
+  }
   // R7: same mandatory broker gate as the HTTP arm — unsigned refusal, both scope
   // checks, broker consume; no dispatch on any denial.
   const brokerDenial = await consumeBrokerToken(root, token, shape, 'browser')
   if (brokerDenial) {
+    releaseClaim(claim.path)
     const reason = redactUrlSecrets(brokerDenial)
     const where = brokerPath() === undefined ? 'executor browser' : 'executor broker browser'
     log(`DENY(${where}) ${safeUrl} :: ${reason}`)
@@ -1624,11 +1666,13 @@ async function runControlledBrowser({ root, args }) {
   consumeToken(root, token)
   const lifecycleDenied = cycleLiveReason(root, token)
   if (lifecycleDenied) {
+    releaseClaim(claim.path)
     log('DENY(executor) lifecycle browser ' + safeUrl + ' :: ' + lifecycleDenied)
     return { ok: false, text: lifecycleDenied }
   }
   const dispatchDenied = dispatchHostReason(shape.url)
   if (dispatchDenied) {
+    releaseClaim(claim.path)
     log('DENY(executor) dispatch-host browser ' + safeUrl + ' :: ' + dispatchDenied)
     return { ok: false, text: dispatchDenied }
   }
