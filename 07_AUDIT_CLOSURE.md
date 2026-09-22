@@ -169,8 +169,10 @@ checks and fails when a recorded current PASS contradicts them (`closure
 contradiction: <class> ...`): scope, coverage, hygiene-cleanup and method-self-attack
 contradict on their fresh error domains; negative contradicts when a CLOSED cycle has
 no `TECHNIQUE_EVALUATED`; open-hypothesis contradicts when an open hypothesis is
-neither named nor closed out by the latest open-hypothesis audit. Novelty-duplicate
-and the remaining judgment content are backed by the closure-review gate attestation
-above. The ledger hash chain stays unkeyed (`15_TOOLING.md` known limits) — it proves
+neither named nor closed out by the latest open-hypothesis audit; novelty-duplicate
+contradicts when a VERIFIED hypothesis is named nowhere in the latest
+novelty-duplicate summary (each finding must visibly pass the program-history and
+current-research comparison). The remaining judgment content is backed by the
+closure-review gate attestation above. The ledger hash chain stays unkeyed (`15_TOOLING.md` known limits) — it proves
 accidental corruption and lazy tampering, not authorship; the gate reference (a human
 ticket) is the out-of-band trail, not a cryptographic proof.

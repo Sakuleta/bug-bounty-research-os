@@ -2294,6 +2294,43 @@ _cd_bad = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_cd_root)
 check("v8.2 W11: a recorded PASS contradicting a fresh check fails closure",
       _cd_bad.returncode != 0
       and "closure contradiction: scope" in (_cd_bad.stdout + _cd_bad.stderr))
+# Backlog B13: novelty-duplicate gets a fresh re-derivation — a recorded current
+# PASS is contradicted when a VERIFIED hypothesis is named nowhere in the
+# novelty-duplicate summary (ledger-derived VERIFIED set vs summary text), so the
+# class no longer rests on gate attestation alone.
+_nd_root, _nd_cp, _nd_eid = close_workspace(with_closure_gate=True)
+_nd_cp.set_scope(["example.test"], "policy://closure-scope")
+_nd_cp.create_hypothesis("H-0001", {
+    "cycle_id": "C-0010", "observation": "o", "hypothesis": "h",
+    "secure_prediction": "s", "vulnerable_prediction": "v",
+    "test_question": "q", "test_plan": "p"})
+_nd_cp.transition_hypothesis("H-0001", "QUEUED", reason="queued")
+_nd_cp.transition_hypothesis("H-0001", "TESTING", reason="testing")
+_nd_cp.transition_hypothesis("H-0001", "VERIFIED", reason="verified", evidence_refs=[_nd_eid])
+_fnd = _nd_root / "05_findings" / "F-H-0001"
+_fnd.mkdir(parents=True, exist_ok=True)
+for _need in ("hypothesis.md", "validation.md", "report-draft.md"):
+    (_fnd / _need).write_text(f"finding record for H-0001 ({_need}): bounded impact reproduced\n")
+record_all_audits(_nd_cp, _nd_eid)
+fill_proof(_nd_root)
+_nd_sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nd_root), "--closure"],
+                         capture_output=True, text=True)
+check("backlog B13: an unnamed VERIFIED finding contradicts a novelty PASS",
+      _nd_sub.returncode != 0
+      and "closure contradiction: novelty-duplicate" in (_nd_sub.stdout + _nd_sub.stderr))
+_nd_cp.record_audit("novelty-duplicate", "PASS",
+                    "H-0001 was compared against program history and current public research",
+                    evidence_refs=[_nd_eid])
+_nd_named = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nd_root), "--closure"],
+                           capture_output=True, text=True)
+replace_proof_section(_nd_root, "VERIFIED_FINDINGS",
+                      "H-0001 verified against the recorded control with a validated instrument; "
+                      "the finding record lives at 05_findings/F-H-0001 with hypothesis, validation "
+                      "and report draft attached.")
+_nd_named2 = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nd_root), "--closure"],
+                            capture_output=True, text=True)
+check("backlog B13: a novelty PASS naming the VERIFIED finding closes clean",
+      _nd_named2.returncode == 0 and "closure=READY" in _nd_named2.stdout)
 
 # 18. Version stamps are monotone: once an event carries os_version, every later event must.
 vs_root = fresh_root(); vs_cp = ControlPlane(vs_root)

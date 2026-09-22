@@ -1325,9 +1325,10 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
                 )
         # Fresh-result contradiction: a recorded current PASS that the machine's own
         # fresh checks refute fails closure. Machine-verifiable classes re-derive
-        # from the errors above plus targeted fresh predicates; judgment-only
-        # classes (open-hypothesis dispositions naming their hypotheses,
-        # novelty-duplicate) are backed by the closure-review gate attestation.
+        # from the errors above plus targeted fresh predicates (open-hypothesis
+        # dispositions naming their hypotheses, novelty-duplicate naming each
+        # VERIFIED finding); the closure-review gate attests the judgment quality
+        # behind those records, not their existence.
         fresh_problems: dict[str, str] = {}
         for cls, keywords in {"scope": ("scope", "endpoints"),
                               "coverage": ("knowledge_triage",),
@@ -1358,6 +1359,23 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
                 fresh_problems["open-hypothesis"] = (
                     f"hypotheses {', '.join(sorted(unnamed))} are still open and neither named "
                     "nor closed out by the latest open-hypothesis audit")
+        # Novelty-duplicate is machine re-derived, not gate-attested: every VERIFIED
+        # hypothesis (each owns its 05_findings record, checked above) must be named
+        # in the latest novelty-duplicate summary — the comparison must visibly cover
+        # each finding. With no VERIFIED hypotheses there is nothing to contradict.
+        verified_hids = [hid for hid in cp.all_hypothesis_ids()
+                         if cp.hypothesis_status(hid) == "VERIFIED"]
+        if verified_hids:
+            nov_audits = [e for e in events
+                          if e.get("type") == "AUDIT_RECORDED"
+                          and (e.get("payload") or {}).get("class") == "novelty-duplicate"]
+            nov_summary = str((((nov_audits or [{}])[-1].get("payload")) or {}).get("summary", ""))
+            nov_unnamed = [hid for hid in verified_hids if hid not in nov_summary]
+            if nov_unnamed:
+                fresh_problems["novelty-duplicate"] = (
+                    f"verified hypotheses {', '.join(sorted(nov_unnamed))} are named nowhere in "
+                    "the latest novelty-duplicate summary — compare each finding against "
+                    "program history and current public research, then re-record the audit")
         for cls, problem in sorted(fresh_problems.items()):
             if closure_checks.get(f"{cls}_audit_current"):
                 errors.append(
