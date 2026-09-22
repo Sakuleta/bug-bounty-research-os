@@ -3038,5 +3038,21 @@ _wc3.transition_cycle("C-0001", "REVIEWED", reason="local voucher-less", evidenc
 check("v8.2 W1: local mode accepts voucher-less reviews from distinct runs",
       _wc3.cycle_status("C-0001") == "REVIEWED")
 
+# v8.2 W4: snapshot-first registration + review-gate digest re-verification.
+_wr4, _wc4, _we4 = _w1_root()
+_store4 = _wr4 / _wc4.evidence_index()[_we4]["store_path"]
+import hashlib as _hashlib
+check("v8.2 W4: the store copy matches the recorded digest",
+      _hashlib.sha256(_store4.read_bytes()).hexdigest()
+      == _wc4.evidence_index()[_we4]["sha256"])
+with _store4.open("a") as _fh:
+    _fh.write("forged appendix: nothing was ever validated\n")
+try:
+    _wc4.merge_worker(_w1_packet(_we4, "objective", "rev-a", "run-1"))
+    check("v8.2 W4: quote against a digest-mismatched store is refused", False)
+except ValueError as exc:
+    check("v8.2 W4: quote against a digest-mismatched store is refused",
+          "no longer matches the registered digest" in str(exc))
+
 
 print(f"\n{len(passed)} checks passed")

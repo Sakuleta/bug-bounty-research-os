@@ -576,8 +576,29 @@ def review_quote_problem(root: Path, index: dict[str, dict[str, Any]], item: Any
                 "quote a real line of the registered capture")
     store_rel = str(meta.get("store_path") or "")
     store_path = (root / store_rel) if store_rel else None
-    text = ""
-    if store_path is not None and store_path.is_file():
+    if store_path is None or not store_path.is_file():
+        text = ""
+    else:
+        # The store copy is the artifact the verdict is bound to: re-verify its
+        # digest and size against the registration record before accepting any
+        # quote, so a later edit of the store copy cannot move the evidence under
+        # the review (the substring check alone would still pass an append attack).
+        try:
+            actual_sha256 = sha256_file(store_path)
+            actual_size = store_path.stat().st_size
+        except OSError:
+            return (f"review.evidence_quotes[{i}].evidence_ref {ref} store copy is unreadable "
+                    f"({store_rel or 'no stored copy'}) — re-register the artifact")
+        recorded_sha256 = str(meta.get("sha256") or "")
+        recorded_size = meta.get("bytes")
+        if recorded_sha256 and recorded_sha256 != actual_sha256:
+            return (f"review.evidence_quotes[{i}].evidence_ref {ref} store copy no longer matches "
+                    f"the registered digest ({store_rel}) — the snapshot changed after registration; "
+                    "re-register the artifact so the verdict binds the current bytes")
+        if isinstance(recorded_size, int) and recorded_size != actual_size:
+            return (f"review.evidence_quotes[{i}].evidence_ref {ref} store copy no longer matches "
+                    f"the registered size ({store_rel}) — the snapshot changed after registration; "
+                    "re-register the artifact so the verdict binds the current bytes")
         text = store_path.read_text(errors="ignore")
     if quote not in text:
         return (f"review.evidence_quotes[{i}].quote not found in the registered store copy of {ref} "
@@ -1337,17 +1358,40 @@ class ControlPlane:
             raise ValueError(f"evidence file missing: {path}")
         if cycle_id and self.cycle_status(str(cycle_id)) is None:
             raise ValueError(f"evidence references unknown cycle: {cycle_id}")
-        digest = sha256_file(p)
-        size = p.stat().st_size
-        # Immutable snapshot: a content-addressed copy is the registered artifact, so the
-        # evidence survives later edits of the living file (register snapshots, not living docs).
         suffix = "".join(p.suffixes)[:16]
-        store_rel = f"{EVIDENCE_STORE}/{digest}{suffix}"
         with _lock(self.root):
-            store_abs = self.root / store_rel
-            if not store_abs.exists():
-                store_abs.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(p, store_abs)
+            # Snapshot-first registration: the source is copied to a temp file inside
+            # the store, fsynced and closed; the COPY is hashed and sized, then
+            # atomically renamed onto <digest><suffix>. The recorded digest always
+            # describes the stored bytes (a source mutated mid-registration cannot
+            # desynchronize them), and an existing destination with different bytes
+            # is a tamper signal — refused, never silently kept.
+            store_dir = self.root / EVIDENCE_STORE
+            store_dir.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(dir=str(store_dir), prefix=".register-", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "wb") as tmp:
+                    with p.open("rb") as src:
+                        shutil.copyfileobj(src, tmp)
+                    tmp.flush()
+                    os.fsync(tmp.fileno())
+                digest = sha256_file(Path(tmp_name))
+                size = Path(tmp_name).stat().st_size
+                store_rel = f"{EVIDENCE_STORE}/{digest}{suffix}"
+                store_abs = self.root / store_rel
+                if store_abs.exists():
+                    if sha256_file(store_abs) != digest:
+                        raise ValueError(
+                            f"evidence store destination {store_rel} holds different bytes — "
+                            "the snapshot was tampered with; remove it after investigation, "
+                            "then re-register")
+                else:
+                    os.replace(tmp_name, store_abs)
+            finally:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
             events = self._read_events()
             n = sum(1 for e in events if e.get("type") == "EVIDENCE_REGISTERED") + 1
             ref = f"E-{n:06d}"
