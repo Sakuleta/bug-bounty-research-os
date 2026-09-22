@@ -3054,5 +3054,52 @@ except ValueError as exc:
     check("v8.2 W4: quote against a digest-mismatched store is refused",
           "no longer matches the registered digest" in str(exc))
 
+# v8.2 W6: APPLIED backstop — ledger-derived enforcement, audit re-verification,
+# orphan resolutions.
+def _w6_root() -> tuple:
+    r = fresh_root()
+    (r / "OS_VERSION").write_text("8.1\n")
+    c = ControlPlane(r)
+    return r, c
+
+
+PROPOSAL_TITLE = "Fixture pack records the probe behavior under test"
+PROPOSAL_BODY = ("The probe body explains what the pack should record and why the change "
+                 "matters for review.")
+_kr6, _kc6 = _w6_root()
+_kp6 = _kc6.knowledge_propose({"pack": "fixture", "title": PROPOSAL_TITLE, "body": PROPOSAL_BODY})
+_prop_path = _kr6 / "10_learning" / "knowledge-proposals.yaml"
+_rows6 = [l for l in _prop_path.read_text().splitlines() if l.strip().startswith("- ")]
+_row6 = json.loads(_rows6[0].strip()[2:])
+_row6["pack_digests"] = {"fixture.md": "0" * 64}
+_prop_path.write_text("- " + json.dumps(_row6) + "\n")
+try:
+    _kc6.knowledge_resolve("KP-0001", "APPLIED", "ticket-123")
+    check("v8.2 W6: forged projection row cannot buy APPLIED", False)
+except ValueError as exc:
+    check("v8.2 W6: forged projection row cannot buy APPLIED", "unchanged" in str(exc))
+_kr6b, _kc6b = _w6_root()
+_kc6b.append("KNOWLEDGE_RESOLVED", "knowledge_proposal", "KP-9999", actor="human",
+             reason="orphan fixture",
+             payload={"id": "KP-9999", "decision": "APPLIED", "reference": "ticket-999"})
+_sub6 = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_kr6b)],
+                       capture_output=True, text=True)
+check("v8.2 W6: orphan KNOWLEDGE_RESOLVED fails the audit",
+      _sub6.returncode != 0 and "KP-9999" in (_sub6.stdout + _sub6.stderr))
+_kr6c, _kc6c = _w6_root()
+_kc6c.knowledge_propose({"pack": "fixture", "title": PROPOSAL_TITLE, "body": PROPOSAL_BODY})
+_kc6c.append("KNOWLEDGE_RESOLVED", "knowledge_proposal", "KP-0001", actor="human",
+             reason="forged applied", payload={"id": "KP-0001", "decision": "APPLIED",
+                                               "reference": "ticket-123"})
+_sub6c = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_kr6c)],
+                        capture_output=True, text=True)
+check("v8.2 W6: forged APPLIED on an untouched pack fails the audit",
+      _sub6c.returncode != 0 and "APPLIED" in (_sub6c.stdout + _sub6c.stderr))
+(_kr6c / "12_knowledge" / "fixture" / "fixture.md").write_text("# Fixture pack\n\nReal new content.\n")
+_kc6c.knowledge_resolve("KP-0001", "APPLIED", "ticket-124")
+_sub6d = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_kr6c)],
+                        capture_output=True, text=True)
+check("v8.2 W6: legit APPLIED after a real pack edit audits clean", _sub6d.returncode == 0)
+
 
 print(f"\n{len(passed)} checks passed")

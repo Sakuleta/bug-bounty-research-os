@@ -626,6 +626,62 @@ def review_packet_digest(packet: dict[str, Any]) -> str:
     return hashlib.sha256(_json_dump(projection).encode("utf-8")).hexdigest()
 
 
+def pack_change_problem(root: Path, row: dict[str, Any]) -> str | None:
+    """Why the pack named by a knowledge-proposal row shows no proven content change.
+
+    Compares the row's snapshotted `pack_digests` against the current
+    INDEX-declared pack files. Shared by the write-side APPLIED guard
+    (`knowledge_resolve`) and the integrity audit, so a forged projection row or
+    a hand-appended APPLIED cannot pass one side while failing the other.
+    Returns the problem, or None when at least one declared file really changed.
+    """
+    root = Path(root)
+    proposal_id = str(row.get("id") or "")
+    pack = str(row.get("pack") or "")
+    digests = row.get("pack_digests")
+    if not isinstance(digests, dict) or not digests:
+        return (
+            f"proposal {proposal_id} carries no pack_digests — it predates content "
+            "verification; re-propose the change so APPLIED can be proven"
+        )
+    pack_dir = root / "12_knowledge" / pack
+    changed: list[str] = []
+    problems: list[str] = []
+    for ref, recorded in sorted(digests.items()):
+        if not isinstance(recorded, str) or not re.fullmatch(r"[0-9a-f]{64}", recorded):
+            problems.append(f"{ref} has a malformed recorded digest")
+            continue
+        target = (pack_dir / str(ref)).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            problems.append(f"{ref} escapes the workspace")
+            continue
+        if not target.is_file():
+            problems.append(f"{ref} is missing")
+            continue
+        try:
+            current = sha256_file(target)
+        except OSError as exc:
+            problems.append(f"{ref} is unreadable ({exc})")
+            continue
+        if current != recorded:
+            changed.append(str(ref))
+    if problems:
+        return (
+            f"cannot verify the {pack} pack content for proposal {proposal_id}: "
+            + "; ".join(problems)
+            + f" — restore or repair 12_knowledge/{pack}/ before resolving APPLIED"
+        )
+    if not changed:
+        return (
+            f"pack {pack} content is unchanged since proposal {proposal_id} was created "
+            "— a timestamp touch is not an edit; edit the INDEX-declared pack file(s) "
+            "with real content, then resolve"
+        )
+    return None
+
+
 def canonical_request_shape(shape: dict[str, Any]) -> dict[str, Any]:
     """Normalize a request_shape to the canonical digest form the executor hashes.
 
@@ -1770,49 +1826,9 @@ class ControlPlane:
         bytes are identical, so an `utime`/touch (any mtime) is refused. Missing or
         unreadable files are errors, never silently skipped.
         """
-        proposal_id = str(row.get("id") or "")
-        pack = str(row.get("pack") or "")
-        digests = row.get("pack_digests")
-        if not isinstance(digests, dict) or not digests:
-            raise ValueError(
-                f"proposal {proposal_id} carries no pack_digests — it predates content "
-                "verification; re-propose the change so APPLIED can be proven"
-            )
-        pack_dir = self.root / "12_knowledge" / pack
-        changed: list[str] = []
-        problems: list[str] = []
-        for ref, recorded in sorted(digests.items()):
-            if not isinstance(recorded, str) or not re.fullmatch(r"[0-9a-f]{64}", recorded):
-                problems.append(f"{ref} has a malformed recorded digest")
-                continue
-            target = (pack_dir / str(ref)).resolve()
-            try:
-                target.relative_to(self.root)
-            except ValueError:
-                problems.append(f"{ref} escapes the workspace")
-                continue
-            if not target.is_file():
-                problems.append(f"{ref} is missing")
-                continue
-            try:
-                current = sha256_file(target)
-            except OSError as exc:
-                problems.append(f"{ref} is unreadable ({exc})")
-                continue
-            if current != recorded:
-                changed.append(str(ref))
-        if problems:
-            raise ValueError(
-                f"cannot verify the {pack} pack content for proposal {proposal_id}: "
-                + "; ".join(problems)
-                + f" — restore or repair 12_knowledge/{pack}/ before resolving APPLIED"
-            )
-        if not changed:
-            raise ValueError(
-                f"pack {pack} content is unchanged since proposal {proposal_id} was created "
-                "— a timestamp touch is not an edit; edit the INDEX-declared pack file(s) "
-                "with real content, then resolve"
-            )
+        problem = pack_change_problem(self.root, row)
+        if problem:
+            raise ValueError(problem)
 
     def knowledge_resolve(self, kp_id: str, decision: str, reference: str,
                           actor: str = "human", gate: str | None = None) -> dict[str, Any]:
@@ -1845,7 +1861,10 @@ class ControlPlane:
                     f"gate {gate_id} is not RESOLVED (status: {g.get('status') or 'unknown'}) — "
                     "resolve it with researchctl gate resolve before binding it to a knowledge resolution"
                 )
-        row = next((r for r in self.knowledge_proposals() if r.get("id") == pid), None)
+        # Enforcement reads the LEDGER, never the hand-editable projection: a forged
+        # knowledge-proposals.yaml row cannot buy an APPLIED the pack never earned.
+        ledger_rows = self._knowledge_proposal_rows(self._read_events())
+        row = next((r for r in ledger_rows if r.get("id") == pid), None)
         if row is None:
             raise ValueError(f"unknown knowledge proposal: {pid}")
         if decision == "APPLIED":

@@ -18,7 +18,7 @@ from control_plane import (CYCLE_EDGES, EVENT_TYPES, HYP_EDGES, KNOWLEDGE_RESOLU
                            METHOD_SELF_ATTACK_ROWS, REQUIRED_AUDIT_CLASSES, TECHNIQUE_RESULTS,
                            ControlPlane, asset_hosts, budget_limits, engagement_assets,
                            evidence_id_ok, host_in_scope, never_considered_in_window,
-                           normalize_cycle_state, review_packet_digest, review_quote_problem, scope_check,
+                           normalize_cycle_state, pack_change_problem, review_packet_digest, review_quote_problem, scope_check,
                            secret_pattern_hits, sha256_file)
 from knowledge_index import index_problem, parse_index, selection_cap, selection_query, top_packs  # noqa: E402
 
@@ -676,6 +676,15 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
     # Resolution backstop (28): the write path only accepts APPLIED/REJECTED, so a raw
     # append must not read as valid. Versioned records are errors; legacy records warn.
     # The projection coerces an unknown decision to the explicit INVALID marker either way.
+    proposed_ids = {str((e.get("payload") or {}).get("id") or e.get("entity_id"))
+                    for e in events if e.get("type") == "KNOWLEDGE_PROPOSED"}
+    proposed_by_id = {}
+    for e in events:
+        if e.get("type") != "KNOWLEDGE_PROPOSED":
+            continue
+        payload = e.get("payload") or {}
+        pid = str(payload.get("id") or e.get("entity_id"))
+        proposed_by_id.setdefault(pid, payload)
     for e in events:
         if e.get("type") != "KNOWLEDGE_RESOLVED":
             continue
@@ -688,6 +697,29 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
                 errors.append(message)
             else:
                 warnings.append(f"legacy knowledge record (pre-7.3, no os_version): {message}")
+            continue
+        rid = str((e.get("payload") or {}).get("id") or e.get("entity_id"))
+        if rid not in proposed_ids:
+            message = (f"knowledge resolution {rid} names no KNOWLEDGE_PROPOSED proposal "
+                       f"({rid}) — orphan resolutions cannot prove a reviewed promotion")
+            if e.get("os_version"):
+                errors.append(message)
+            else:
+                warnings.append(f"legacy knowledge record (pre-7.3, no os_version): {message}")
+            continue
+        if decision == "APPLIED":
+            # Re-run the pack-digest comparison the write side enforces: a forged or
+            # unchanged pack behind an APPLIED row fails the audit even when the
+            # resolution event itself is hash-chain valid.
+            proposal = proposed_by_id.get(rid) or {}
+            problem = pack_change_problem(root, {"id": rid, "pack": proposal.get("pack"),
+                                                 "pack_digests": proposal.get("pack_digests")})
+            if problem:
+                message = f"knowledge resolution {rid} claims APPLIED but proves no pack change: {problem}"
+                if e.get("os_version"):
+                    errors.append(message)
+                else:
+                    warnings.append(f"legacy knowledge record (pre-7.3, no os_version): {message}")
 
     # Proposal backstop (28): the artifact is the reviewable evidence, so the event must
     # carry its required provenance and the file on disk must match the recorded digest.
