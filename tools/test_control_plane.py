@@ -2980,4 +2980,63 @@ with _w3_lock(_w3_root, timeout=2.0, stale_seconds=0.0):
     check("v8.2 W3: dead owner is reclaimed", True)
 
 
+# v8.2 W1: review independence — trim+casefold identities, producer-run refusal,
+# local-mode (voucher-less) acceptance.
+def _w1_root() -> tuple:
+    r = fresh_root()
+    c = ControlPlane(r)
+    c.create_cycle("C-0001", cycle_fixture("C-0001", "review casefold probe", root=r))
+    write_objective(r, "C-0001")
+    c.transition_cycle("C-0001", "READY", reason="ready")
+    c.transition_cycle("C-0001", "RUNNING", reason="run")
+    proof = r / "proof.txt"
+    proof.write_text(f"probe observation: {QUOTE}\n")
+    e = c.register_evidence("proof.txt", kind="raw", source="researcher-owned",
+                            cycle_id="C-0001")["payload"]["id"]
+    write_results(r, "C-0001", e)
+    c.update_cycle("C-0001", {"result_summary": "bounded impact reproduced"})
+    c.transition_cycle("C-0001", "RESULT_READY", reason="result", evidence_refs=[e])
+    return r, c, e
+
+
+def _w1_packet(e: str, axis: str, reviewer: str, run_id: str, **extra: object) -> dict:
+    pkt: dict = {"cycle_id": "C-0001", "evidence_refs": [e], "next_step": f"{axis} review",
+                 "review": {"axis": axis, "verdict": "pass", "reviewer": reviewer,
+                            "run_id": run_id,
+                            "evidence_quotes": [{"evidence_ref": e, "quote": QUOTE}]}}
+    pkt.update(extra)
+    return pkt
+
+
+_wr, _wc, _we = _w1_root()
+_wc.merge_worker(_w1_packet(_we, "objective", "Run-A", "Session-A"))
+_wc.merge_worker(_w1_packet(_we, "method", "run-a", "session-a"))
+try:
+    _wc.transition_cycle("C-0001", "REVIEWED", reason="case variants", evidence_refs=[_we])
+    check("v8.2 W1: case-variant reviewer/run_id pair is refused", False)
+except ValueError as exc:
+    check("v8.2 W1: case-variant reviewer/run_id pair is refused", "distinct" in str(exc))
+
+_wr2, _wc2, _we2 = _w1_root()
+_wc2.merge_worker(_w1_packet(_we2, "objective", "rev-a", "Session-A"))
+_wc2.merge_worker(_w1_packet(_we2, "method", "rev-b", "session-a"))
+try:
+    _wc2.transition_cycle("C-0001", "REVIEWED", reason="run case variant", evidence_refs=[_we2])
+    check("v8.2 W1: run_id differing only by case is refused", False)
+except ValueError as exc:
+    check("v8.2 W1: run_id differing only by case is refused", "distinct runs" in str(exc))
+
+_wr3, _wc3, _we3 = _w1_root()
+try:
+    _wc3.merge_worker(_w1_packet(_we3, "objective", "rev-a", "run-1", producer_run_id="RUN-1"))
+    check("v8.2 W1: review by the producer run is refused", False)
+except ValueError as exc:
+    check("v8.2 W1: review by the producer run is refused", "producer run" in str(exc))
+_wc3.merge_worker(_w1_packet(_we3, "objective", "rev-a", "run-1", producer_run_id="run-9"))
+_wc3.merge_worker(_w1_packet(_we3, "method", "rev-b", "run-2", producer_run_id="run-9"))
+_wc3.transition_cycle("C-0001", "REVIEWED", reason="local voucher-less", evidence_refs=[_we3])
+check("v8.2 W1: local mode accepts voucher-less reviews from distinct runs",
+      _wc3.cycle_status("C-0001") == "REVIEWED")
+
+
 print(f"\n{len(passed)} checks passed")

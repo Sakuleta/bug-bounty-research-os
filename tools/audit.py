@@ -18,7 +18,7 @@ from control_plane import (CYCLE_EDGES, EVENT_TYPES, HYP_EDGES, KNOWLEDGE_RESOLU
                            METHOD_SELF_ATTACK_ROWS, REQUIRED_AUDIT_CLASSES, TECHNIQUE_RESULTS,
                            ControlPlane, asset_hosts, budget_limits, engagement_assets,
                            evidence_id_ok, host_in_scope, never_considered_in_window,
-                           normalize_cycle_state, review_quote_problem, scope_check,
+                           normalize_cycle_state, review_packet_digest, review_quote_problem, scope_check,
                            secret_pattern_hits, sha256_file)
 from knowledge_index import index_problem, parse_index, selection_cap, selection_query, top_packs  # noqa: E402
 
@@ -844,6 +844,8 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
                     "evidence_refs": [str(r) for r in e.get("evidence_refs") or []],
                     "evidence_quotes": review.get("evidence_quotes"),
                     "versioned": bool(e.get("os_version")),
+                    "attestation": review.get("attestation"),
+                    "packet": e.get("payload") or {},
                 }
 
     def grade_review(versioned: bool, message: str) -> None:
@@ -865,7 +867,7 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
                 f"cycle {cid} reviews lack reviewer identity "
                 f"(objective={reviewers['objective'] or 'missing'}, method={reviewers['method'] or 'missing'})"
             )
-        elif reviewers["objective"] == reviewers["method"]:
+        elif reviewers["objective"].strip().casefold() == reviewers["method"].strip().casefold():
             errors.append(f"cycle {cid} reviews are not independent — both axes came from '{reviewers['objective']}'")
         # Grade each axis with its OWN versioned flag: a legacy packet's absence is a
         # warning even when the sibling axis is versioned, and only a versioned packet's
@@ -874,8 +876,48 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
             if not run_ids[axis]:
                 grade_review(bool(axes.get(axis, {}).get("versioned")),
                              f"cycle {cid} {axis} review lacks run_id")
-        if all(run_ids.values()) and run_ids["objective"] == run_ids["method"]:
+        if all(run_ids.values()) and run_ids["objective"].strip().casefold() == run_ids["method"].strip().casefold():
             errors.append(f"cycle {cid} reviews are not independent — both axes ran in '{run_ids['objective']}'")
+        # Broker-attested vouchers: when a review packet carries an attestation, its
+        # bindings (axis, reviewer, run, cycle, hypothesis, exact packet digest) are
+        # re-checked; packets without one are noted as voucher-less (local mode keeps
+        # declared-identity acceptance, so this stays a warning, never an error).
+        attested_nonces: dict[str, str] = {}
+        for axis in ("objective", "method"):
+            packet = axes.get(axis, {})
+            attestation = packet.get("attestation")
+            if not isinstance(attestation, dict):
+                if packet.get("verdict") == "pass":
+                    warnings.append(
+                        f"cycle {cid} {axis} review carries no broker voucher (voucher-less "
+                        "review: distinct declared runs only, no broker attestation)")
+                continue
+            if str(attestation.get("axis", "")).lower() != axis:
+                errors.append(f"cycle {cid} {axis} review voucher is bound to axis "
+                              f"{attestation.get('axis')!r}, not {axis!r}")
+            for field in ("reviewer", "run_id"):
+                if str(attestation.get(field, "")).strip().casefold() != str(packet.get(field, "")).strip().casefold():
+                    errors.append(f"cycle {cid} {axis} review voucher is bound to {field} "
+                                  f"{attestation.get(field)!r}, not the packet's {field}")
+            if str(attestation.get("cycle_id", "")).strip() != cid:
+                errors.append(f"cycle {cid} {axis} review voucher is bound to a different cycle")
+            hypothesis_id = str(attestation.get("hypothesis_id", "")).strip()
+            if cp.entity_cycle("hypothesis", hypothesis_id) != cid:
+                errors.append(f"cycle {cid} {axis} review voucher names hypothesis "
+                              f"{hypothesis_id!r}, which does not belong to cycle {cid}")
+            try:
+                expected_digest = review_packet_digest(packet.get("packet") or {})
+            except (ValueError, TypeError, AttributeError):
+                expected_digest = None
+            if expected_digest is None or str(attestation.get("packet_sha256", "")).lower() != expected_digest:
+                errors.append(f"cycle {cid} {axis} review voucher's packet digest does not match "
+                              "the merged packet — the packet was edited after issue")
+            nonce = str(attestation.get("nonce") or "")
+            if nonce:
+                if nonce in attested_nonces.values():
+                    errors.append(f"cycle {cid} review vouchers share nonce {nonce[:12]}… — "
+                                  "vouchers are single-use, one per axis")
+                attested_nonces[axis] = nonce
         for axis in ("objective", "method"):
             packet = axes.get(axis, {})
             quotes = packet.get("evidence_quotes")

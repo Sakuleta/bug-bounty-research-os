@@ -586,6 +586,25 @@ def review_quote_problem(root: Path, index: dict[str, dict[str, Any]], item: Any
     return None
 
 
+def review_packet_digest(packet: dict[str, Any]) -> str:
+    """Canonical sha256 of a review packet, excluding any embedded attestation.
+
+    The reviewing run hashes this exact projection when asking the broker for a
+    voucher (`review.issue ... packet_sha256`); `merge_worker` and the audit
+    recompute it, so a voucher cannot move to an edited packet. `_json_dump` is
+    the shared canonicalization (sorted keys, compact separators).
+    """
+    review = dict(packet.get("review") or {})
+    review.pop("attestation", None)
+    projection = {
+        "cycle_id": packet.get("cycle_id"),
+        "evidence_refs": packet.get("evidence_refs"),
+        "next_step": packet.get("next_step"),
+        "review": review,
+    }
+    return hashlib.sha256(_json_dump(projection).encode("utf-8")).hexdigest()
+
+
 def canonical_request_shape(shape: dict[str, Any]) -> dict[str, Any]:
     """Normalize a request_shape to the canonical digest form the executor hashes.
 
@@ -1049,6 +1068,7 @@ class ControlPlane:
                     "reviewer": str(review.get("reviewer", "")).strip(),
                     "run_id": str(review.get("run_id", "")).strip(),
                     "evidence_quotes": review.get("evidence_quotes"),
+                    "attestation": review.get("attestation"),
                 }
         return axes
 
@@ -1068,7 +1088,8 @@ class ControlPlane:
                 "cycle guard: review packets need an explicit review.reviewer identity — "
                 f"objective={reviewers['objective'] or 'missing'}, method={reviewers['method'] or 'missing'}"
             )
-        if reviewers["objective"] == reviewers["method"]:
+        folded_reviewers = {a: reviewers[a].strip().casefold() for a in ("objective", "method")}
+        if folded_reviewers["objective"] == folded_reviewers["method"]:
             raise ValueError(
                 "cycle guard: the two review axes must come from distinct reviewers — "
                 f"both came from '{reviewers['objective']}'. Dispatch the second axis as a separate run."
@@ -1080,11 +1101,28 @@ class ControlPlane:
                 f"(objective={run_ids['objective'] or 'missing'}, method={run_ids['method'] or 'missing'}); "
                 "a review by the same run as the work is not independent"
             )
-        if run_ids["objective"] == run_ids["method"]:
+        folded_runs = {a: run_ids[a].casefold() for a in ("objective", "method")}
+        if folded_runs["objective"] == folded_runs["method"]:
             raise ValueError(
                 "cycle guard: the two review axes must come from distinct runs — "
                 f"both carry run_id '{run_ids['objective']}'. Dispatch the second axis in a separate run."
             )
+        if broker_client() is not None:
+            attestations = {a: latest[a].get("attestation") for a in ("objective", "method")}
+            if any(not isinstance(att, dict) for att in attestations.values()):
+                missing = sorted(a for a in ("objective", "method")
+                                 if not isinstance(attestations[a], dict))
+                raise ValueError(
+                    "cycle guard: the policy broker is running, so each review axis needs a "
+                    f"broker-attested voucher (review.attestation) — missing on: {', '.join(missing)}; "
+                    "issue one per axis via `researchctl review-issue packet.json`"
+                )
+            nonces = {a: str(attestations[a].get("nonce") or "") for a in ("objective", "method")}
+            if not all(nonces.values()) or nonces["objective"] == nonces["method"]:
+                raise ValueError(
+                    "cycle guard: the two review axes must carry distinct single-use broker "
+                    "vouchers — the attestations share a nonce, so one voucher was reused"
+                )
 
     def _validate_review_quotes(self, quotes: list[Any], packet_refs: list[str]) -> None:
         """Every quote must be a substring of the registered store copy — never the living file."""
@@ -2873,6 +2911,64 @@ class ControlPlane:
         gates = [gid for gid in self.all_gate_ids() if (self.gate(gid) or {}).get("status") == "PENDING"]
         return {"cycles": cycles, "hypotheses": hypotheses, "pending_human_gates": gates}
 
+    def _consume_review_voucher(self, packet: dict[str, Any], cid: str) -> None:
+        """Consume the packet's broker-attested review voucher (broker mode only).
+
+        No broker socket means advisory local mode: the packet is accepted on its
+        declared identities (the audit notes voucher-less reviews). While a broker
+        socket is present the voucher is mandatory and single-use: the bindings
+        (axis, reviewer, run, cycle, hypothesis, exact packet digest) are checked
+        before the broker consumes the nonce, so replayed, forged, rebound or
+        edited-packet vouchers are refused and nothing is double-consumed.
+        """
+        review = packet.get("review") or {}
+        client = broker_client()
+        if client is None:
+            return
+        attestation = review.get("attestation")
+        if not isinstance(attestation, dict):
+            raise ValueError(
+                "the policy broker is running, so review packets need a broker-attested "
+                "voucher (review.attestation) — issue one via `researchctl review-issue packet.json`"
+            )
+        axis = str(review.get("axis", "")).lower()
+        if str(attestation.get("axis", "")).lower() != axis:
+            raise ValueError(
+                f"review voucher is bound to axis {attestation.get('axis')!r}, not to this "
+                f"packet's axis {axis!r} — vouchers cannot move across axes"
+            )
+        for field in ("reviewer", "run_id"):
+            if str(attestation.get(field, "")).strip().casefold() != str(review.get(field, "")).strip().casefold():
+                raise ValueError(
+                    f"review voucher is bound to {field} {attestation.get(field)!r}, not to this "
+                    f"packet's {field} — vouchers cannot move across reviewers or runs"
+                )
+        if str(attestation.get("cycle_id", "")).strip() != cid:
+            raise ValueError("review voucher is bound to a different cycle — vouchers cannot move across cycles")
+        hypothesis_id = str(attestation.get("hypothesis_id", "")).strip()
+        if self.entity_cycle("hypothesis", hypothesis_id) != cid:
+            raise ValueError(
+                f"review voucher names hypothesis {hypothesis_id!r}, which does not belong to "
+                f"cycle {cid} — vouchers cannot move across hypotheses"
+            )
+        if str(attestation.get("packet_sha256", "")).lower() != review_packet_digest(packet):
+            raise ValueError(
+                "review voucher's packet digest does not match this packet — the packet was "
+                "edited after the voucher was issued; issue a fresh voucher for the final packet"
+            )
+        try:
+            response = client.call("review.consume", timeout=5, workspace=str(self.root),
+                                   voucher={k: attestation.get(k) for k in
+                                            ("workspace", "cycle_id", "hypothesis_id", "axis",
+                                             "reviewer", "run_id", "packet_sha256", "nonce",
+                                             "expires_at", "sig")})
+        except client.BrokerUnavailable as exc:
+            raise ValueError(
+                f"broker socket is present but the voucher consume call failed (fail closed): {exc} — "
+                "start the broker (`researchctl broker serve`) or unset RESEARCH_OS_BROKER_SOCKET") from exc
+        if not response.get("ok"):
+            raise ValueError(f"the broker refused the review voucher (fail closed): {response.get('error')}")
+
     def merge_worker(self, packet: dict[str, Any], actor: str = "orchestrator") -> dict[str, Any]:
         cid = packet.get("cycle_id")
         refs = packet.get("evidence_refs") or []
@@ -2906,12 +3002,20 @@ class ControlPlane:
                     "artifact the verdict leans on, so a later edit of the living file cannot "
                     "silently move the evidence under the review"
                 )
+            producer = str(packet.get("producer_run_id") or "").strip()
+            if producer and producer.casefold() == str(review.get("run_id", "")).strip().casefold():
+                raise ValueError(
+                    "review packet's run_id matches the producer run that did the work "
+                    f"({producer!r}) — a run cannot review its own output; dispatch the "
+                    "review in a separate run"
+                )
         with _lock(self.root):
             if self.cycle_status(str(cid)) in {None, "CLOSED"}:
                 raise ValueError("worker packet must reference an existing non-closed cycle")
             self._validate_refs(refs)
             if review is not None:
                 self._validate_review_quotes(quotes, refs)
+                self._consume_review_voucher(packet, str(cid))
             aid = f"WR-{len(self._read_events()) + 1:06d}"
             event = self._append_locked("WORKER_RESULT", "worker_result", aid, actor=actor,
                                         reason=packet.get("next_step", "worker result merged"),

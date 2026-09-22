@@ -228,6 +228,14 @@ def main() -> int:
     w = sub.add_parser("worker")
     w.add_argument("json")
     w.set_defaults(fn="worker")
+    ri = sub.add_parser("review-issue", help="issue a broker-attested review voucher for a "
+                                             "review packet and embed it as review.attestation "
+                                             "(one voucher per axis; the broker must be running)")
+    ri.add_argument("json", help="review packet file (cycle_id, evidence_refs, review{axis, "
+                                 "verdict, reviewer, run_id, evidence_quotes}); updated in place")
+    ri.add_argument("hypothesis_id", help="hypothesis under review (must belong to the packet's cycle)")
+    ri.add_argument("--ttl", type=int, default=300, help="voucher lifetime in seconds (1-3600)")
+    ri.set_defaults(fn="review-issue")
     br = sub.add_parser("broker")
     brs = br.add_subparsers(dest="op", required=True)
     x = brs.add_parser("status", help="broker socket, availability, policy/key presence and version")
@@ -313,6 +321,28 @@ def main() -> int:
             out = cp.set_budget(load_json(ns.json))
         elif ns.fn == "worker":
             out = cp.merge_worker(load_json(ns.json))
+        elif ns.fn == "review-issue":
+            from control_plane import review_packet_digest as _packet_digest
+            packet = load_json(ns.json)
+            review = packet.get("review") or {}
+            client = load_broker_client()
+            if client is None:
+                raise ValueError("no broker socket — review vouchers need a running broker "
+                                 "(`researchctl broker serve`); without one, review packets merge "
+                                 "on declared identities (local mode)")
+            response = client.call(
+                "review.issue", timeout=5, workspace=str(Path(ns.root).resolve()),
+                cycle_id=str(packet.get("cycle_id") or ""),
+                hypothesis_id=str(ns.hypothesis_id or ""),
+                axis=str(review.get("axis", "")).lower(),
+                reviewer=str(review.get("reviewer", "")).strip(),
+                run_id=str(review.get("run_id", "")).strip(),
+                packet_sha256=_packet_digest(packet), ttl_seconds=ns.ttl)
+            if not response.get("ok"):
+                raise ValueError(f"the broker refused the review voucher: {response.get('error')}")
+            packet["review"] = {**review, "attestation": response["voucher"]}
+            Path(ns.json).write_text(json.dumps(packet, ensure_ascii=False, indent=2) + "\n")
+            out = {"voucher": response["voucher"], "packet": ns.json}
         elif ns.fn == "broker-status":
             out = broker_status(cp.root)
         elif ns.fn == "broker-serve":

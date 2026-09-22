@@ -42,7 +42,8 @@ from control_plane import (  # noqa: E402
 )
 
 VERSION = "research-os-broker/0.1"
-CAPABILITIES = ["policy.get", "policy.put", "scope.check", "status", "token.consume", "token.mint"]
+CAPABILITIES = ["policy.get", "policy.put", "review.consume", "review.issue",
+                "scope.check", "status", "token.consume", "token.mint"]
 SOCKET_NAME = "broker.sock"
 KEY_NAME = "key"
 TOKENS_NAME = "tokens.jsonl"
@@ -58,6 +59,12 @@ BUDGET_KEYS = ("max_actions_per_cycle", "max_actions_per_engagement")
 # The fields covered by the token signature, in signing order. Mint and consume MUST
 # agree byte-for-byte, so both derive the signed payload from this one tuple.
 _SIGNED_FIELDS = ("workspace", "action_id", "nonce", "digest", "tool_family", "expires_at")
+# The fields covered by a review voucher signature, in signing order. Issue and
+# consume MUST agree byte-for-byte. `cycle_id` rides along with `hypothesis_id`
+# because reviews gate cycles: the voucher binds the hypothesis under review, the
+# cycle it belongs to, the axis, the declared reviewer/run and the exact packet.
+_VOUCHER_SIGNED_FIELDS = ("workspace", "cycle_id", "hypothesis_id", "axis", "reviewer",
+                          "run_id", "packet_sha256", "nonce", "expires_at")
 _ASSET_REFUSED = re.compile(r"[\s\"'\\#\x00-\x1f\x7f]")
 
 
@@ -68,7 +75,8 @@ class Refused(Exception):
 # Ops that change broker state (policy file, token ledger). handle() journals an
 # INTENT record for these before running them; read-only ops (hello, status,
 # policy.get, scope.check) only get the outcome line.
-STATE_CHANGING_OPS = frozenset({"policy.put", "token.mint", "token.consume"})
+STATE_CHANGING_OPS = frozenset({"policy.put", "token.mint", "token.consume",
+                                 "review.issue", "review.consume"})
 
 
 # A scope revision binds one broker policy to one local SCOPE_CHANGED event:
@@ -488,6 +496,89 @@ class Broker:
         return {"ok": True, "action_id": record.get("action_id"),
                 "preflight": record.get("preflight")}, f"action={record.get('action_id')}"
 
+    def op_review_issue(self, req: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        """Mint a single-use review voucher binding reviewer + run to one packet.
+
+        The voucher is HMAC-signed over the workspace, cycle, hypothesis, axis,
+        declared reviewer/run identity and the packet digest, so a voucher cannot
+        move across axes, hypotheses, packets or workspaces. The reviewing run
+        embeds it as `review.attestation`; `merge_worker` consumes it exactly once.
+        """
+        workspace = self._workspace(req)
+        cycle_id = str(req.get("cycle_id") or "").strip()
+        hypothesis_id = str(req.get("hypothesis_id") or "").strip()
+        axis = str(req.get("axis") or "").strip().lower()
+        reviewer = str(req.get("reviewer") or "").strip()
+        run_id = str(req.get("run_id") or "").strip()
+        packet_sha256 = str(req.get("packet_sha256") or "").strip().lower()
+        if not cycle_id:
+            raise Refused("review.issue requires cycle_id")
+        if not hypothesis_id:
+            raise Refused("review.issue requires hypothesis_id")
+        if axis not in {"objective", "method"}:
+            raise Refused("review.issue requires axis objective|method")
+        if not reviewer or not run_id:
+            raise Refused("review.issue requires reviewer and run_id")
+        if not re.fullmatch(r"[0-9a-f]{64}", packet_sha256):
+            raise Refused("review.issue requires packet_sha256 (64 hex chars)")
+        ttl = req.get("ttl_seconds", DEFAULT_TTL_SECONDS)
+        if isinstance(ttl, bool) or not isinstance(ttl, int) or not MIN_TTL_SECONDS <= ttl <= MAX_TTL_SECONDS:
+            raise Refused(
+                f"review.issue ttl_seconds must be an integer in {MIN_TTL_SECONDS}-{MAX_TTL_SECONDS} "
+                f"(got {ttl!r}) — the broker does not clamp a voucher lifetime")
+        with self._lock:
+            nonce = secrets.token_hex(16)
+            voucher = {
+                "workspace": workspace, "cycle_id": cycle_id, "hypothesis_id": hypothesis_id,
+                "axis": axis, "reviewer": reviewer, "run_id": run_id,
+                "packet_sha256": packet_sha256, "nonce": nonce,
+                "expires_at": _expiry_iso(ttl),
+            }
+            voucher["sig"] = self._sign({key: voucher[key] for key in _VOUCHER_SIGNED_FIELDS})
+            self._append_jsonl(self.tokens_file, {
+                "kind": "review-issue", **voucher, "issued_at": _now_iso()})
+        return {"ok": True, "voucher": voucher}, (
+            f"cycle={cycle_id} hypothesis={hypothesis_id} axis={axis} ttl={ttl}")
+
+    def op_review_consume(self, req: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        """Consume one review voucher: signature, expiry, workspace and single-use."""
+        workspace = self._workspace(req)
+        voucher = req.get("voucher")
+        if not isinstance(voucher, dict):
+            raise Refused("review.consume requires a voucher object")
+        nonce = str(voucher.get("nonce") or "")
+        sig = str(voucher.get("sig") or "")
+        if not nonce or not sig:
+            raise Refused("review.consume requires voucher.nonce and voucher.sig")
+        with self._lock:
+            record = next((rec for rec in self._records("review-issue")
+                           if rec.get("nonce") == nonce), None)
+            if record is None:
+                raise Refused(f"unknown voucher nonce {nonce[:12]}… — no review voucher was issued for it")
+            if record.get("workspace") != workspace:
+                raise Refused(
+                    f"voucher {nonce[:12]}… was issued for a different workspace ({record.get('workspace')})")
+            expected = self._sign({key: record.get(key) for key in _VOUCHER_SIGNED_FIELDS})
+            if not hmac.compare_digest(expected, sig):
+                raise Refused(
+                    "voucher signature does not verify — the voucher was not issued by this broker or was tampered with")
+            presented = {key: voucher.get(key) for key in _VOUCHER_SIGNED_FIELDS if key != "sig"}
+            issued = {key: record.get(key) for key in _VOUCHER_SIGNED_FIELDS if key != "sig"}
+            if presented != issued:
+                raise Refused("voucher fields do not match the issued voucher — rebound or edited vouchers are refused")
+            if str(record.get("expires_at") or "") <= _now_iso():
+                raise Refused(f"voucher expired at {record.get('expires_at')} — issue a fresh voucher")
+            if any(rec.get("nonce") == nonce for rec in self._records("review-consume")):
+                raise Refused("voucher already consumed — review vouchers are single-use")
+            self._append_jsonl(self.tokens_file, {
+                "kind": "review-consume", "nonce": nonce, "workspace": workspace,
+                "cycle": record.get("cycle_id"), "hypothesis": record.get("hypothesis_id"),
+                "axis": record.get("axis"), "consumed_at": _now_iso()})
+        bound = {key: record[key] for key in
+                 ("cycle_id", "hypothesis_id", "axis", "reviewer", "run_id", "packet_sha256", "nonce")}
+        return {"ok": True, **bound}, (
+            f"cycle={record.get('cycle_id')} hypothesis={record.get('hypothesis_id')} axis={record.get('axis')}")
+
     _OPS = {
         "hello": op_hello,
         "status": op_status,
@@ -496,6 +587,8 @@ class Broker:
         "scope.check": op_scope_check,
         "token.mint": op_token_mint,
         "token.consume": op_token_consume,
+        "review.issue": op_review_issue,
+        "review.consume": op_review_consume,
     }
 
     # ---------- frames + connection ----------

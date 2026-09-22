@@ -229,7 +229,7 @@ hello = call("hello")
 check("hello reports the version", hello["ok"] is True and hello["version"].startswith("research-os-broker/"))
 check("hello advertises the capability set",
       set(hello["capabilities"]) == {"policy.get", "policy.put", "scope.check", "token.mint",
-                                     "token.consume", "status"})
+                                     "token.consume", "status", "review.issue", "review.consume"})
 
 ws = str(tmpdir("ro-broker-ws-policy-").resolve())
 st = call("status", workspace=ws)
@@ -1108,5 +1108,126 @@ synced = call("policy.get", workspace=str(sync_root.resolve()))
 check("the resynced broker policy matches the committed binding",
       synced["ok"] is True and sorted(synced["policy"]["assets"]) == ["example.test", "other.example"])
 stop_broker(sync_proc)
+# v8.2 W1: broker-attested review vouchers — issue/consume single-use ledger,
+# signature binding, and the merge_worker gate (broker mode requires attestation).
+_w1_home = tmpdir("ro-broker-voucher-")
+set_home(_w1_home)
+_w1_proc = spawn_broker(_w1_home)
+from control_plane import review_packet_digest as _w1_digest
+
+def _w1_review_root() -> tuple:
+    r, c = fixture_root()
+    quote = "bounded impact reproduced under the recorded control"
+    (r / "proof.txt").write_text(f"probe observation: {quote}\n")
+    e = c.register_evidence("proof.txt", kind="raw", source="researcher-owned",
+                            cycle_id="C-0001")["payload"]["id"]
+    d = r / "04_cycles" / "C-0001"
+    (d / "results.md").write_text(
+        "# Cycle Results\n\n## Disposition\nVERIFIED\n\n## Instrument validation\n"
+        "Control fires; negative control clean.\n\n## Interpretation\nBounded impact "
+        "reproduced twice.\n\n## Evidence references\n" + e + "\n")
+    c.update_cycle("C-0001", {"result_summary": "bounded impact reproduced"})
+    c.transition_cycle("C-0001", "RESULT_READY", reason="result", evidence_refs=[e])
+    return r, c, e, quote
+
+
+def _w1_packet(e: str, quote: str, axis: str, reviewer: str, run: str) -> dict:
+    return {"cycle_id": "C-0001", "evidence_refs": [e], "next_step": f"{axis} review",
+            "review": {"axis": axis, "verdict": "pass", "reviewer": reviewer, "run_id": run,
+                       "evidence_quotes": [{"evidence_ref": e, "quote": quote}]}}
+
+
+_vr, _vc, _ve, _vq = _w1_review_root()
+_ws = broker_client.workspace_key(_vr)
+_p0 = _w1_packet(_ve, _vq, "objective", "rev-a", "run-1")
+issued = call("review.issue", workspace=str(_vr), cycle_id="C-0001", hypothesis_id="H-0001",
+              axis="objective", reviewer="rev-a", run_id="run-1",
+              packet_sha256=_w1_digest(_p0))
+check("v8.2 W1: broker issues a signed review voucher",
+      issued.get("ok") is True and len(issued["voucher"].get("nonce", "")) == 32
+      and len(issued["voucher"].get("sig", "")) == 64)
+_voucher = issued["voucher"]
+consumed = call("review.consume", workspace=str(_vr), voucher=_voucher)
+check("v8.2 W1: broker consumes a fresh voucher",
+      consumed.get("ok") is True and consumed.get("axis") == "objective")
+replay = call("review.consume", workspace=str(_vr), voucher=_voucher)
+check("v8.2 W1: voucher replay is refused",
+      replay.get("ok") is False and "single-use" in str(replay.get("error")))
+forged = call("review.consume", workspace=str(_vr),
+              voucher={**_voucher, "sig": "0" * 64})
+check("v8.2 W1: forged voucher signature is refused",
+      forged.get("ok") is False and "signature" in str(forged.get("error")))
+rebound = call("review.consume", workspace=str(_vr),
+               voucher={**_voucher, "axis": "method"})
+check("v8.2 W1: rebound voucher fields are refused",
+      rebound.get("ok") is False and "match" in str(rebound.get("error")))
+short = call("review.issue", workspace=str(_vr), cycle_id="C-0001", hypothesis_id="H-0001",
+             axis="objective", reviewer="rev-a", run_id="run-1",
+             packet_sha256=_w1_digest(_p0), ttl_seconds=1)
+check("v8.2 W1: short-lived voucher issues", short.get("ok") is True)
+import time as _w1_time
+_w1_time.sleep(1.2)
+expired = call("review.consume", workspace=str(_vr), voucher=short["voucher"])
+check("v8.2 W1: expired voucher is refused",
+      expired.get("ok") is False and "expired" in str(expired.get("error")))
+
+# Merge gate in broker mode: attestation required, single-use, bound.
+_vr2, _vc2, _ve2, _vq2 = _w1_review_root()
+try:
+    _vc2.merge_worker(_w1_packet(_ve2, _vq2, "objective", "rev-a", "run-1"))
+    check("v8.2 W1: broker mode refuses review packets without a voucher", False)
+except ValueError as exc:
+    check("v8.2 W1: broker mode refuses review packets without a voucher",
+          "attestation" in str(exc))
+
+
+def _w1_issue(root: Path, pkt: dict, hyp: str) -> dict:
+    resp = call("review.issue", workspace=str(root), cycle_id="C-0001", hypothesis_id=hyp,
+                axis=pkt["review"]["axis"], reviewer=pkt["review"]["reviewer"],
+                run_id=pkt["review"]["run_id"], packet_sha256=_w1_digest(pkt))
+    assert resp.get("ok"), resp
+    pkt["review"]["attestation"] = resp["voucher"]
+    return pkt
+
+
+_pa = _w1_issue(_vr2, _w1_packet(_ve2, _vq2, "objective", "rev-a", "run-1"), "H-0001")
+_pb = _w1_issue(_vr2, _w1_packet(_ve2, _vq2, "method", "rev-b", "run-2"), "H-0001")
+_vc2.merge_worker(_pa)
+_vc2.merge_worker(_pb)
+try:
+    _vc2.merge_worker(_pa)
+    check("v8.2 W1: a consumed voucher cannot merge a second packet", False)
+except ValueError as exc:
+    check("v8.2 W1: a consumed voucher cannot merge a second packet", "single-use" in str(exc))
+_vc2.transition_cycle("C-0001", "REVIEWED", reason="both axes attested", evidence_refs=[_ve2])
+check("v8.2 W1: REVIEWED accepts two broker-attested axes",
+      _vc2.cycle_status("C-0001") == "REVIEWED")
+
+_vr3, _vc3, _ve3, _vq3 = _w1_review_root()
+_cross = _w1_issue(_vr3, _w1_packet(_ve3, _vq3, "objective", "rev-a", "run-1"), "H-0001")
+_mis = _w1_packet(_ve3, _vq3, "method", "rev-a", "run-1")
+_mis["review"]["attestation"] = _cross["review"]["attestation"]
+try:
+    _vc3.merge_worker(_mis)
+    check("v8.2 W1: wrong-axis voucher is refused", False)
+except ValueError as exc:
+    check("v8.2 W1: wrong-axis voucher is refused", "axis" in str(exc))
+_bad = _w1_packet(_ve3, _vq3, "objective", "rev-a", "run-1")
+_bad["review"]["attestation"] = dict(_cross["review"]["attestation"], hypothesis_id="H-9999")
+try:
+    _vc3.merge_worker(_bad)
+    check("v8.2 W1: wrong-hypothesis voucher is refused", False)
+except ValueError as exc:
+    check("v8.2 W1: wrong-hypothesis voucher is refused", "hypothesis" in str(exc))
+_edit = _w1_packet(_ve3, _vq3, "objective", "rev-a", "run-1")
+_edit["review"]["attestation"] = _cross["review"]["attestation"]
+_edit["next_step"] = "edited after the voucher was issued"
+try:
+    _vc3.merge_worker(_edit)
+    check("v8.2 W1: packet edited after issue is refused", False)
+except ValueError as exc:
+    check("v8.2 W1: packet edited after issue is refused", "digest" in str(exc))
+stop_broker(_w1_proc)
 set_home(HOME)
+
 print(f"\n{len(passed)} checks passed")
