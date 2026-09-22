@@ -27,7 +27,7 @@
  *       workspace. Target traffic goes through `research_os_request`; research material
  *       goes through the web tools; localhost/lab traffic is never blocked. Egress
  *       gating is INTERCEPTED (advisory), not a boundary: commands that do not name a
- *       NET_CMD binary — python/node/php/git/npm and bash-invoked CLIs — bypass it. A
+ *       NET_COMMANDS binary — python/node/php/git/npm and bash-invoked CLIs — bypass it. A
  *       web-fetch target gate covers fetch-shaped tools (scrape/crawl/map/parse/
  *       extract/read/fetch/browser/navigate/automation/computer): retrieving an in-scope
  *       asset host through one of them is denied (preflight + executor instead),
@@ -108,6 +108,7 @@ const BOOTSTRAP_CONDITIONAL = /^00_control\/(engagement|identity-binding)\.yaml$
 const PROTECTED_PATTERNS = [
   /^11_runtime\/(events\.jsonl|run-status\.yaml|active-cycle\.yaml|evidence-index\.jsonl|current-context\.md|last-result\.md|action-tokens\.jsonl)$/,
   /^11_runtime\/\.scope-sync-dirty$/,
+  /^11_runtime\/\.token-claims\//,
   /^11_runtime\/human-gates\/[^/]+\.yaml$/,
   /^11_runtime\/evidence-store\//,
   /^04_cycles\/[^/]+\/plan\.yaml$/,
@@ -129,7 +130,7 @@ const PROTECTED_MARKERS = [
   'freshness.yaml', 'evidence-store', 'engagement.yaml', 'identity-binding.yaml',
   'technique-discoveries.md', '04_cycles', '03_hypotheses',
   'knowledge-usage.yaml', 'knowledge-proposals.yaml', 'knowledge-proposals/',
-  'os_version', 'scope-sync-dirty',
+  'os_version', 'scope-sync-dirty', 'token-claims',
 ]
 
 // Static protected files and directories the control plane owns. A destructive target
@@ -137,7 +138,7 @@ const PROTECTED_MARKERS = [
 // control-plane-owned material just as surely as writing one protected file.
 const PROTECTED_TARGETS = [
   '11_runtime/events.jsonl', '11_runtime/run-status.yaml', '11_runtime/active-cycle.yaml',  '11_runtime/evidence-index.jsonl', '11_runtime/current-context.md', '11_runtime/last-result.md',
-  '11_runtime/action-tokens.jsonl', '11_runtime/.scope-sync-dirty', '11_runtime/human-gates', '11_runtime/evidence-store',
+  '11_runtime/action-tokens.jsonl', '11_runtime/.scope-sync-dirty', '11_runtime/.token-claims', '11_runtime/human-gates', '11_runtime/evidence-store',
   '04_cycles', '03_hypotheses/active', '03_hypotheses/archive',
   '06_audits/closure-readiness.yaml', '10_learning/technique-discoveries.md',
   '10_learning/freshness.yaml', '10_learning/knowledge-usage.yaml',
@@ -150,17 +151,62 @@ const PROTECTED_TARGETS = [
 // package installs and git operations are provisioning, not target access.
 const NET_COMMANDS = new Set(['curl', 'wget', 'http', 'httpie', 'nc', 'ncat', 'nmap',
   'socat', 'dig', 'nslookup', 'host', 'ssh', 'scp'])
+/** Wrapper prefixes whose own flags/values precede the real command word. */
+const NET_WRAPPERS = new Set(['env', 'sudo', 'nohup', 'time', 'nice', 'timeout', 'stdbuf', 'xargs'])
+/** Index of the command word after skipping wrapper prefixes (with their flags). */
+function netCommandIndex(words) {
+  let i = 0
+  while (i < words.length) {
+    const w = stripQuotes(words[i])
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) { i++; continue }
+    const base = w.toLowerCase().split(/[/\\]/).pop()
+    if (!NET_WRAPPERS.has(base)) break
+    i++
+    const takeValue = (flags) => {
+      while (i < words.length) {
+        const raw = words[i]
+        const ww = stripQuotes(raw)
+        if (ww === '--') { i++; break }
+        if (!(ww.startsWith('-') && ww.length > 1 && ww !== '-')) break
+        if (!ww.includes('=') && flags.test(ww)) { i++; if (i < words.length) i++; continue }
+        if (!ww.includes('=') && /^-(I|n|P|s|d|a|E)/.test(ww) && ww.length > 2) { i++; continue }
+        i++
+      }
+    }
+    if (base === 'env') {
+      while (i < words.length) {
+        const ww = stripQuotes(words[i])
+        if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(ww)) { i++; continue }
+        if (ww.startsWith('-') && ww.length > 1 && ww !== '-') {
+          if (!ww.includes('=') && /^(-u|--user|--unset|--chdir)$/.test(ww)) { i++; if (i < words.length) i++ }
+          else i++
+          continue
+        }
+        break
+      }
+    } else if (base === 'sudo') takeValue(/^(-u|-g|-h|-p|-C|-D|--user|--group|--host|--prompt|--chdir)$/)
+    else if (base === 'timeout') {
+      takeValue(/^(-s|-k|--signal|--kill-after)$/)
+      if (i < words.length && /^[\d.]+[smhd]?$/.test(stripQuotes(words[i]))) i++
+    } else if (base === 'nice') takeValue(/^(-n|--adjustment)$/)
+    else if (base === 'stdbuf') takeValue(/^(-i|-o|-e|--input|--output|--error)$/)
+    else if (base === 'xargs') takeValue(/^(-I|-n|-P|-s|-d|-a|-E|--replace|--max-args|--max-procs|--max-chars|--delimiter|--arg-file|--eof)$/)
+    else takeValue(/^(--format|--output|-f|-o)$/)
+  }
+  return i
+}
 /** True when any command segment starts a network binary: quotes stripped, basename
- *  after the last `/` (so `'curl'` and `/usr/bin/curl` both count), `env`/`sudo`
- *  and `VAR=x` prefixes skipped, `openssl` only with `s_client`. */
+ *  after the last `/` (so `'curl'` and `/usr/bin/curl` both count), wrapper prefixes
+ *  (`env`, `sudo`, `nohup`, `time`, `nice`, `timeout`, `stdbuf`, `xargs` with their
+ *  own flags) and `VAR=x` prefixes skipped, `openssl` only with `s_client`. */
 function hasNetCommand(cmd) {
   const segments = String(cmd).replace(/["']/g, '').split(/&&|\|\||[;|&()\n]/)
   for (const seg of segments) {
     const words = seg.trim().split(/\s+/).filter(Boolean)
-    while (words.length > 1 && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0])
-      || words[0].toLowerCase() === 'env' || words[0].toLowerCase() === 'sudo')) words.shift()
     if (words.length === 0) continue
-    const base = words[0].toLowerCase().split(/[/\\]/).pop()
+    const idx = netCommandIndex(words)
+    if (idx >= words.length) continue
+    const base = stripQuotes(words[idx]).toLowerCase().split(/[/\\]/).pop()
     if (NET_COMMANDS.has(base)) return true
     if (base === 'openssl' && /\bs_client\b/.test(seg)) return true
   }
@@ -189,6 +235,49 @@ function urlLoopbackExempt(url) {
     return false
   }
   return isLoopbackHostname(name)
+}
+/** Flags whose values are not destinations (headers, data, method, credentials,
+ *  output files): skipped when deriving schemeless targets. `--url` is NOT here —
+ *  its value IS a destination. */
+const EGRESS_VALUE_FLAGS = /^(-H|--header|-d|--data|--data-raw|--data-ascii|--data-binary|--data-urlencode|--request|-X|-u|--user|-o|--output|-e|--referer|--user-agent|-A|-p|--port|--proxy|-x|--resolve|--connect-to)$/
+/** Bare non-flag arguments of net-command segments as schemeless host parts
+ *  (cut at the first `/`, `?` or `#`; URL tokens, pure ports and flag values
+ *  excluded). Empty when the command names no bare destination. */
+function schemelessTargets(cmd) {
+  const out = []
+  for (const seg of splitSegments(String(cmd))) {
+    const words = shellWords(seg.trim())
+    if (words.length === 0) continue
+    const idx = netCommandIndex(words)
+    if (idx >= words.length) continue
+    const base = stripQuotes(words[idx]).toLowerCase().split(/[/\\]/).pop()
+    if (!NET_COMMANDS.has(base) && !(base === 'openssl' && /\bs_client\b/.test(seg))) continue
+    let j = idx + 1
+    while (j < words.length) {
+      const w = stripQuotes(words[j])
+      if (w === '--') { j++; continue }
+      if (w.startsWith('-') && w.length > 1 && w !== '-') {
+        if (!w.includes('=') && EGRESS_VALUE_FLAGS.test(w)) { j++; if (j < words.length) j++; continue }
+        j++
+        continue
+      }
+      if (w.includes('://')) { j++; continue }
+      if (/^\d+$/.test(w)) { j++; continue }
+      let hostpart = w
+      if (hostpart.startsWith('//')) hostpart = hostpart.slice(2)
+      hostpart = hostpart.split('/')[0].split('?')[0].split('#')[0].trim()
+      if (hostpart) out.push(hostpart)
+      j++
+    }
+  }
+  return out
+}
+/** True when every bare destination is an exact loopback host (at least one).
+ *  Unparseable hosts fail closed (not exempt). */
+function schemelessLoopbackExempt(cmd) {
+  const targets = schemelessTargets(cmd)
+  if (targets.length === 0) return false
+  return targets.every((h) => urlLoopbackExempt('http://' + h + '/'))
 }
 const LOCAL_HOST = /(^|[\s/@:.])(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0|::1|\.local|\.internal)([\s/:'"]|$)/i
 const WRITE_TOKEN = /(>>?|\btee\b|sed\s+-i|\btruncate\b|\bcp\b|\bmv\b|\bdd\b|\binstall\b|python3?\s+-\s*<<|cat\s*<<)/
@@ -391,25 +480,47 @@ function fsWriteReason(exec) {
   }
 }
 
-/** Strip one layer of surrounding single/double quotes from an extracted target. */
+/** Strip ALL quote characters from an extracted target (shell quote-concatenation:
+ *  `11_runtime/"events.jsonl"`, `"11_runtime"/events.jsonl` and
+ *  `11_runtim"e"/events.jsonl` all open the protected file). */
 function stripQuotes(token) {
-  const t = String(token)
-  if (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))) {
-    return t.slice(1, -1)
-  }
-  return t
+  return String(token).replace(/["']/g, '')
 }
 
-/** Expand one `{a,b,...}` group (recursively, for multiple groups). A group without
- *  a comma is not an expansion (`{a}` stays literal, like bash). */
-function braceExpand(token) {
-  const open = token.indexOf('{')
-  if (open < 0) return [token]
-  const close = token.indexOf('}', open)
-  if (close < 0) return [token]
-  const inner = token.slice(open + 1, close)
-  if (!inner.includes(',')) return [token]
-  return inner.split(',').flatMap((part) => braceExpand(token.slice(0, open) + part + token.slice(close + 1)))
+/** Expand `{a,b,...}` groups recursively with nesting (bash semantics). A group
+ *  without a top-level comma is not an expansion (`{a}` stays literal). Depth is
+ *  tracked (cap 10); an unbalanced brace fails closed to the static prefix before
+ *  the `{`, which the target judges as a directory-level hit when it can reach
+ *  protected material. */
+function braceExpand(token, depth = 0) {
+  const s = String(token)
+  const open = s.indexOf('{')
+  if (open < 0) return [s]
+  if (depth > 10) return [s.slice(0, open)]
+  let level = 0
+  let close = -1
+  for (let i = open; i < s.length; i++) {
+    if (s[i] === '{') level++
+    else if (s[i] === '}') {
+      level--
+      if (level === 0) { close = i; break }
+    }
+  }
+  if (close < 0) return [s.slice(0, open)]
+  const inner = s.slice(open + 1, close)
+  const parts = []
+  let cur = ''
+  let nest = 0
+  for (let i = 0; i < inner.length; i++) {
+    const c = inner[i]
+    if (c === '{') nest++
+    else if (c === '}') nest--
+    if (c === ',' && nest === 0) { parts.push(cur); cur = '' }
+    else cur += c
+  }
+  parts.push(cur)
+  if (parts.length < 2) return [s]
+  return parts.flatMap((part) => braceExpand(s.slice(0, open) + part + s.slice(close + 1), depth + 1))
 }
 
 /** Translate a shell glob to a RegExp over one path level (`*` never crosses `/`). */
@@ -510,7 +621,7 @@ function targetReason(root, bases, token) {
  *  removed body text for the conditional body sweep. A body line is inert text
  *  unless it lands in the workspace (a redirect target resolving inside the root)
  *  or feeds an interpreter's stdin — otherwise scanning it is a false positive
- *  (a `/`-sweep hit, or a NET_CMD/brower-launch match on documentation text).
+ *  (a `/`-sweep hit, or a NET_COMMANDS/brower-launch match on documentation text).
  *  `<<<` herestrings never start a body; `<<-` allows tab-indented closers;
  *  multiple heredocs queue in order; an unterminated heredoc swallows the rest
  *  (shell semantics). A `<<` inside a quoted span is literal text, not an operator,
@@ -671,28 +782,75 @@ function interpPayloadReason(exec) {
     for (const seg of splitSegments(cmd)) {
       const words = shellWords(seg.trim())
       if (words.length === 0) continue
-      let head = words[0].toLowerCase().split(/[/\\]/).pop()
-      if (head === 'env' || head === 'sudo') {
-        words.shift()
-        if (words.length === 0) continue
-        head = words[0].toLowerCase().split(/[/\\]/).pop()
+      const baseOf = (w) => stripQuotes(w).toLowerCase().split(/[/\\]/).pop()
+      const heads = new Set([0])
+      const skipFlags = (from, valueFlags) => {
+        let k = from
+        while (k < words.length) {
+          const ww = stripQuotes(words[k])
+          if (ww === '--') { k++; break }
+          if (!(ww.startsWith('-') && ww.length > 1 && ww !== '-')) break
+          if (!ww.includes('=') && valueFlags.test(ww)) { k++; if (k < words.length) k++; continue }
+          if (!ww.includes('=') && /^-(I|n|P|s|d|a|E)/.test(ww) && ww.length > 2) { k++; continue }
+          k++
+        }
+        return k
       }
-      if (!INLINE_INTERP.has(head)) continue
-      let payload = null
-      let script = null
-      for (let i = 1; i < words.length; i++) {
-        const w = stripQuotes(words[i])
-        if ((w === '-c' || w === '-e') && i + 1 < words.length) { payload = stripQuotes(words[i + 1]); break }
-        if (w === '-c' || w === '-e') { payload = ''; break }
-        if (/^-/.test(w)) continue
-        script = words[i]
-        break
+      const skipWrapperChain = () => {
+        let k = 0
+        for (;;) {
+          if (k < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(stripQuotes(words[k]))) { k++; continue }
+          if (k >= words.length) break
+          const b = baseOf(words[k])
+          if (!['env', 'sudo', 'nohup', 'nice', 'time', 'timeout', 'stdbuf', 'xargs'].includes(b)) break
+          k++
+          if (b === 'env') {
+            while (k < words.length) {
+              const ww = stripQuotes(words[k])
+              if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(ww)) { k++; continue }
+              if (ww.startsWith('-') && ww.length > 1 && ww !== '-') {
+                if (!ww.includes('=') && /^(-u|--user|--unset|--chdir)$/.test(ww)) { k++; if (k < words.length) k++ }
+                else k++
+                continue
+              }
+              break
+            }
+          } else if (b === 'sudo') k = skipFlags(k, /^(-u|-g|-h|-p|-C|-D|--user|--group|--host|--prompt|--chdir)$/)
+          else if (b === 'timeout') {
+            k = skipFlags(k, /^(-s|-k|--signal|--kill-after)$/)
+            if (k < words.length && /^[\d.]+[smhd]?$/.test(stripQuotes(words[k]))) k++
+          } else if (b === 'nice') k = skipFlags(k, /^(-n|--adjustment)$/)
+          else if (b === 'stdbuf') k = skipFlags(k, /^(-i|-o|-e|--input|--output|--error)$/)
+          else if (b === 'xargs') k = skipFlags(k, /^(-I|-n|-P|-s|-d|-a|-E|--replace|--max-args|--max-procs|--max-chars|--delimiter|--arg-file|--eof)$/)
+          else k = skipFlags(k, /^(--format|--output|-f|-o)$/)
+        }
+        return k
       }
-      if (script !== null && payload === null && isAllowlistedTool(root, script)) continue
-      if (payload !== null && payload !== ''
-        && (mentionsProtected(payload) || PAYLOAD_PROTECTED_DIR.test(payload))) {
-        return 'research-os-enforcer: this inline-interpreter payload names control-plane state — ' +
-          'split the work or use tools/researchctl.py; direct protected writes are denied.'
+      heads.add(skipWrapperChain())
+      for (let j = 0; j < words.length; j++) {
+        const b = baseOf(words[j])
+        if (b === '-exec' || b === '-execdir') { if (j + 1 < words.length) heads.add(j + 1) }
+        if (b === 'xargs') heads.add(skipFlags(j + 1, /^(-I|-n|-P|-s|-d|-a|-E|--replace|--max-args|--max-procs|--max-chars|--delimiter|--arg-file|--eof)$/))
+      }
+      for (const h of heads) {
+        if (h >= words.length) continue
+        if (!INLINE_INTERP.has(baseOf(words[h]))) continue
+        let payload = null
+        let script = null
+        for (let i = h + 1; i < words.length; i++) {
+          const w = stripQuotes(words[i])
+          if ((w === '-c' || w === '-e') && i + 1 < words.length) { payload = stripQuotes(words[i + 1]); break }
+          if (w === '-c' || w === '-e') { payload = ''; break }
+          if (/^-/.test(w)) continue
+          script = words[i]
+          break
+        }
+        if (script !== null && payload === null && isAllowlistedTool(root, script)) continue
+        if (payload !== null && payload !== ''
+          && (mentionsProtected(payload) || PAYLOAD_PROTECTED_DIR.test(payload))) {
+          return 'research-os-enforcer: this inline-interpreter payload names control-plane state — ' +
+            'split the work or use tools/researchctl.py; direct protected writes are denied.'
+        }
       }
     }
     return undefined
@@ -795,9 +953,13 @@ function liveGateReason(exec) {
     const urls = cmd.match(/https?:\/\/[^\s'"]+/g) || []
     if (urls.length > 0) {
       // Every URL's parsed HOSTNAME must be loopback: a `/localhost` path or a
-      // `user@localhost@evil` userinfo never exempts.
-      if (urls.every(urlLoopbackExempt)) return undefined
-    } else if (LOCAL_HOST.test(cmd)) return undefined
+      // `user@localhost@evil` userinfo never exempts. Bare destinations are
+      // judged too: a loopback URL plus a raw-egress host is still raw egress.
+      if (urls.every(urlLoopbackExempt)) {
+        const bare = schemelessTargets(cmd)
+        if (bare.length === 0 || bare.every((h) => urlLoopbackExempt('http://' + h + '/'))) return undefined
+      }
+    } else if (schemelessLoopbackExempt(cmd)) return undefined
     const st = osStatus(root)
     if (!st || st.engagement === 'BOOTSTRAP') {
       return 'research-os-enforcer: this Research OS workspace has no active engagement — no live target traffic before the engagement is configured and a cycle is RUNNING. Bootstrap first (START.md), advance a cycle through tools/researchctl.py, then use the research_os_request tool for target traffic. Localhost/lab traffic is never blocked.'
@@ -836,6 +998,58 @@ function browserAppLaunch(cmd) {
   }
   return false
 }
+/** Bare (schemeless) destinations of user-facing browser launches: family-binary
+ *  args and `open -a <browser app>` args after the app, excluding flags, flag
+ *  values and URL tokens (URLs are judged separately). Quote-aware so
+ *  `open -a "Google Chrome"` leaves no destination. Empty when the launch names
+ *  no destination (`chromium --no-sandbox`, `open -a "Google Chrome"` stay allowed). */
+function browserBareTargets(cmd) {
+  const out = []
+  for (const seg of splitSegments(String(cmd))) {
+    const words = shellWords(seg.trim())
+    if (words.length === 0) continue
+    const base0 = stripQuotes(words[0]).toLowerCase().split(/[/\\]/).pop()
+    if (BROWSER_FAMILY.test(stripQuotes(words[0]).split(/[/\\]/).pop())) {
+      let j = 1
+      while (j < words.length) {
+        const w = stripQuotes(words[j])
+        if (w === '--') { j++; continue }
+        if (w.startsWith('-') && w.length > 1 && w !== '-') {
+          if (!w.includes('=') && /^(--user-data-dir|--profile-directory|--remote-debugging-port|--remote-debugging-address|--headless)$/.test(w)) {
+            j++
+            if (j < words.length && !stripQuotes(words[j]).startsWith('-')) j++
+            continue
+          }
+          j++
+          continue
+        }
+        if (w.includes('://')) { j++; continue }
+        let hostpart = w
+        if (hostpart.startsWith('//')) hostpart = hostpart.slice(2)
+        hostpart = hostpart.split('/')[0].split('?')[0].split('#')[0].trim()
+        if (hostpart) out.push(hostpart)
+        j++
+      }
+    } else if (base0 === 'open') {
+      const lower = words.map((x) => stripQuotes(x).toLowerCase())
+      const ai = lower.indexOf('-a')
+      if (ai < 0 || ai + 1 >= words.length) continue
+      let j = ai + 2
+      while (j < words.length) {
+        const w = stripQuotes(words[j])
+        if (w === '--') { j++; continue }
+        if (w.startsWith('-') && w.length > 1 && w !== '-') { j++; continue }
+        if (w.includes('://')) { j++; continue }
+        let hostpart = w
+        if (hostpart.startsWith('//')) hostpart = hostpart.slice(2)
+        hostpart = hostpart.split('/')[0].split('?')[0].split('#')[0].trim()
+        if (hostpart) out.push(hostpart)
+        j++
+      }
+    }
+  }
+  return out
+}
 /** R6 — raw browser-automation launches are not the live path; the browser executor is.
  *
  *  W7 additionally recognizes user-facing browser launches (family binary, `open -a`
@@ -853,8 +1067,13 @@ function browserGateReason(exec) {
       const root = findOsRoot(sessionCwd(exec))
       if (!root) return undefined
       const urls = cmd.match(/https?:\/\/[^\s'"]+/g) || []
-      if (urls.length === 0) return undefined
+      const bare = browserBareTargets(cmd)
+      if (urls.length === 0 && bare.length === 0) return undefined
       const bad = urls.find((u) => !urlLoopbackExempt(u) && scopeReasonFor(root, u) !== undefined)
+        || bare.find((d) => {
+          const cand = 'http://' + d + '/'
+          return !urlLoopbackExempt(cand) && scopeReasonFor(root, cand) !== undefined
+        })
       if (bad === undefined) return undefined
       return 'research-os-enforcer: this browser launch targets an out-of-scope destination — prepare a browser preflight (python3 tools/researchctl.py . prepare payload.json with "tool_family": "browser" and request_shape {"url": …, "principal": …}) and call the research_os_browser tool; in-scope and localhost targets stay allowed.'
     }
@@ -868,7 +1087,7 @@ function browserGateReason(exec) {
     const root = findOsRoot(sessionCwd(exec))
     if (!root) return undefined
     const urls = cmd.match(/https?:\/\/[^\s'"]+/g) || []
-    if (urls.length > 0 && urls.every((u) => LOCAL_HOST.test(u))) return undefined
+    if (urls.length > 0 && urls.every(urlLoopbackExempt)) return undefined
     return 'research-os-enforcer: browser automation drives target traffic — a raw launch is not the live path. Prepare a browser preflight (python3 tools/researchctl.py . prepare payload.json with "tool_family": "browser" and request_shape {"url": …, "principal": …}) and call the research_os_browser tool; it runs the canonical runner tools/bua/run.mjs with the engagement scope guard. Localhost/lab browser work stays allowed — name the local URL explicitly.'
   } catch (e) {
     log('guard-browser-error ' + e)
@@ -1020,9 +1239,12 @@ function normalizeHost(host) {
 function assetHosts(assets) {
   const hosts = []
   for (const asset of assets) {
-    let value = String(asset).trim()
-    if (value.includes('://')) value = value.slice(value.indexOf('://') + 3)
-    const host = normalizeHost(value.split('/')[0].split('?')[0].split('#')[0].trim())
+    const raw = String(asset)
+    const isUrl = raw.includes('://')
+    let value = raw.trim()
+    if (isUrl) value = value.slice(value.indexOf('://') + 3)
+    const authority = value.split('/')[0].split('?')[0].split('#')[0]
+    const host = normalizeHost(isUrl ? authority : authority.trim())
     if (host) hosts.push(host)
   }
   return hosts
@@ -1345,8 +1567,11 @@ function claimToken(root, token) {
     const fd = openSync(path, 'wx')
     try { closeSync(fd) } catch {}
     return { ok: true, path }
-  } catch {
-    return { ok: false, error: 'the preflight token is already claimed by a concurrent dispatch — preflight tokens are single-use' }
+  } catch (e) {
+    if (e && e.code === 'EEXIST') {
+      return { ok: false, error: 'the preflight token is already claimed by a concurrent dispatch — preflight tokens are single-use' }
+    }
+    return { ok: false, error: 'the preflight token claim could not be written (' + (e && e.code ? e.code : String(e && e.message ? e.message : e)) + ') — refusing the request (failing closed)' }
   }
 }
 
@@ -1374,12 +1599,14 @@ const BROKER_MAX_LINE = 1024 * 1024
  *  silent local fallback. */
 function brokerPath() {
   if (process.env.RESEARCH_OS_BROKER_SOCKET) {
-    return existsSync(process.env.RESEARCH_OS_BROKER_SOCKET)
-      ? process.env.RESEARCH_OS_BROKER_SOCKET
-      : undefined
+    let sock = process.env.RESEARCH_OS_BROKER_SOCKET
+    if (sock === '~') sock = homedir()
+    else if (sock.startsWith('~/')) sock = join(homedir(), sock.slice(2))
+    return existsSync(sock) ? sock : undefined
   }
   let home = process.env.RESEARCH_OS_BROKER_HOME
-  if (home && home.startsWith('~/')) home = join(homedir(), home.slice(2))
+  if (home === '~') home = homedir()
+  else if (home && home.startsWith('~/')) home = join(homedir(), home.slice(2))
   const candidate = home ? join(home, 'broker.sock') : join(homedir(), ...BROKER_SOCKET_REL)
   return existsSync(candidate) ? candidate : undefined
 }
@@ -1881,7 +2108,7 @@ async function runControlledBrowser({ root, args }) {
   const dirtyDenied = scopeSyncDirtyReason(root)
   if (dirtyDenied) {
     log('DENY(executor) dirty browser ' + redactUrlSecrets(shape.url) + ' :: ' + dirtyDenied)
-    return { ok: false, text: `research_os_browser: ${dirtyDenied}` }
+    return { ok: false, text: dirtyDenied }
   }
   const digest = canonicalDigest(shape)
   const safeUrl = redactUrlSecrets(shape.url)
@@ -2075,5 +2302,5 @@ export { name, inject, apply }
 // Test surface (pure helpers + executor core): conformance and integration suites.
 export { canonicalDigest, shapeFromArgs, browserShapeFromArgs, loadTokenStates, selectToken, runControlledRequest, runControlledBrowser, scopeReasonFor, redactSecrets, redactHeaderLine, redactUrlSecrets, redactShapeForText, mentionsProtected }
 export { brokerPath, brokerWorkspace, brokerCall, brokerConsumeToken, consumeBrokerToken, brokerPolicyGet, brokerScopeReason }
-export { dispatchHostReason }
+export { claimToken, dispatchHostReason }
 export { scopeSyncDirtyReason }

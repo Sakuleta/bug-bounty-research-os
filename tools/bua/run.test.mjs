@@ -296,7 +296,7 @@ check('a failing scope check closes the websocket (fail closed) and records the 
 
 // ---- service workers are blocked in the controlled context -----------------------
 // The init script (installed before the first navigation) rejects new registrations
-// and unregisters lingering ones; a worker that appears anyway fails the run.
+// and unregisters lingering ones; a worker that appears anyway is recorded as a scope violation, capture skipped, never silent.
 const swScript = serviceWorkerInitScript()
 check('the service-worker block rejects registrations loudly',
   swScript.includes('serviceWorker.register') && swScript.includes('Promise.reject')
@@ -307,7 +307,7 @@ const swSummary = { service_worker_violations: 0, scope_violation: false }
 const swLogs = []
 const swHandler = makeServiceWorkerHandler(swSummary, (line) => swLogs.push(line))
 await swHandler({})
-check('a service worker that appears anyway records a violation and fails the run',
+check('a service worker that appears anyway records a scope violation, capture skipped, never silent',
   swSummary.service_worker_violations === 1 && swSummary.scope_violation === true
   && swLogs.length === 1)
 await swHandler({})
@@ -329,7 +329,7 @@ const obsSummary = { blocked_requests: [], blocked_count: 0, scope_violation: fa
 const obsLogs = []
 const obsOut = await observeWorkerWebSocket(obsSummary, obsCache,
   'ws://evil.example/socket?token=OBSSCRET', (line) => obsLogs.push(line))
-check('an out-of-scope worker socket the route layer missed is recorded and fails the run',
+check('an out-of-scope worker socket the route layer missed is recorded as a scope violation, capture skipped, never silent',
   obsOut.flagged === true && obsSummary.blocked_count === 1
   && obsSummary.scope_violation === true && obsLogs.length === 1
   && obsSummary.blocked_requests[0].url_masked === 'ws://evil.example/socket?token=[REDACTED]'

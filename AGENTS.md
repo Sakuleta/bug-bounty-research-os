@@ -196,9 +196,9 @@ that is not a verified `in_scope: true` is aborted (`blockedbyclient`) or the
 socket closed, and recorded (`blocked_requests`, cap 50, masked;
 `blocked_count`). Route coverage is page-realm only: service workers are blocked
 outright (registration rejected before the first navigation; a worker that appears
-anyway fails the run), and dedicated-worker sockets are observed over CDP
+anyway is recorded as a scope violation, capture skipped, never silent), and dedicated-worker sockets are observed over CDP
 auto-attach — an out-of-scope worker socket the route layer missed is recorded
-and fails the run, never a silent `blocked_count: 0`. Redirect hops are the known limit: Playwright does not route
+as a scope violation, capture skipped, never silent. Redirect hops are the known limit: Playwright does not route
 redirects (a request and its redirects are one unit), so a followed hop reaches
 its target; the runner records every out-of-scope hop (main-frame and
 subresource, `out_of_scope_hops`, masked, with a loud run-log warning) and,

@@ -15,6 +15,7 @@ import re
 import secrets
 import shutil
 import stat
+import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -263,10 +264,15 @@ def _url_host(url: str) -> str:
 def _asset_hosts(assets: list[str]) -> list[str]:
     hosts: list[str] = []
     for asset in assets:
-        value = asset.strip()
-        if "://" in value:
+        raw = str(asset)
+        is_url = "://" in raw
+        value = raw.strip()
+        if is_url:
             value = value.split("://", 1)[1]
-        host = _authority_host(value.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0].strip())
+        authority = value.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+        # URL authorities keep whitespace so _authority_host denies (fail closed);
+        # bare hosts tolerate surrounding spaces (already stripped above).
+        host = _authority_host(authority if is_url else authority.strip())
         if host:
             hosts.append(host)
     return hosts
@@ -1910,8 +1916,8 @@ class ControlPlane:
                 _json_dump({"revision": revision, "reason": redact(reason)[:300],
                             "time": now()}),
                 encoding="utf-8")
-        except OSError:
-            pass
+        except OSError as exc:
+            print(f"control-plane: WARNING scope-sync DIRTY marker could not be written ({exc}); the broker copy is stale", file=sys.stderr)
 
     def _clear_scope_dirty(self) -> None:
         try:

@@ -22,10 +22,10 @@
  *     (`blocked_requests`, `blocked_count`), so a scoped page cannot embed traffic to
  *     an out-of-scope host. Service workers are blocked outright (registration is
  *     rejected and lingering registrations unregistered before the first navigation;
- *     a worker that appears anyway fails the run). Dedicated-worker sockets never
+ *     a worker that appears anyway is recorded as a scope violation, capture skipped, never silent). Dedicated-worker sockets never
  *     reach the route layer, so they are observed over CDP auto-attach
  *     (`Network.webSocketCreated`): an out-of-scope worker socket the route layer
- *     missed is recorded and fails the run, never a silent `blocked_count: 0`.
+ *     missed is recorded as a scope violation, capture skipped, never silent.
  *     (A playwright-core too old for `routeWebSocket` cannot enforce the ws/wss half:
  *     the run is refused instead of proceeding unchecked — upgrade to enforce.)
  *     Distinct hosts are checked at most `DISTINCT_HOST_CHECK_CAP` times per run; past
@@ -307,7 +307,7 @@ export function serviceWorkerInitScript() {
 
 /** Backstop for a service worker that appears despite the registration block (a
  *  pre-existing controller winning a race, a profile with stored workers): record a
- *  violation and fail the run — its traffic bypasses every route handler, so it must
+ *  violation, capture skipped, never silent — its traffic bypasses every route handler, so it must
  *  never pass silently. */
 export function makeServiceWorkerHandler(summary, warn = console.log) {
   return async function handleServiceWorker() {
@@ -321,7 +321,7 @@ export function makeServiceWorkerHandler(summary, warn = console.log) {
 /** Observe one worker-opened socket the route layer may never see (CDP
  *  `Network.webSocketCreated` via auto-attach): an in-scope socket is ignored; an
  *  out-of-scope socket the route layer already blocked is not counted twice; one it
- *  missed is recorded and fails the run — never a silent `blocked_count: 0`. */
+ *  missed is recorded as a scope violation, capture skipped, never silent. */
 export async function observeWorkerWebSocket(summary, cache, url, warn = console.log) {
   const decision = await decideRequest(url, cache)
   if (decision.allow) return { flagged: false }
@@ -610,7 +610,7 @@ async function main() {
   //     paused (no race: the socket cannot outrun the observer), `Network` is enabled
   //     in the worker session, and every `Network.webSocketCreated` goes through the
   //     same scope decision — an out-of-scope worker socket the route layer missed is
-  //     recorded and fails the run, never a silent `blocked_count: 0` (deduped — a
+  //     recorded as a scope violation, capture skipped, never silent (deduped — a
   //     socket the route layer blocked is never counted twice). Worker targets expose
   //     no Fetch domain, so observation + violation is the coverage here, exactly as
   //     the worker half cannot be closed through the route API. Setup failure fails

@@ -777,6 +777,30 @@ check("scope_check seam: unparseable assets fail closed",
 sc = scope_check(nogate, "https://anything.example/x")
 check("scope_check seam: explicit gate none disables the gate",
       sc["gate"] == "disabled" and sc["in_scope"] is True)
+(nogate / "00_control/engagement.yaml").write_text('scope:\n  assets:\n    - "https://example.test /x"\n')
+sc = scope_check(nogate, "https://example.test/x")
+check("scope_check seam: whitespace in a URL authority denies instead of stripping",
+      sc["in_scope"] is False)
+check("asset_hosts drops a whitespace URL authority (fail closed)",
+      asset_hosts(["https://example.test /x"]) == [])
+check("asset_hosts keeps a clean URL authority",
+      asset_hosts(["https://example.test/x"]) == ["example.test"])
+cp_dirty = ControlPlane(nogate)
+with mock.patch.object(type(cp_dirty), "_scope_dirty_path", return_value=nogate / "11_runtime" / ".scope-sync-dirty"):
+    with mock.patch.object(Path, "write_text", side_effect=OSError("injected dirty failure")):
+        saved_err = sys.stderr
+        class _Buf:
+            def __init__(self): self.text = ""
+            def write(self, s): self.text += str(s)
+            def flush(self): pass
+        buf = _Buf()
+        sys.stderr = buf
+        try:
+            cp_dirty._mark_scope_dirty("REV-1", "push failed")
+        finally:
+            sys.stderr = saved_err
+        check("a DIRTY-marker write failure is logged instead of swallowed",
+              "DIRTY" in buf.text and "stale" in buf.text)
 (nogate / "00_control/engagement.yaml").write_text("scope:\n  gate: yes\n")
 sc = scope_check(nogate, "https://anything.example/x")
 check("scope_check seam: other gate values stay default-deny",

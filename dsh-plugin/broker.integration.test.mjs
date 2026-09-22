@@ -120,6 +120,17 @@ check('brokerWorkspace resolves symlinks', brokerWorkspace(root) === workspaceKe
     process.env.RESEARCH_OS_BROKER_SOCKET = join(fakeHome, 'missing.sock')
     delete process.env.RESEARCH_OS_BROKER_HOME
     check('a configured-but-missing socket is not a broker', brokerPath() === undefined)
+    const { homedir: homedir8d } = await import('node:os')
+    const homeSock = join(homedir8d(), '.dsh-test-ros-broker.sock')
+    writeFileSync(homeSock, '')
+    try {
+      process.env.RESEARCH_OS_BROKER_SOCKET = '~/' + '.dsh-test-ros-broker.sock'
+      delete process.env.RESEARCH_OS_BROKER_HOME
+      check('a ~/ socket env expands like the HOME branch (client.py parity)',
+        brokerPath() === homeSock)
+    } finally {
+      try { rmSync(homeSock, { force: true }) } catch {}
+    }
   } finally {
     if (savedSocket === undefined) delete process.env.RESEARCH_OS_BROKER_SOCKET
     else process.env.RESEARCH_OS_BROKER_SOCKET = savedSocket

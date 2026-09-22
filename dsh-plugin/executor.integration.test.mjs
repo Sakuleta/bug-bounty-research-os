@@ -481,6 +481,70 @@ const br4 = await runControlledBrowser({ root, args: { url: browserUrl, principa
 check('missing runner yields an actionable provisioning error',
   br4.ok === false && br4.text.includes('BUA runner missing'))
 
+// 8d. W8 follow-up ordering: the broker gate runs BEFORE the local claim, so a
+//     broker refusal wins over a claim conflict and no claim leaks on refusal.
+{
+  const { existsSync: existsSync8d } = await import('node:fs')
+  writeFileSync(engagementPath, `scope:\n  assets: ["127.0.0.1:${server.address().port}"]\n`)
+  const stale8d = join(root, 'stale-w8-order.sock')
+  writeFileSync(stale8d, '')
+  const savedSock8d = process.env.RESEARCH_OS_BROKER_SOCKET
+  const savedHome8d = process.env.RESEARCH_OS_BROKER_HOME
+  delete process.env.RESEARCH_OS_BROKER_HOME
+  process.env.RESEARCH_OS_BROKER_SOCKET = stale8d
+  const brokerToken = (shape, family, nonce, actionId) => {
+    appendFileSync(tokensPath, JSON.stringify({
+      action_id: actionId, nonce, broker_nonce: nonce, broker_sig: 'f'.repeat(64),
+      argument_digest: canonicalDigest(shape), tool_family: family,
+      expires_at: new Date(Date.now() + 60000).toISOString(), consumed: false,
+      cycle_id: 'C-0001', preflight: preparePayload,
+    }) + '\n')
+  }
+  try {
+    mkdirSync(join(root, '11_runtime', '.token-claims'), { recursive: true })
+    const url8d = url + '/w8-http-order'
+    const httpShape8d = shapeFromArgs({ method: 'GET', url: url8d, principal: 'researcher-A' })
+    brokerToken(httpShape8d, 'http', 'w8-http-order', 'A-8d001')
+    writeFileSync(join(root, '11_runtime', '.token-claims', 'w8-http-order'), 'held')
+    const hitsBefore8d = labHits
+    const r8d = await runControlledRequest({ root, args: { method: 'GET', url: url8d, principal: 'researcher-A' } })
+    check('broker-unreachable wins over a pre-created claim (HTTP arm)',
+      r8d.ok === false && r8d.text.includes('broker unreachable') && !r8d.text.includes('already claimed')
+      && labHits === hitsBefore8d)
+    const url8dFresh = url + '/w8-http-fresh'
+    const httpShape8dFresh = shapeFromArgs({ method: 'GET', url: url8dFresh, principal: 'researcher-A' })
+    brokerToken(httpShape8dFresh, 'http', 'w8-http-fresh', 'A-8d002')
+    const r8dFresh = await runControlledRequest({ root, args: { method: 'GET', url: url8dFresh, principal: 'researcher-A' } })
+    check('no claim file leaks on broker-refusal paths (HTTP arm)',
+      r8dFresh.ok === false && r8dFresh.text.includes('broker unreachable')
+      && !existsSync8d(join(root, '11_runtime', '.token-claims', 'w8-http-fresh')))
+    const browserUrl8d = browserUrl + '/w8-browser-order'
+    const browserShape8d = browserShapeFromArgs({ url: browserUrl8d, principal: 'researcher-A' })
+    brokerToken(browserShape8d, 'browser', 'w8-browser-order', 'A-8d003')
+    writeFileSync(join(root, '11_runtime', '.token-claims', 'w8-browser-order'), 'held')
+    const runsBefore8d = runnerRuns()
+    const b8d = await runControlledBrowser({ root, args: { url: browserUrl8d, principal: 'researcher-A' } })
+    check('broker-unreachable wins over a pre-created claim (browser arm)',
+      b8d.ok === false && b8d.text.includes('broker unreachable') && !b8d.text.includes('already claimed')
+      && runnerRuns() === runsBefore8d)
+    const browserUrl8dFresh = browserUrl + '/w8-browser-fresh'
+    const browserShape8dFresh = browserShapeFromArgs({ url: browserUrl8dFresh, principal: 'researcher-A' })
+    brokerToken(browserShape8dFresh, 'browser', 'w8-browser-fresh', 'A-8d004')
+    const b8dFresh = await runControlledBrowser({ root, args: { url: browserUrl8dFresh, principal: 'researcher-A' } })
+    check('no claim file leaks on broker-refusal paths (browser arm)',
+      b8dFresh.ok === false && b8dFresh.text.includes('broker unreachable')
+      && !existsSync8d(join(root, '11_runtime', '.token-claims', 'w8-browser-fresh')))
+  } finally {
+    rmSync(join(root, '11_runtime', '.token-claims', 'w8-http-order'), { force: true })
+    rmSync(join(root, '11_runtime', '.token-claims', 'w8-browser-order'), { force: true })
+    rmSync(stale8d, { force: true })
+    if (savedSock8d === undefined) delete process.env.RESEARCH_OS_BROKER_SOCKET
+    else process.env.RESEARCH_OS_BROKER_SOCKET = savedSock8d
+    if (savedHome8d === undefined) delete process.env.RESEARCH_OS_BROKER_HOME
+    else process.env.RESEARCH_OS_BROKER_HOME = savedHome8d
+  }
+}
+
 // 9. The real runner template: scope guard first (exit 4), provisioning second (exit 3).
 const realRunner = join(OS_REPO, 'tools', 'bua', 'run.mjs')
 let realScopeCode = 0
