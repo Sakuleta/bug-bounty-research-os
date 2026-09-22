@@ -682,6 +682,30 @@ def pack_change_problem(root: Path, row: dict[str, Any]) -> str | None:
     return None
 
 
+def triage_demands(root: Path, objective: str) -> tuple[list[str], int]:
+    """The demanded ranked pack list and effective cap for one cycle objective.
+
+    One seam for the RUNNING guard, the RUNNING snapshot and the audit, so all three
+    answer from the same ranking. Callers snapshot the result at RUNNING time; later
+    environment or workspace drift must not move the goalposts on past cycles.
+    """
+    cap = selection_cap()
+    ranked = [name for name, _ in top_packs(root, selection_query(root, objective), k=cap)]
+    return ranked, cap
+
+
+def snapshot_demands(snapshot: Any) -> tuple[list[str], int] | None:
+    """A stored `knowledge_triage_snapshot` as (ranked, cap), or None when absent."""
+    if not isinstance(snapshot, dict):
+        return None
+    ranked = snapshot.get("ranked")
+    cap = snapshot.get("cap")
+    if (not isinstance(ranked, list) or not all(isinstance(n, str) for n in ranked)
+            or isinstance(cap, bool) or not isinstance(cap, int)):
+        return None
+    return list(ranked), cap
+
+
 def canonical_request_shape(shape: dict[str, Any]) -> dict[str, Any]:
     """Normalize a request_shape to the canonical digest form the executor hashes.
 
@@ -1075,6 +1099,20 @@ class ControlPlane:
             patch = dict(patch)
             if "status" in patch or "id" in patch:
                 raise ValueError("cycle status/id are immutable; use lifecycle methods")
+            current_snapshot = (self.cycle_data(cid) or {}).get("knowledge_triage_snapshot")
+            if "objective" in patch and current_snapshot is not None:
+                # A deliberate objective change re-demands: the snapshot follows the
+                # NEW objective (recorded in this same update), so the coverage guard
+                # still answers the question the cycle now asks. Ambient drift —
+                # env, unknowns, last-result — never moves a stored snapshot.
+                ranked, cap = triage_demands(self.root, str(patch["objective"]))
+                patch["knowledge_triage_snapshot"] = {"ranked": ranked, "cap": cap}
+            elif "knowledge_triage_snapshot" in patch:
+                if current_snapshot is not None and patch["knowledge_triage_snapshot"] != current_snapshot:
+                    raise ValueError(
+                        "knowledge_triage_snapshot is immutable once recorded at RUNNING — "
+                        "later drift cannot move the coverage goalposts on a past cycle"
+                    )
             primary = patch.get("primary_hypothesis")
             if primary and str(primary).startswith("H-") and self.hypothesis_status(str(primary)) is None:
                 raise ValueError(f"cycle references unknown primary hypothesis: {primary}")
@@ -1132,6 +1170,10 @@ class ControlPlane:
         plausibly-relevant pack is the failure mode this guard exists for. Without a
         readable INDEX there is no ranking to check, so the guard fails closed instead
         of passing vacuously.
+
+        Once a cycle has reached RUNNING its `knowledge_triage_snapshot` (demanded
+        list + effective cap, frozen at RUNNING time) is the coverage contract — later
+        environment or workspace drift cannot move the goalposts.
         """
         triage = plan.get("knowledge_triage")
         if not isinstance(triage, list) or not triage:
@@ -1154,8 +1196,11 @@ class ControlPlane:
                 "cycle guard: knowledge index missing/unparseable — cannot verify triage coverage "
                 f"({problem}); restore 12_knowledge/INDEX.yaml before RUNNING"
             )
-        cap = selection_cap()
-        ranked = [name for name, _ in top_packs(self.root, selection_query(self.root, str(plan.get("objective", ""))), k=cap)]
+        frozen = snapshot_demands(plan.get("knowledge_triage_snapshot"))
+        if frozen is not None:
+            ranked, cap = frozen
+        else:
+            ranked, cap = triage_demands(self.root, str(plan.get("objective", "")))
         missing = [name for name in ranked if name not in covered]
         if missing:
             raise ValueError(
@@ -1288,6 +1333,12 @@ class ControlPlane:
                 self._require_triage(plan)
                 self._require_section(cid, "objective.md", "Question")
                 self._require_section(cid, "objective.md", "Minimal test")
+                if snapshot_demands(plan.get("knowledge_triage_snapshot")) is None:
+                    ranked, cap = triage_demands(self.root, str(plan.get("objective", "")))
+                    self._append_locked("CYCLE_UPDATED", "cycle", cid, actor=actor,
+                                        reason="triage demands snapshotted at RUNNING (ranked packs + effective cap)",
+                                        payload={"knowledge_triage_snapshot": {"ranked": ranked, "cap": cap}},
+                                        cycle_id=cid)
             if to_state == "RESULT_READY":
                 if not refs:
                     raise ValueError("RESULT_READY requires evidence refs (cite E-ids in results.md)")

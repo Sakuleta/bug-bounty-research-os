@@ -20,7 +20,7 @@ from control_plane import (CYCLE_EDGES, EVENT_TYPES, HYP_EDGES, KNOWLEDGE_RESOLU
                            engagement_assets, evidence_id_ok, host_in_scope,
                            never_considered_in_window, normalize_cycle_state, pack_change_problem,
                            review_packet_digest, review_quote_problem, scope_check,
-                           secret_pattern_hits, sha256_file)
+                           secret_pattern_hits, sha256_file, snapshot_demands)
 from knowledge_index import index_problem, parse_index, selection_cap, selection_query, top_packs  # noqa: E402
 
 CLOSURE_PROOF_PATH = Path("06_audits") / "CLOSURE-PROOF.md"
@@ -381,9 +381,13 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
             if not triage:
                 errors.append(f"cycle {cid} past READY without knowledge_triage (pack USE/SKIP dispositions required)")
             elif not (modern and knowledge_problem):
-                cap = selection_cap()
-                ranked = [name for name, _ in top_packs(
-                    root, selection_query(root, str(pdata.get("objective", ""))), k=cap)]
+                frozen = snapshot_demands((pdata or {}).get("knowledge_triage_snapshot"))
+                if frozen is not None:
+                    ranked, cap = frozen
+                else:
+                    cap = selection_cap()
+                    ranked = [name for name, _ in top_packs(
+                        root, selection_query(root, str(pdata.get("objective", ""))), k=cap)]
                 covered = {str(entry.get("pack")).strip() for entry in triage
                            if isinstance(entry, dict) and entry.get("pack")}
                 missing = [name for name in ranked if name not in covered]

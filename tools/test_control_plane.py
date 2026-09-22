@@ -3238,5 +3238,53 @@ check("v8.2 W5: hand-lowered budget fails the audit until re-recorded",
       _sub5b.returncode != 0 and "budget caps drifted" in (_sub5b.stdout + _sub5b.stderr)
       and "researchctl budget set" in (_sub5b.stdout + _sub5b.stderr))
 
+# v8.2 W9: triage snapshot — RUNNING freezes the demanded list + cap; later env
+# and workspace drift cannot move the goalposts on past cycles.
+def _w9_root() -> Path:
+    r = fresh_root()
+    for pk in ["alpha", "bravo", "charlie", "delta", "echo"]:
+        (r / "12_knowledge" / pk).mkdir(parents=True, exist_ok=True)
+        (r / "12_knowledge" / pk / f"{pk}.md").write_text(f"# {pk} pack\n")
+    (r / "12_knowledge/INDEX.yaml").write_text(
+        "packs:\n" + "".join(f"  {pk}:\n    load_when: [test]\n    files: [{pk}.md]\n"
+                              for pk in ["alpha", "bravo", "charlie", "delta", "echo"]))
+    return r
+
+
+_wr9 = _w9_root()
+_wc9 = ControlPlane(_wr9)
+from knowledge_index import selection_cap as _cap9, selection_query as _q9, top_packs as _top9
+_ranked9 = [n for n, _ in _top9(_wr9, _q9(_wr9, "test question"), k=_cap9())]
+assert len(_ranked9) > 1, "w9 fixture needs several ranked packs"
+_wc9.create_cycle("C-0001", cycle_fixture("C-0001", "test question", root=_wr9))
+_wc9.update_cycle("C-0001", {"knowledge_triage": [
+    {"pack": n, "verdict": "SKIP", "reason": "snapshot probe reason covers this pack"}
+    for n in _ranked9]})
+write_objective(_wr9, "C-0001")
+_wc9.transition_cycle("C-0001", "READY", reason="ready")
+_wc9.transition_cycle("C-0001", "RUNNING", reason="run")
+_snap9 = _wc9.cycle_data("C-0001").get("knowledge_triage_snapshot") or {}
+check("v8.2 W9: RUNNING snapshots the demanded list and the effective cap",
+      _snap9.get("ranked") == _ranked9 and _snap9.get("cap") == _cap9())
+_sub9 = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_wr9)],
+                       capture_output=True, text=True)
+check("v8.2 W9: the snapshotted cycle audits clean", _sub9.returncode == 0)
+_flipped = dict(os.environ, KNOWLEDGE_PACK_CAP="6")
+_sub9f = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_wr9)],
+                        capture_output=True, text=True, env=_flipped)
+check("v8.2 W9: a cap flip after RUNNING adds no audit errors on past cycles",
+      _sub9f.returncode == 0 and "knowledge_triage" not in (_sub9f.stdout + _sub9f.stderr))
+(_wr9 / "10_learning/unknowns.yaml").write_text(
+    "unknowns: [alpha, bravo, charlie, delta, echo, extra]\n")
+_sub9u = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_wr9)],
+                        capture_output=True, text=True)
+check("v8.2 W9: an unknowns edit after RUNNING adds no audit errors on past cycles",
+      _sub9u.returncode == 0 and "knowledge_triage" not in (_sub9u.stdout + _sub9u.stderr))
+try:
+    _wc9.update_cycle("C-0001", {"knowledge_triage_snapshot": {"ranked": [], "cap": 1}})
+    check("v8.2 W9: the snapshot is immutable", False)
+except ValueError as exc:
+    check("v8.2 W9: the snapshot is immutable", "immutable" in str(exc))
+
 
 print(f"\n{len(passed)} checks passed")
