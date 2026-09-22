@@ -688,6 +688,11 @@ check('a non-zero browser runner with a failed receipt still carries the warning
   check('the executor passes the bound profile explicitly, never the silent default',
     w2.ok === true && seenArgv.includes('--profile') && seenArgv[seenArgv.indexOf('--profile') + 1] === 'lab/bua-w2'
     && w2.text.includes('profile: lab/bua-w2'))
+  const w2Ledger = readFileSync(join(root, '11_runtime/events.jsonl'), 'utf8')
+  const w2Action = w2Ledger.split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    .filter((event) => event.type === 'ACTION_RECORDED').pop()
+  check('the browser receipt records the profile it ran under',
+    Boolean(w2Action) && w2Action.payload.browser_profile === 'lab/bua-w2')
 }
 
 // 10h. v8.2 W12: a runner-reported scope violation rides the receipt and flags it.

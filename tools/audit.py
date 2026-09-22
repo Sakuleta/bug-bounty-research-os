@@ -794,6 +794,43 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
                     errors.append(message)
                 else:
                     warnings.append(f"legacy action record (pre-7.3, no os_version): {message}")
+        # Session binding: a browser receipt names the profile it ran under; it
+        # must be the bound session.browser_profile while cross-engagement reuse
+        # stays off (default) — drift errors. An explicit
+        # cross_engagement_session_reuse: true declares deliberate sharing, so
+        # drift warns instead. A used profile outside the workspace root errors
+        # either way (prepare refuses those before any token is minted).
+        bound_profile = binding["browser_profile"]
+        reuse = bool(binding["cross_engagement_session_reuse"])
+        if bound_profile:
+            for e in events:
+                if e.get("type") != "ACTION_RECORDED":
+                    continue
+                used = str(((e.get("payload") or {}).get("browser_profile") or "")).strip()
+                if not used:
+                    continue
+                try:
+                    (root / used).resolve().relative_to(root.resolve())
+                except ValueError:
+                    message = (f"action {e.get('entity_id')} ran under browser profile {used!r}, "
+                               "outside the workspace root — point session.browser_profile at a "
+                               "dedicated profile inside the workspace")
+                    if e.get("os_version"):
+                        errors.append(message)
+                    else:
+                        warnings.append(f"legacy action record (pre-7.3, no os_version): {message}")
+                    continue
+                if used != bound_profile:
+                    message = (f"action {e.get('entity_id')} ran under browser profile {used!r}, "
+                               f"not the bound session.browser_profile ({bound_profile!r})")
+                    if reuse:
+                        warnings.append(message + " — cross_engagement_session_reuse is true, "
+                                                  "so deliberate profile sharing only warns")
+                    elif e.get("os_version"):
+                        errors.append(message + " — sessions are engagement-local while "
+                                                "cross_engagement_session_reuse is false")
+                    else:
+                        warnings.append(f"legacy action record (pre-7.3, no os_version): {message}")
 
     # Scope is a live invariant: each recorded action is re-checked against the CURRENT
     # asset list, so a scope narrowed after the fact cannot stay silent. request_shape.url
