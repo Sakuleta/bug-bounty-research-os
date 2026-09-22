@@ -316,15 +316,85 @@ stale = call("policy.put", workspace=rev_ws, assets=["example.test"], gate="asse
              scope_revision=rev(1))
 check("an out-of-order (older) revision push is refused",
       stale["ok"] is False and "scope_revision" in stale["error"])
-check("policy.get on an unknown workspace returns no policy",
-      call("policy.get", workspace=str(tmpdir("ro-broker-unknown-")))["policy"] is None)
-check("policy.get never leaks key material", KEY_BYTES.hex() not in json.dumps(got))
 
 # --- token.mint scope enforcement -------------------------------------------
 
 nopolicy_ws = str(tmpdir("ro-broker-nopolicy-").resolve())
 shape_in = {"method": "GET", "url": "https://example.test/x", "principal": "researcher-A"}
 preflight = {"cycle_id": "C-0001", "target": shape_in["url"]}
+
+# --- audit journal-first: intent before state, applied_but_unlogged on late failure ---
+
+import importlib.util as _ilu
+_broker_spec = _ilu.spec_from_file_location("broker_mod_w14", TOOLS / "broker" / "broker.py")
+broker_mod = _ilu.module_from_spec(_broker_spec)
+_broker_spec.loader.exec_module(broker_mod)
+journal_home = tmpdir("ro-broker-journal-")
+br = broker_mod.Broker(journal_home)
+prime = br.handle({"op": "policy.put", "workspace": str(journal_home / "ws"),
+                   "assets": ["example.test"], "gate": "assets",
+                   "source_reference": "policy://x", "scope_revision": rev(9, "journal")})
+check("in-process policy.put primes the journal fixture", prime["ok"] is True)
+journal_calls = {"n": 0}
+orig_audit = broker_mod.Broker._audit
+
+
+def flaky_audit(self, line):
+    journal_calls["n"] += 1
+    if journal_calls["n"] == 2:
+        raise OSError("injected post-op audit failure")
+    return orig_audit(self, line)
+
+
+broker_mod.Broker._audit = flaky_audit
+try:
+    late_fail = br.handle({"op": "token.mint", "workspace": str(journal_home / "ws"),
+                           "preflight": dict(preflight), "request_shape": dict(shape_in),
+                           "tool_family": "http"})
+finally:
+    broker_mod.Broker._audit = orig_audit
+check("a post-op audit failure returns applied_but_unlogged",
+      late_fail["ok"] is False and late_fail.get("applied_but_unlogged") is True
+      and late_fail.get("op") == "token.mint"
+      and "INTENT" in late_fail.get("error", ""))
+check("the intent record exists as the decision record",
+      "INTENT token.mint" in (journal_home / "audit.log").read_text())
+check("the state change was applied (journal-first, honest shape)",
+      '"kind":"mint"' in (journal_home / "tokens.jsonl").read_text())
+
+# A refused op with a failing post-op append must NOT claim application.
+journal_calls["n"] = 0
+broker_mod.Broker._audit = flaky_audit
+try:
+    refused_late = br.handle({"op": "token.mint", "workspace": str(journal_home / "no-policy-ws"),
+                              "preflight": dict(preflight), "request_shape": dict(shape_in),
+                              "tool_family": "http"})
+finally:
+    broker_mod.Broker._audit = orig_audit
+check("a refused op with a failing post-op append reports no application",
+      refused_late["ok"] is False and refused_late.get("applied_but_unlogged") is False
+      and "policy" in refused_late.get("error", ""))
+
+
+def dead_audit(self, line):
+    raise OSError("injected pre-op audit failure")
+
+
+policies_before = sorted((journal_home / "policies").glob("*.json"))
+broker_mod.Broker._audit = dead_audit
+try:
+    early_fail = br.handle({"op": "policy.put", "workspace": str(journal_home / "ws2"),
+                            "assets": ["example.test"], "gate": "assets",
+                            "source_reference": "policy://x", "scope_revision": rev(1, "journal2")})
+finally:
+    broker_mod.Broker._audit = orig_audit
+check("a pre-op (intent) audit failure refuses without applying",
+      early_fail["ok"] is False and early_fail.get("applied_but_unlogged") is not True
+      and sorted((journal_home / "policies").glob("*.json")) == policies_before)
+check("policy.get on an unknown workspace returns no policy",
+      call("policy.get", workspace=str(tmpdir("ro-broker-unknown-")))["policy"] is None)
+check("policy.get never leaks key material", KEY_BYTES.hex() not in json.dumps(got))
+
 mint = call("token.mint", workspace=nopolicy_ws, preflight=preflight, request_shape=shape_in)
 check("token.mint refuses when no policy is stored",
       mint["ok"] is False and "policy" in mint["error"].lower() and "scope" in mint["error"].lower())

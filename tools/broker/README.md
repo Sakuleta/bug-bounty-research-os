@@ -98,11 +98,22 @@ line bound is replaced by a bounded refusal instead of being sent.
   `{ok, action_id, preflight}`. Consume-before-dispatch semantics live in the caller:
   the enforcer consumes before dispatch, so a crash between consume and request can only
   lose a token, never replay one.
-- **Failure semantics**: the decision log is preflighted before every op — if
-  `audit.log` cannot be appended the request is refused and the op does NOT run, so no
-  unlogged decision is ever taken. Unreadable `tokens.jsonl` lines are skipped for
-  enforcement but counted and surfaced as `ledger_decode_errors` in `status` (silent
-  corruption would hide a replayed or dropped nonce).
+- **Failure semantics**: journal-first. The decision log is preflighted before every
+  op, and a state-changing op (`policy.put`, `token.mint`, `token.consume`) durably
+  appends (fsync) an `INTENT <op>` record *before* it runs, then the outcome line
+  after. If the log is unwritable up front (or the `INTENT` append fails), the request
+  is refused and the op does NOT run, so no unlogged decision is ever taken. If the
+  *outcome* append fails after the state change is applied, the response is an
+  explicit `applied_but_unlogged` shape (`ok: false`, the op, and the error) — never
+  a plain refusal — and the `INTENT` line is the decision record. Recovery: re-read
+  `audit.log` for `INTENT` lines without a matching outcome line and reconcile the
+  state files (`tokens.jsonl`, `policies/`) against them. A refused op whose outcome
+  line also fails reports `applied_but_unlogged: false` (no state changed, but even
+  the refusal went unlogged — repair the log). Unreadable `tokens.jsonl` lines are
+  skipped for enforcement but counted and surfaced as `ledger_decode_errors` in
+  `status` (silent corruption would hide a replayed or dropped nonce).
+  `token.consume` stays fail-safe: the mint lookup, signature/expiry checks and the
+  consume append hold the broker lock, so one nonce still consumes exactly once.
 
 `tools/broker/client.py` is the stdlib client: `broker_path()` (env
 `RESEARCH_OS_BROKER_SOCKET` wins; else `<home>/broker.sock` when it exists),

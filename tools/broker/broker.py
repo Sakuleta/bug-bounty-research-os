@@ -65,6 +65,12 @@ class Refused(Exception):
     """A deliberate refusal the client sees as {"ok": false, "error": …}."""
 
 
+# Ops that change broker state (policy file, token ledger). handle() journals an
+# INTENT record for these before running them; read-only ops (hello, status,
+# policy.get, scope.check) only get the outcome line.
+STATE_CHANGING_OPS = frozenset({"policy.put", "token.mint", "token.consume"})
+
+
 # A scope revision binds one broker policy to one local SCOPE_CHANGED event:
 # `EV-<zero-padded ledger sequence>:<64-hex event hash>`. The hash is the identity
 # (tamper-evident, equal revisions name the same event); the sequence orders
@@ -164,12 +170,13 @@ class Broker:
         return hmac.new(self.key(), _json_dump(fields).encode("utf-8"), hashlib.sha256).hexdigest()
 
     def _audit(self, line: str) -> None:
-        """Append one decision line. OSError propagates: `handle()` refuses a decision it
+        """Append one decision line, fsynced. OSError propagates: `handle()` refuses a decision it
         cannot log, while frame-level events use `_audit_best_effort` (the frame is
         already refused, so a missing log line cannot let anything through)."""
         fd = os.open(self.audit_file, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
             os.write(fd, f"{_now_iso()} {line}\n".encode("utf-8"))
+            os.fsync(fd)
         finally:
             os.close(fd)
 
@@ -495,10 +502,15 @@ class Broker:
     def handle(self, req: Any) -> dict[str, Any]:
         """Run one op and return its response, refusing any decision that cannot be logged.
 
-        The audit log is preflighted (open for append) BEFORE the op runs, so an
-        unwritable log refuses the request instead of executing it unlogged; the append
-        after the op is checked too, so a late failure is still a refusal, never a
-        silently unlogged success.
+        Journal-first: a state-changing op (`policy.put`, `token.mint`,
+        `token.consume`) durably appends (fsync) an INTENT record BEFORE it runs, then
+        the outcome after. The audit log is preflighted (open for append) BEFORE the op
+        runs, so an unwritable log refuses the request instead of executing it
+        unlogged; the append after the op is checked too. A late failure cannot
+        un-apply the state change, so it returns an explicit `applied_but_unlogged`
+        shape — never a plain refusal — and the INTENT line is the decision record
+        (recovery: every INTENT without a matching outcome line needs review; the
+        state files themselves stay authoritative for enforcement).
         """
         op = req.get("op") if isinstance(req, dict) else None
         try:
@@ -508,6 +520,15 @@ class Broker:
             return {"ok": False, "error": (
                 f"the broker audit log is not writable ({exc}) — refusing the request so no "
                 f"decision goes unlogged; repair {self.audit_file}")}
+        if op in STATE_CHANGING_OPS:
+            try:
+                workspace = req.get("workspace") if isinstance(req, dict) else None
+                self._audit(f"INTENT {op} workspace={str(workspace or '-').strip() or '-'}")
+            except OSError as exc:
+                return {"ok": False, "error": (
+                    f"the broker journal is not writable ({exc}) — refusing the request so no "
+                    f"decision goes unlogged; repair {self.audit_file}")}
+        applied = False
         try:
             if not isinstance(req, dict):
                 raise Refused("request must be a JSON object")
@@ -517,17 +538,28 @@ class Broker:
             if fn is None:
                 raise Refused(f"unknown op: {op}")
             response, summary = fn(self, req)
+            applied = response.get("ok") is True
         except Refused as exc:
             response, summary = {"ok": False, "error": str(exc)}, f"refuse {exc}"
         except Exception as exc:  # one bad request must never crash the daemon
+            # Unknown whether state changed — assume it did (fail closed: reconcile).
+            applied = True
             response, summary = (
                 {"ok": False, "error": f"internal error: {exc}"},
                 f"error {type(exc).__name__}: {exc}")
         try:
             self._audit(f"{op or '?'} {summary}".rstrip())
         except OSError as exc:
-            return {"ok": False, "error": (
-                f"the broker audit record could not be appended ({exc}) — refusing: {summary}")}
+            if applied:
+                return {"ok": False, "applied_but_unlogged": True, "op": op, "error": (
+                    f"the broker audit record could not be appended ({exc}) — the operation WAS "
+                    f"applied ({summary}); the INTENT record above is the decision record. Recovery: "
+                    "re-read audit.log for INTENT lines without a matching outcome line and reconcile "
+                    f"the state files ({TOKENS_NAME}, policies/) against them")}
+            return {"ok": False, "applied_but_unlogged": False, "op": op, "error": (
+                f"{response.get('error')} (and the refusal audit line could not be appended "
+                f"({exc}) — no state was changed; the INTENT record above shows the attempt. "
+                f"Recovery: repair {self.audit_file})")}
         return response
 
     def _response_for_line(self, line: bytes) -> bytes:
