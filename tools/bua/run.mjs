@@ -371,11 +371,16 @@ function parseArgs(argv) {
   return out
 }
 
-/** Walk up from cwd for a Research OS workspace root (OS_VERSION + ledger). */
+/** Walk up from cwd for a Research OS workspace root. Any one of the ledger, the
+ *  engagement binding or the runtime directory marks the workspace (mirroring
+ *  dsh-plugin/index.js, so deleting the OS_VERSION marker cannot disarm the
+ *  runner); a directory with none of them is not a workspace (fail closed). */
 function findOsRoot(cwd) {
   let dir = resolve(cwd)
   for (let i = 0; i < 12; i++) {
-    if (existsSync(join(dir, 'OS_VERSION')) && existsSync(join(dir, '11_runtime', 'events.jsonl'))) return dir
+    if (existsSync(join(dir, '11_runtime', 'events.jsonl'))
+      || existsSync(join(dir, '00_control', 'engagement.yaml'))
+      || existsSync(join(dir, '11_runtime'))) return dir
     const parent = resolve(dir, '..')
     if (parent === dir) break
     dir = parent
@@ -414,7 +419,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (!args.url || !args.principal) usage('--url and --principal are required')
   const root = findOsRoot(process.cwd())
-  if (!root) usage('not inside a Research OS workspace (OS_VERSION + 11_runtime/events.jsonl)')
+  if (!root) usage('not inside a Research OS workspace (11_runtime/events.jsonl, 00_control/engagement.yaml or 11_runtime/)')
   insideRoot(root, args['out-dir'], '--out-dir')
   insideRoot(root, args.profile, '--profile')
 

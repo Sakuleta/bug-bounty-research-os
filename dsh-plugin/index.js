@@ -151,13 +151,16 @@ const PROTECTED_TARGETS = [
 // package installs and git operations are provisioning, not target access.
 const NET_COMMANDS = new Set(['curl', 'wget', 'http', 'httpie', 'nc', 'ncat', 'nmap',
   'socat', 'dig', 'nslookup', 'host', 'ssh', 'scp'])
-/** Wrapper prefixes whose own flags/values precede the real command word. */
-const NET_WRAPPERS = new Set(['env', 'sudo', 'nohup', 'time', 'nice', 'timeout', 'stdbuf', 'xargs'])
+/** Wrapper prefixes whose own flags/values precede the real command word. `command`,
+ *  `exec` and `busybox` take the real command as their next word; `{`/`}` group
+ *  commands (`{ curl …; }`) and are skipped the same way. */
+const NET_WRAPPERS = new Set(['env', 'sudo', 'nohup', 'time', 'nice', 'timeout', 'stdbuf', 'xargs', 'command', 'exec', 'busybox'])
 /** Index of the command word after skipping wrapper prefixes (with their flags). */
 function netCommandIndex(words) {
   let i = 0
   while (i < words.length) {
     const w = stripQuotes(words[i])
+    if (w === '{' || w === '}' || w === '!') { i++; continue }
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) { i++; continue }
     const base = w.toLowerCase().split(/[/\\]/).pop()
     if (!NET_WRAPPERS.has(base)) break
@@ -224,22 +227,43 @@ function isLoopbackHostname(name) {
 }
 /** True when the URL's authority is unambiguously a loopback host: the manual
  *  authority parse (WHATWG-cross-checked, "" on ambiguity) reduced to its hostname,
- *  WHATWG-normalized (so `127.1` and hex/octal forms judge as the loopback they are). */
+ *  WHATWG-normalized (so `127.1` and hex/octal forms judge as the loopback they are).
+ *  Unexpanded variable ports (`localhost:$PORT`) are WHATWG-unparseable: fall back
+ *  to the manual hostname so loopback stays exempt while `evil.example:$PORT`
+ *  still denies. Ambiguous authorities (backslash, whitespace, %5c) still deny. */
 function urlLoopbackExempt(url) {
   const host = hostFromUrl(url)
-  if (!host) return false
-  let name = host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : host.split(':')[0]
+  if (host) {
+    let name = host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : host.split(':')[0]
+    try {
+      name = new URL(`http://${name}/`).hostname.toLowerCase()
+    } catch {
+      return false
+    }
+    return isLoopbackHostname(name)
+  }
+  const s = String(url || '')
+  if (!s.includes('://')) return false
+  const rest = s.slice(s.indexOf('://') + 3)
+  let end = rest.length
+  for (const term of ['/', '?', '#']) {
+    const i = rest.indexOf(term)
+    if (i >= 0) end = Math.min(end, i)
+  }
+  const manual = normalizeHost(rest.slice(0, end))
+  if (!manual) return false
+  let name = manual.startsWith('[') ? manual.slice(0, manual.indexOf(']') + 1) : manual.split(':')[0]
   try {
     name = new URL(`http://${name}/`).hostname.toLowerCase()
   } catch {
-    return false
+    name = String(name || '').toLowerCase()
   }
   return isLoopbackHostname(name)
 }
 /** Flags whose values are not destinations (headers, data, method, credentials,
  *  output files): skipped when deriving schemeless targets. `--url` is NOT here —
  *  its value IS a destination. */
-const EGRESS_VALUE_FLAGS = /^(-H|--header|-d|--data|--data-raw|--data-ascii|--data-binary|--data-urlencode|--request|-X|-u|--user|-o|--output|-e|--referer|--user-agent|-A|-p|--port|--proxy|-x|--resolve|--connect-to)$/
+const EGRESS_VALUE_FLAGS = /^(-H|--header|-d|--data|--data-raw|--data-ascii|--data-binary|--data-urlencode|--request|-X|-u|--user|-o|-O|--output|-e|--referer|--user-agent|-A|-p|--port|--proxy|-x|--resolve|--connect-to)$/
 /** Bare non-flag arguments of net-command segments as schemeless host parts
  *  (cut at the first `/`, `?` or `#`; URL tokens, pure ports and flag values
  *  excluded). Empty when the command names no bare destination. */
@@ -257,12 +281,25 @@ function schemelessTargets(cmd) {
       const w = stripQuotes(words[j])
       if (w === '--') { j++; continue }
       if (w.startsWith('-') && w.length > 1 && w !== '-') {
+        const eq = w.indexOf('=')
+        if (eq > 0 && w.slice(0, eq) === '--url' && w.slice(eq + 1)) {
+          const val = w.slice(eq + 1)
+          if (!val.includes('://')) {
+            let hostpart = val
+            if (hostpart.startsWith('//')) hostpart = hostpart.slice(2)
+            hostpart = hostpart.split('/')[0].split('?')[0].split('#')[0].trim()
+            if (hostpart) out.push(hostpart)
+          }
+          j++
+          continue
+        }
         if (!w.includes('=') && EGRESS_VALUE_FLAGS.test(w)) { j++; if (j < words.length) j++; continue }
         j++
         continue
       }
       if (w.includes('://')) { j++; continue }
       if (/^\d+$/.test(w)) { j++; continue }
+      if (w === '-') { j++; continue }
       let hostpart = w
       if (hostpart.startsWith('//')) hostpart = hostpart.slice(2)
       hostpart = hostpart.split('/')[0].split('?')[0].split('#')[0].trim()
@@ -482,26 +519,36 @@ function fsWriteReason(exec) {
 
 /** Strip ALL quote characters from an extracted target (shell quote-concatenation:
  *  `11_runtime/"events.jsonl"`, `"11_runtime"/events.jsonl` and
- *  `11_runtim"e"/events.jsonl` all open the protected file). */
+ *  `11_runtim"e"/events.jsonl` all open the protected file). ANSI-C `$'…'` and
+ *  locale `$"…"` quote the same way: drop the `$` prefix so the resolved path
+ *  is judged (`11_runtime/$'events.jsonl'` is the protected file). */
 function stripQuotes(token) {
-  return String(token).replace(/["']/g, '')
+  return String(token).replace(/\$(?=['"])/g, '').replace(/["']/g, '')
 }
 
 /** Expand `{a,b,...}` groups recursively with nesting (bash semantics). A group
  *  without a top-level comma is not an expansion (`{a}` stays literal). Depth is
  *  tracked (cap 10); an unbalanced brace fails closed to the static prefix before
  *  the `{`, which the target judges as a directory-level hit when it can reach
- *  protected material. */
+ *  protected material. Braces inside single/double quotes never expand (shell
+ *  semantics), so `rm "11_runtime/{events.jsonl,y}"` is a literal path. */
 function braceExpand(token, depth = 0) {
   const s = String(token)
-  const open = s.indexOf('{')
+  const open = firstUnquoted(s, '{', 0)
   if (open < 0) return [s]
   if (depth > 10) return [s.slice(0, open)]
   let level = 0
   let close = -1
+  let quote = null
   for (let i = open; i < s.length; i++) {
-    if (s[i] === '{') level++
-    else if (s[i] === '}') {
+    const c = s[i]
+    if (quote) {
+      if (c === quote) quote = null
+      continue
+    }
+    if (c === '"' || c === "'") { quote = c; continue }
+    if (c === '{') level++
+    else if (c === '}') {
       level--
       if (level === 0) { close = i; break }
     }
@@ -511,8 +558,15 @@ function braceExpand(token, depth = 0) {
   const parts = []
   let cur = ''
   let nest = 0
+  quote = null
   for (let i = 0; i < inner.length; i++) {
     const c = inner[i]
+    if (quote) {
+      cur += c
+      if (c === quote) quote = null
+      continue
+    }
+    if (c === '"' || c === "'") { quote = c; cur += c; continue }
     if (c === '{') nest++
     else if (c === '}') nest--
     if (c === ',' && nest === 0) { parts.push(cur); cur = '' }
@@ -521,6 +575,21 @@ function braceExpand(token, depth = 0) {
   parts.push(cur)
   if (parts.length < 2) return [s]
   return parts.flatMap((part) => braceExpand(s.slice(0, open) + part + s.slice(close + 1), depth + 1))
+}
+
+/** Index of the first `ch` at or after `from` outside any quoted span. */
+function firstUnquoted(s, ch, from) {
+  let quote = null
+  for (let i = from; i < s.length; i++) {
+    const c = s[i]
+    if (quote) {
+      if (c === quote) quote = null
+      continue
+    }
+    if (c === '"' || c === "'") { quote = c; continue }
+    if (c === ch) return i
+  }
+  return -1
 }
 
 /** Translate a shell glob to a RegExp over one path level (`*` never crosses `/`). */
@@ -576,10 +645,12 @@ function prefixReachesProtected(root, base, token) {
   return false
 }
 
-/** Judge one extracted target token (quotes stripped, braces expanded, globs
- *  resolved) against every applicable base. Returns the denial reason or undefined. */
+/** Judge one extracted target token (braces expanded quote-aware, then quotes
+ *  stripped, globs resolved) against every applicable base. Returns the denial
+ *  reason or undefined. */
 function targetReason(root, bases, token) {
-  for (const variant of braceExpand(stripQuotes(token))) {
+  for (const raw of braceExpand(String(token))) {
+    const variant = stripQuotes(raw)
     if (/[*?\[]/.test(variant)) {
       let matches = null
       for (const base of bases) {
@@ -621,7 +692,7 @@ function targetReason(root, bases, token) {
  *  removed body text for the conditional body sweep. A body line is inert text
  *  unless it lands in the workspace (a redirect target resolving inside the root)
  *  or feeds an interpreter's stdin — otherwise scanning it is a false positive
- *  (a `/`-sweep hit, or a NET_COMMANDS/brower-launch match on documentation text).
+ *  (a `/`-sweep hit, or a NET_COMMANDS/browser-launch match on documentation text).
  *  `<<<` herestrings never start a body; `<<-` allows tab-indented closers;
  *  multiple heredocs queue in order; an unterminated heredoc swallows the rest
  *  (shell semantics). A `<<` inside a quoted span is literal text, not an operator,
@@ -673,7 +744,8 @@ function splitHeredocs(cmd) {
 
 /** True when a redirect/extraction token resolves inside the workspace root. */
 function targetInsideRoot(root, bases, tok) {
-  for (const variant of braceExpand(stripQuotes(tok))) {
+  for (const raw of braceExpand(String(tok))) {
+    const variant = stripQuotes(raw)
     const plain = variant.search(/[*?\[]/) >= 0
       ? variant.slice(0, variant.search(/[*?\[]/))
       : variant
@@ -740,6 +812,23 @@ function splitSegments(cmd) {
 }
 
 const INLINE_INTERP = new Set(['python3', 'python', 'node', 'perl', 'ruby', 'php', 'sh', 'bash', 'zsh'])
+/** Break backtick command substitutions into segments: `` echo `python3 -c …` ``
+ *  executes the inner command, so the inner text is judged as a command, not as
+ *  data to `echo`. Backticks inside single quotes are literal and kept. */
+function breakBackticks(cmd) {
+  let out = ''
+  let single = false
+  let double = false
+  for (let i = 0; i < String(cmd).length; i++) {
+    const c = cmd[i]
+    if (c === '\\' && !single) { out += c; if (i + 1 < String(cmd).length) out += String(cmd)[++i]; continue }
+    if (c === "'" && !double) { single = !single; out += c; continue }
+    if (c === '"' && !single) { double = !double; out += c; continue }
+    if (c === '`' && !single) { out += ';'; continue }
+    out += c
+  }
+  return out
+}
 // A payload naming control-plane-owned material: the guard's marker list plus the
 // runtime/control dir prefixes (a payload can destroy `11_runtime` wholesale without
 // naming any single file in it).
@@ -778,11 +867,11 @@ function interpPayloadReason(exec) {
     if (typeof args.command !== 'string') return undefined
     const root = findOsRoot(sessionCwd(exec))
     if (!root) return undefined
-    const cmd = splitHeredocs(args.command).stripped
+    const cmd = breakBackticks(splitHeredocs(args.command).stripped)
     for (const seg of splitSegments(cmd)) {
       const words = shellWords(seg.trim())
       if (words.length === 0) continue
-      const baseOf = (w) => stripQuotes(w).toLowerCase().split(/[/\\]/).pop()
+      const baseOf = (w) => stripQuotes(w).toLowerCase().split(/[/\\]/).pop().replace(/^[`$({]+|[`$)};]+$/g, '')
       const heads = new Set([0])
       const skipFlags = (from, valueFlags) => {
         let k = from
@@ -802,7 +891,7 @@ function interpPayloadReason(exec) {
           if (k < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(stripQuotes(words[k]))) { k++; continue }
           if (k >= words.length) break
           const b = baseOf(words[k])
-          if (!['env', 'sudo', 'nohup', 'nice', 'time', 'timeout', 'stdbuf', 'xargs'].includes(b)) break
+          if (!['env', 'sudo', 'nohup', 'nice', 'time', 'timeout', 'stdbuf', 'xargs', 'command', 'exec'].includes(b)) break
           k++
           if (b === 'env') {
             while (k < words.length) {
@@ -822,15 +911,25 @@ function interpPayloadReason(exec) {
           } else if (b === 'nice') k = skipFlags(k, /^(-n|--adjustment)$/)
           else if (b === 'stdbuf') k = skipFlags(k, /^(-i|-o|-e|--input|--output|--error)$/)
           else if (b === 'xargs') k = skipFlags(k, /^(-I|-n|-P|-s|-d|-a|-E|--replace|--max-args|--max-procs|--max-chars|--delimiter|--arg-file|--eof)$/)
+          else if (b === 'command' || b === 'exec') { /* no flags: next word is the command */ }
           else k = skipFlags(k, /^(--format|--output|-f|-o)$/)
         }
         return k
       }
-      heads.add(skipWrapperChain())
+      const cmdHead = skipWrapperChain()
+      heads.add(cmdHead)
+      // `-exec` is an argument of `find`, not a command word: anchor only when the
+      // segment's command is `find`, so `echo marker -exec python3 -c …` (data)
+      // stays allowed while `find . -exec python3 -c …` stays denied. `xargs`
+      // anchors only when `xargs` itself sits at a command-word position, so
+      // `echo xargs python3 -c …` (data) stays allowed while a piped
+      // `xargs -I{} python3 -c …` stays denied.
+      const cmdBase = cmdHead < words.length ? baseOf(words[cmdHead]) : ''
+      const headSet = new Set([0, cmdHead])
       for (let j = 0; j < words.length; j++) {
         const b = baseOf(words[j])
-        if (b === '-exec' || b === '-execdir') { if (j + 1 < words.length) heads.add(j + 1) }
-        if (b === 'xargs') heads.add(skipFlags(j + 1, /^(-I|-n|-P|-s|-d|-a|-E|--replace|--max-args|--max-procs|--max-chars|--delimiter|--arg-file|--eof)$/))
+        if ((b === '-exec' || b === '-execdir') && cmdBase === 'find') { if (j + 1 < words.length) heads.add(j + 1) }
+        if (b === 'xargs' && headSet.has(j)) heads.add(skipFlags(j + 1, /^(-I|-n|-P|-s|-d|-a|-E|--replace|--max-args|--max-procs|--max-chars|--delimiter|--arg-file|--eof)$/))
       }
       for (const h of heads) {
         if (h >= words.length) continue
@@ -912,7 +1011,9 @@ function bashWriteReason(exec) {
     }
     const DESTRUCTIVE = /\b(tee|truncate|shred|rm|rmdir|unlink|mv|cp|dd|install)\b|sed\s+-i|perl\s+-i|-delete\b|\bln\s+-s/
     if (DESTRUCTIVE.test(cmd)) {
-      for (const t of cmd.split(/[\s"'`|&;()<>]+/)) {
+      // Keep quotes on the token: brace expansion is quote-aware (quoted braces
+      // never expand), and stripQuotes runs inside targetReason.
+      for (const t of cmd.split(/[\s`|&;()<>]+/)) {
         if (!t || t.startsWith('-')) continue
         let tok = t
         if (tok.startsWith('of=')) tok = tok.slice(3)
@@ -979,39 +1080,68 @@ function liveGateReason(exec) {
 const BROWSER_FAMILY = /^(google-chrome.*|chromium.*|chrome|firefox.*|safari)$/i
 /** `-a <app>` names that count as a browser for `open -a` (case-insensitive). */
 const OPEN_BROWSER_APP = /chrome|chromium|firefox|safari|brave|edge|opera|vivaldi|arc/i
+/** True when a local filesystem path is named (not a host): absolute, `./`/`../`,
+ *  `~`-rooted, exactly `.`/`..`, or an existing file/dir relative to cwd. */
+function isLocalPathArg(raw, cwd) {
+  const w = stripQuotes(raw)
+  if (!w) return false
+  if (w === '.' || w === '..') return true
+  if (w.startsWith('/') || w.startsWith('./') || w.startsWith('../') || w.startsWith('~')) return true
+  if (cwd) {
+    try {
+      const abs = isAbsolute(w) ? w : join(cwd, w)
+      if (existsSync(abs)) return true
+    } catch {}
+  }
+  return false
+}
 /** True when a quote-stripped command segment launches a user-facing browser:
- *  a family binary as the command word, `open -a <browser app>`, or a bare
- *  `open <http(s)://…>` (default-browser open). */
+ *  a family binary as the command word (after wrapper prefixes), `open -a
+ *  <browser app>`, `open -b <browser bundle-id>`, or a bare `open <http(s)://…>`
+ *  (default-browser open). */
 function browserAppLaunch(cmd) {
-  const segments = String(cmd).replace(/["']/g, '').split(/&&|\|\||[;|&()\n]/)
-  for (const seg of segments) {
-    const words = seg.trim().split(/\s+/).filter(Boolean)
+  for (const seg of splitSegments(String(cmd))) {
+    const words = shellWords(seg.trim())
     if (words.length === 0) continue
-    if (BROWSER_FAMILY.test(words[0].split(/[/\\]/).pop())) return true
-    if (/^open$/i.test(words[0].split(/[/\\]/).pop())) {
-      const rest = seg.trim().slice(words[0].length)
-      if (/(^|\s)-a\s+\S/i.test(rest)) {
-        const app = rest.replace(/^.*?-a\s+/i, '').split(/https?:\/\/|\s--[a-z]|\s-[a-z]/i)[0]
-        if (OPEN_BROWSER_APP.test(app)) return true
-      } else if (/https?:\/\//i.test(rest)) return true
+    const idx = netCommandIndex(words)
+    if (idx >= words.length) continue
+    const head = stripQuotes(words[idx])
+    if (BROWSER_FAMILY.test(head.split(/[/\\]/).pop())) return true
+    if (head.toLowerCase().split(/[/\\]/).pop() !== 'open') continue
+    const rest = words.slice(idx + 1)
+    const lower = rest.map((x) => stripQuotes(x).toLowerCase())
+    const ai = lower.indexOf('-a')
+    if (ai >= 0) {
+      if (OPEN_BROWSER_APP.test(rest.slice(ai + 1).map((x) => stripQuotes(x)).join(' '))) return true
+      continue
     }
+    const bi = lower.indexOf('-b')
+    if (bi >= 0) {
+      if (bi + 1 < rest.length && OPEN_BROWSER_APP.test(stripQuotes(rest[bi + 1]))) return true
+      continue
+    }
+    if (rest.some((w) => /https?:\/\//i.test(stripQuotes(w)))) return true
   }
   return false
 }
 /** Bare (schemeless) destinations of user-facing browser launches: family-binary
- *  args and `open -a <browser app>` args after the app, excluding flags, flag
- *  values and URL tokens (URLs are judged separately). Quote-aware so
- *  `open -a "Google Chrome"` leaves no destination. Empty when the launch names
- *  no destination (`chromium --no-sandbox`, `open -a "Google Chrome"` stay allowed). */
-function browserBareTargets(cmd) {
+ *  args and `open -a/-b <browser app>` args after the app, excluding flags, flag
+ *  values, URL tokens and local file/dir paths (URLs are judged separately).
+ *  Quote-aware so `open -a "Google Chrome"` leaves no destination. Empty when the
+ *  launch names no destination (`chromium --no-sandbox`, `open -a "Google Chrome"`
+ *  stay allowed). `cwd` resolves existing relative paths. */
+function browserBareTargets(cmd, cwd) {
   const out = []
   for (const seg of splitSegments(String(cmd))) {
     const words = shellWords(seg.trim())
     if (words.length === 0) continue
-    const base0 = stripQuotes(words[0]).toLowerCase().split(/[/\\]/).pop()
-    if (BROWSER_FAMILY.test(stripQuotes(words[0]).split(/[/\\]/).pop())) {
-      let j = 1
+    const idx = netCommandIndex(words)
+    if (idx >= words.length) continue
+    const head = stripQuotes(words[idx])
+    if (BROWSER_FAMILY.test(head.split(/[/\\]/).pop())) {
+      let j = idx + 1
       while (j < words.length) {
+        if (isLocalPathArg(words[j], cwd)) { j++; continue }
         const w = stripQuotes(words[j])
         if (w === '--') { j++; continue }
         if (w.startsWith('-') && w.length > 1 && w !== '-') {
@@ -1030,12 +1160,18 @@ function browserBareTargets(cmd) {
         if (hostpart) out.push(hostpart)
         j++
       }
-    } else if (base0 === 'open') {
+    } else if (head.toLowerCase().split(/[/\\]/).pop() === 'open') {
       const lower = words.map((x) => stripQuotes(x).toLowerCase())
-      const ai = lower.indexOf('-a')
-      if (ai < 0 || ai + 1 >= words.length) continue
-      let j = ai + 2
+      let ai = -1
+      let bi = -1
+      for (let k = idx + 1; k < lower.length; k++) {
+        if (ai < 0 && lower[k] === '-a') ai = k
+        if (bi < 0 && lower[k] === '-b') bi = k
+      }
+      if (ai < 0 && bi < 0) continue
+      let j = ai >= 0 ? ai + 2 : bi + 2
       while (j < words.length) {
+        if (isLocalPathArg(words[j], cwd)) { j++; continue }
         const w = stripQuotes(words[j])
         if (w === '--') { j++; continue }
         if (w.startsWith('-') && w.length > 1 && w !== '-') { j++; continue }
@@ -1046,6 +1182,32 @@ function browserBareTargets(cmd) {
         if (hostpart) out.push(hostpart)
         j++
       }
+    }
+  }
+  return out
+}
+/** Bare host-like destinations of automation-harness segments (R6 schemeless
+ *  loopback): non-flag, non-URL tokens containing host characters. Subcommand
+ *  words (`open`, `test`) carry no host characters and are skipped. */
+function automationBareTargets(cmd) {
+  const out = []
+  for (const seg of splitSegments(String(cmd))) {
+    if (!BROWSER_LAUNCH.test(seg)) continue
+    const words = shellWords(seg.trim())
+    if (words.length === 0) continue
+    const idx = netCommandIndex(words)
+    for (let j = idx + 1; j < words.length; j++) {
+      const w = stripQuotes(words[j])
+      if (!w || w === '--') continue
+      if (w.startsWith('-') && w.length > 1 && w !== '-') continue
+      if (w.includes('://')) continue
+      if (/^\d+$/.test(w)) continue
+      let hostpart = w
+      if (hostpart.startsWith('//')) hostpart = hostpart.slice(2)
+      hostpart = hostpart.split('/')[0].split('?')[0].split('#')[0].trim()
+      if (!hostpart) continue
+      if (!/[.:[\]]/.test(hostpart) && !isLoopbackHostname(hostpart)) continue
+      out.push(hostpart)
     }
   }
   return out
@@ -1067,7 +1229,7 @@ function browserGateReason(exec) {
       const root = findOsRoot(sessionCwd(exec))
       if (!root) return undefined
       const urls = cmd.match(/https?:\/\/[^\s'"]+/g) || []
-      const bare = browserBareTargets(cmd)
+      const bare = browserBareTargets(cmd, sessionCwd(exec) || root)
       if (urls.length === 0 && bare.length === 0) return undefined
       const bad = urls.find((u) => !urlLoopbackExempt(u) && scopeReasonFor(root, u) !== undefined)
         || bare.find((d) => {
@@ -1088,6 +1250,10 @@ function browserGateReason(exec) {
     if (!root) return undefined
     const urls = cmd.match(/https?:\/\/[^\s'"]+/g) || []
     if (urls.length > 0 && urls.every(urlLoopbackExempt)) return undefined
+    if (urls.length === 0) {
+      const bare = automationBareTargets(cmd)
+      if (bare.length > 0 && bare.every((h) => urlLoopbackExempt('http://' + h + '/'))) return undefined
+    }
     return 'research-os-enforcer: browser automation drives target traffic — a raw launch is not the live path. Prepare a browser preflight (python3 tools/researchctl.py . prepare payload.json with "tool_family": "browser" and request_shape {"url": …, "principal": …}) and call the research_os_browser tool; it runs the canonical runner tools/bua/run.mjs with the engagement scope guard. Localhost/lab browser work stays allowed — name the local URL explicitly.'
   } catch (e) {
     log('guard-browser-error ' + e)
@@ -1235,14 +1401,15 @@ function normalizeHost(host) {
   return out.toLowerCase()
 }
 
-/** Asset URL/host strings reduced to their host[:port], lowercase. */
+/** Asset URL/host strings reduced to their host[:port], lowercase. URL inputs keep
+ *  surrounding whitespace so the authority parse denies it (fail closed); bare
+ *  hosts tolerate surrounding spaces. */
 function assetHosts(assets) {
   const hosts = []
   for (const asset of assets) {
     const raw = String(asset)
     const isUrl = raw.includes('://')
-    let value = raw.trim()
-    if (isUrl) value = value.slice(value.indexOf('://') + 3)
+    let value = isUrl ? raw.slice(raw.indexOf('://') + 3) : raw.trim()
     const authority = value.split('/')[0].split('?')[0].split('#')[0]
     const host = normalizeHost(isUrl ? authority : authority.trim())
     if (host) hosts.push(host)

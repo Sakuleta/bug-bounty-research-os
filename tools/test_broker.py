@@ -558,6 +558,9 @@ check("scope.check denies a backslash authority the fetch stack would route else
 sc = call("scope.check", workspace=ws, url="http://example.test%5Cevil/")
 check("scope.check denies an encoded-backslash authority",
       sc["ok"] is True and sc["in_scope"] is False)
+sc = call("scope.check", workspace=ws, url="https://example.test ")
+check("scope.check denies a trailing-space URL with no path (broker seam parity)",
+      sc["ok"] is True and sc["in_scope"] is False)
 sc = call("scope.check", workspace=ws, url="https://user@example.test/a")
 check("scope.check strips userinfo before host comparison (user@host allowed)",
       sc["ok"] is True and sc["in_scope"] is True and sc["host"] == "example.test")

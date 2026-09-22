@@ -783,6 +783,10 @@ check("scope_check seam: whitespace in a URL authority denies instead of strippi
       sc["in_scope"] is False)
 check("asset_hosts drops a whitespace URL authority (fail closed)",
       asset_hosts(["https://example.test /x"]) == [])
+check("asset_hosts drops a trailing-space URL with no path (fail closed)",
+      asset_hosts(["https://t.example "]) == [])
+check("scope_check denies a trailing-space URL with no path (local seam parity)",
+      scope_check(nogate, "https://example.test ")["in_scope"] is False)
 check("asset_hosts keeps a clean URL authority",
       asset_hosts(["https://example.test/x"]) == ["example.test"])
 cp_dirty = ControlPlane(nogate)

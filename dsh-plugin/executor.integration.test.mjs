@@ -460,6 +460,8 @@ const runsBeforeDirty = runnerRuns()
 const brDirty = await runControlledBrowser({ root, args: { url: browserUrl, principal: 'researcher-A' } })
 check('DIRTY scope with a broker socket refuses browser dispatch before the runner starts',
   brDirty.ok === false && brDirty.text.includes('scope-sync') && runnerRuns() === runsBeforeDirty)
+check('DIRTY refusal text carries a single research_os_browser prefix (no double-wrap)',
+  (brDirty.text.match(/research_os_browser:/g) || []).length === 1)
 rmSync(join(root, '11_runtime', '.scope-sync-dirty'), { force: true })
 rmSync(staleSocket8c, { force: true })
 if (savedSocket8c === undefined) delete process.env.RESEARCH_OS_BROKER_SOCKET

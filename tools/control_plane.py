@@ -266,9 +266,9 @@ def _asset_hosts(assets: list[str]) -> list[str]:
     for asset in assets:
         raw = str(asset)
         is_url = "://" in raw
-        value = raw.strip()
-        if is_url:
-            value = value.split("://", 1)[1]
+        # URL inputs keep surrounding whitespace so the authority parse denies
+        # it (fail closed); bare hosts tolerate surrounding spaces.
+        value = raw.split("://", 1)[1] if is_url else raw.strip()
         authority = value.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
         # URL authorities keep whitespace so _authority_host denies (fail closed);
         # bare hosts tolerate surrounding spaces (already stripped above).

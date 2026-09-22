@@ -120,16 +120,34 @@ check('brokerWorkspace resolves symlinks', brokerWorkspace(root) === workspaceKe
     process.env.RESEARCH_OS_BROKER_SOCKET = join(fakeHome, 'missing.sock')
     delete process.env.RESEARCH_OS_BROKER_HOME
     check('a configured-but-missing socket is not a broker', brokerPath() === undefined)
+    // ~/ expansion is exercised inside a temp sandbox home (never the real home),
+    // and the socket write is guarded so an unwritable home cannot crash the suite.
     const { homedir: homedir8d } = await import('node:os')
+    const sandboxHome = mkdtempSync(join(tmpdir(), 'ros-broker-fakehome-'))
+    const savedHomeEnv = process.env.HOME
+    process.env.HOME = sandboxHome
     const homeSock = join(homedir8d(), '.dsh-test-ros-broker.sock')
-    writeFileSync(homeSock, '')
+    let homeWrote = true
+    try {
+      writeFileSync(homeSock, '')
+    } catch {
+      homeWrote = false
+    }
     try {
       process.env.RESEARCH_OS_BROKER_SOCKET = '~/' + '.dsh-test-ros-broker.sock'
       delete process.env.RESEARCH_OS_BROKER_HOME
-      check('a ~/ socket env expands like the HOME branch (client.py parity)',
-        brokerPath() === homeSock)
+      if (homeWrote) {
+        check('a ~/ socket env expands like the HOME branch (client.py parity)',
+          brokerPath() === homeSock)
+      } else {
+        check('an unwritable home is guarded (no socket, no crash)',
+          brokerPath() === undefined)
+      }
     } finally {
       try { rmSync(homeSock, { force: true }) } catch {}
+      if (savedHomeEnv === undefined) delete process.env.HOME
+      else process.env.HOME = savedHomeEnv
+      try { rmSync(sandboxHome, { recursive: true, force: true }) } catch {}
     }
   } finally {
     if (savedSocket === undefined) delete process.env.RESEARCH_OS_BROKER_SOCKET

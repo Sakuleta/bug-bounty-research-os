@@ -890,6 +890,100 @@ check('research_os_browser stays allowed (sanctioned executor checked before the
 check('firecrawl_search stays allowed (search is not target fetch)',
   (await h.preExecute(exec('firecrawl_search', { query: 't.example' }, osRoot))).kind === 'allow')
 
+// ---- v8.1 second pass (adversarial verification must-fix) ----
+setRunning()
+// F1: ANSI-C / locale quoting bypasses the write guard.
+check('F1 ANSI-C $ quoted redirect denied',
+  !!h.guardReason(exec('bash', { command: "echo x > 11_runtime/$'events.jsonl'" }, osRoot)))
+check('F1 locale $" quoted redirect denied',
+  !!h.guardReason(exec('bash', { command: 'echo x > 11_runtime/$"events.jsonl"' }, osRoot)))
+check('F1 benign quoted rm stays allowed',
+  !h.guardReason(exec('bash', { command: 'rm "tmp/file"' }, osRoot)))
+check('F1 quoted $-literal outside protected paths stays allowed',
+  !h.guardReason(exec('bash', { command: "echo $'hello' > /tmp/v81-f1-out.txt" }, osRoot)))
+// F2: variable-port loopback hosts stay exempt (regression).
+check('F2 curl localhost:$PORT allowed',
+  (await h.preExecute(exec('bash', { command: 'curl localhost:$PORT' }, osRoot))).kind === 'allow')
+check('F2 curl http://localhost:$PORT/ allowed',
+  (await h.preExecute(exec('bash', { command: 'curl http://localhost:$PORT/' }, osRoot))).kind === 'allow')
+check('F2 curl 127.0.0.1:$PORT/x allowed',
+  (await h.preExecute(exec('bash', { command: 'curl 127.0.0.1:$PORT/x' }, osRoot))).kind === 'allow')
+check('F2 curl evil.example:$PORT denied',
+  (await h.preExecute(exec('bash', { command: 'curl evil.example:$PORT' }, osRoot))).kind === 'deny')
+// F3: local file/dir arguments are not hosts.
+check('F3 chromium ./index.html allowed',
+  (await h.preExecute(exec('bash', { command: 'chromium ./index.html' }, osRoot))).kind === 'allow')
+check('F3 chromium . allowed',
+  (await h.preExecute(exec('bash', { command: 'chromium .' }, osRoot))).kind === 'allow')
+check('F3 open -a Safari ~/Downloads allowed',
+  (await h.preExecute(exec('bash', { command: 'open -a Safari ~/Downloads' }, osRoot))).kind === 'allow')
+check('F3 open -a Safari ~/report.pdf allowed',
+  (await h.preExecute(exec('bash', { command: 'open -a Safari ~/report.pdf' }, osRoot))).kind === 'allow')
+check('F3 open -a Safari /tmp/report.pdf allowed',
+  (await h.preExecute(exec('bash', { command: 'open -a Safari /tmp/report.pdf' }, osRoot))).kind === 'allow')
+check('F3 chromium evil.example denied',
+  (await h.preExecute(exec('bash', { command: 'chromium evil.example' }, osRoot))).kind === 'deny')
+// F4: interp anchors only at command-word position.
+check('F4 echo xargs python3 -c payload stays allowed (data, not an anchor)',
+  !h.guardReason(exec('bash', { command: `echo xargs python3 -c "open('11_runtime/events.jsonl','a').write('x')"` }, osRoot)))
+check('F4 echo marker -exec python3 -c payload stays allowed (data, not an anchor)',
+  !h.guardReason(exec('bash', { command: `echo marker -exec python3 -c "open('11_runtime/events.jsonl','a')"` }, osRoot)))
+check('F4 real find -exec python3 -c payload stays denied',
+  !!h.guardReason(exec('bash', { command: `find . -exec python3 -c "open('11_runtime/events.jsonl','a').write('x')" ;` }, osRoot)))
+check('F4 real xargs -I{} python3 -c payload stays denied',
+  !!h.guardReason(exec('bash', { command: `printf x | xargs -I{} python3 -c "open('11_runtime/events.jsonl','a').write('x')"` }, osRoot)))
+// F5: --url=<value> is a destination.
+check('F5 curl --url=evil.example with loopback URL denied',
+  (await h.preExecute(exec('bash', { command: 'curl --url=evil.example http://localhost:3000' }, osRoot))).kind === 'deny')
+check('F5 curl --url evil.example with loopback URL denied',
+  (await h.preExecute(exec('bash', { command: 'curl --url evil.example http://localhost:3000' }, osRoot))).kind === 'deny')
+check('F5 loopback-only command stays allowed',
+  (await h.preExecute(exec('bash', { command: 'curl http://localhost:3000' }, osRoot))).kind === 'allow')
+// F6: wrapper allow-case pins.
+check('F6 timeout python3 tools/audit.py allowed',
+  !h.guardReason(exec('bash', { command: 'timeout 5 python3 tools/audit.py' }, osRoot)))
+check('F6 sudo python3 tools/audit.py allowed',
+  !h.guardReason(exec('bash', { command: 'sudo -u root python3 tools/audit.py' }, osRoot)))
+check('F6 nohup python3 tools/audit.py allowed',
+  !h.guardReason(exec('bash', { command: 'nohup python3 tools/audit.py &' }, osRoot)))
+check('F6 xargs -I{} python3 tools/audit.py allowed',
+  !h.guardReason(exec('bash', { command: 'xargs -I{} python3 tools/audit.py {}' }, osRoot)))
+check('F6 find . -exec cat {} ; allowed',
+  !h.guardReason(exec('bash', { command: 'find . -exec cat {} ;' }, osRoot)))
+check('F6 timeout curl loopback with flags allowed',
+  (await h.preExecute(exec('bash', { command: 'timeout 30 curl --retry 2 http://localhost:9999/' }, osRoot))).kind === 'allow')
+// F7: interp heads (backticks, command/exec wrappers).
+check('F7 backtick interp payload denied',
+  !!h.guardReason(exec('bash', { command: 'echo `python3 -c "open(\'11_runtime/events.jsonl\',\'a\')"`' }, osRoot)))
+check('F7 command builtin interp payload denied',
+  !!h.guardReason(exec('bash', { command: `command python3 -c "open('11_runtime/events.jsonl','a')"` }, osRoot)))
+check('F7 exec builtin interp payload denied',
+  !!h.guardReason(exec('bash', { command: `exec python3 -c "open('11_runtime/events.jsonl','a')"` }, osRoot)))
+check('F7 grep "python3 -c" data stays allowed',
+  !h.guardReason(exec('bash', { command: 'grep "python3 -c" notes.md' }, osRoot)))
+// F8: net wrappers.
+check('F8 command curl evil denied',
+  (await h.preExecute(exec('bash', { command: 'command curl http://evil.test/' }, osRoot))).kind === 'deny')
+check('F8 exec curl evil denied',
+  (await h.preExecute(exec('bash', { command: 'exec curl http://evil.test/' }, osRoot))).kind === 'deny')
+check('F8 busybox curl evil denied',
+  (await h.preExecute(exec('bash', { command: 'busybox curl http://evil.test/' }, osRoot))).kind === 'deny')
+check('F8 brace group curl evil denied',
+  (await h.preExecute(exec('bash', { command: '{ curl http://evil.test/; }' }, osRoot))).kind === 'deny')
+// F9: R6 schemeless loopback.
+check('F9 playwright open localhost:3000 allowed',
+  (await h.preExecute(exec('bash', { command: 'playwright open localhost:3000' }, osRoot))).kind === 'allow')
+check('F9 playwright open evil.example denied',
+  (await h.preExecute(exec('bash', { command: 'playwright open evil.example' }, osRoot))).kind === 'deny')
+// F10: open -b and wrapped open.
+check('F10 open -b bundle evil dest denied',
+  (await h.preExecute(exec('bash', { command: 'open -b com.apple.Safari evil.example' }, osRoot))).kind === 'deny')
+check('F10 nohup open -a Safari evil dest denied',
+  (await h.preExecute(exec('bash', { command: 'nohup open -a Safari evil.example' }, osRoot))).kind === 'deny')
+// NEW-1: trailing-whitespace URL denies (JS seam pin).
+check('NEW-1 trailing-space URL denies at the JS scope seam',
+  !!scopeReasonFor(osRoot, 'https://t.example '))
+
 rmSync(sandbox, { recursive: true, force: true })
 console.log(`\n${passed}/${passed + failures.length} passed`)
 if (failures.length) {

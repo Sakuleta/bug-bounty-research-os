@@ -422,6 +422,56 @@ module.exports = { chromium: { launchPersistentContext: async () => ({
   rmSync(oldRoot, { recursive: true, force: true })
 }
 
+// ---- F14: workspace detection survives OS_VERSION deletion (any-of markers) ----
+// The runner must find the workspace via the ledger/engagement/runtime dir even
+// with the marker deleted (fail closed the other way: a clean dir still exits 2).
+{
+  const wsRoot = mkdtempSync(join(tmpdir(), 'bua-ws-detect-'))
+  try {
+    mkdirSync(join(wsRoot, '11_runtime'), { recursive: true })
+    mkdirSync(join(wsRoot, '00_control'), { recursive: true })
+    writeFileSync(join(wsRoot, 'OS_VERSION'), '8.1\n')
+    writeFileSync(join(wsRoot, '11_runtime', 'events.jsonl'), '')
+    writeFileSync(join(wsRoot, '00_control', 'engagement.yaml'), 'scope:\n  assets:\n  - "t.example"\n')
+    symlinkSync(join(REPO_ROOT, 'tools'), join(wsRoot, 'tools'), 'dir')
+    const runArgs = () => {
+      try {
+        execFileSync('node', [
+          join(REPO_ROOT, 'tools', 'bua', 'run.mjs'), '--url', 'https://t.example/entry',
+          '--principal', 'ws-detect', '--action', 'stub-ws', '--out-dir', 'artifacts',
+        ], { cwd: wsRoot, encoding: 'utf8' })
+        return null
+      } catch (e) { return e }
+    }
+    rmSync(join(wsRoot, 'OS_VERSION'), { force: true })
+    const threwNoMarker = runArgs()
+    check('F14 workspace without OS_VERSION is still detected (past root discovery, not exit 2)',
+      threwNoMarker !== null && threwNoMarker.status !== 2
+      && !String((threwNoMarker.stdout || '') + (threwNoMarker.stderr || '')).includes('not inside a Research OS workspace'))
+    rmSync(join(wsRoot, '11_runtime', 'events.jsonl'), { force: true })
+    const threwLedgerGone = runArgs()
+    check('F14 engagement.yaml alone still marks the workspace',
+      threwLedgerGone !== null && threwLedgerGone.status !== 2)
+  } finally {
+    rmSync(wsRoot, { recursive: true, force: true })
+  }
+  const cleanRoot = mkdtempSync(join(tmpdir(), 'bua-clean-'))
+  try {
+    let cleanThrew = null
+    try {
+      execFileSync('node', [
+        join(REPO_ROOT, 'tools', 'bua', 'run.mjs'), '--url', 'https://t.example/',
+        '--principal', 'clean', '--action', 'stub-clean', '--out-dir', 'artifacts',
+      ], { cwd: cleanRoot, encoding: 'utf8' })
+    } catch (e) { cleanThrew = e }
+    check('F14 clean non-workspace directory exits 2 (fail closed, none of the markers)',
+      cleanThrew !== null && cleanThrew.status === 2
+      && String((cleanThrew.stdout || '') + (cleanThrew.stderr || '')).includes('not inside a Research OS workspace'))
+  } finally {
+    rmSync(cleanRoot, { recursive: true, force: true })
+  }
+}
+
 console.log(`\n${passed}/${passed + failures.length} passed`)
 if (failures.length) {
   console.log('FAILURES: ' + failures.join(' | '))

@@ -70,6 +70,7 @@ PROBES: list[str] = [
     "http://t.example%5cevil/",
     "http://t.example%5Cevil/",
     "http://t.example\\evil/",
+    "https://t.example ",
     "t.example/a",
 ]
 
