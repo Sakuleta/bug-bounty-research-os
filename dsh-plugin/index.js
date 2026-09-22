@@ -1806,6 +1806,64 @@ function sanitizeTokenIdentity(token) {
   return token
 }
 
+/** Resolve the dedicated browser profile for one controlled browser action.
+ *
+ *  The profile comes from the engagement identity binding
+ *  (`researchctl identity-binding`, parsed from `00_control/identity-binding.yaml`):
+ *  a declared `session.browser_profile` is used verbatim, otherwise the lab
+ *  default — always passed EXPLICITLY, never a silent runner fallback. A garbled
+ *  binding or a profile resolving outside the workspace root fails closed before
+ *  any browser starts. Returns `{profile}` or `{error}`. */
+function browserProfileFor(root) {
+  const DEFAULT_PROFILE = 'lab/bua-profile'
+  let binding
+  try {
+    const out = execFileSync('python3', [join(root, 'tools', 'researchctl.py'), root, 'identity-binding'],
+      { encoding: 'utf8', timeout: 30000 })
+    binding = JSON.parse(out)
+  } catch (e) {
+    return { error: 'the identity binding could not be read (fail closed): ' +
+      String(e && e.message ? e.message : e) + ' — repair 00_control/identity-binding.yaml' }
+  }
+  const declared = binding && typeof binding.browser_profile === 'string' && binding.browser_profile
+    ? binding.browser_profile : DEFAULT_PROFILE
+  const abs = resolve(root, declared)
+  const base = resolve(root)
+  if (abs !== base && !abs.startsWith(base + sep)) {
+    return { error: `the bound browser profile ${JSON.stringify(declared)} resolves outside the workspace root — refusing the browser action (fail closed)` }
+  }
+  return { profile: declared }
+}
+
+/** Pick the runner profile for one dispatch: the live binding first, the
+ *  prepare-time token binding when the seam is down, the lab default loudly last.
+ *
+ *  A malformed binding or an outside-root profile fails closed even when a token
+ *  binding exists (the contract is garbled *now*). An unreadable seam (researchctl
+ *  missing at dispatch) falls back without going silent: the chosen profile rides
+ *  explicitly on the runner command and its run log, and the tool text says so.
+ *  Returns `{profile, note?}` or `{error}`. */
+function resolveBrowserProfile(root, token) {
+  const DEFAULT_PROFILE = 'lab/bua-profile'
+  const insideRoot = (rel) => {
+    const abs = resolve(root, String(rel))
+    const base = resolve(root)
+    return abs === base || abs.startsWith(base + sep)
+  }
+  const live = browserProfileFor(root)
+  if (!live.error) return { profile: live.profile }
+  if (/malformed|outside the workspace root/.test(live.error)) return { error: live.error }
+  const tokenProfile = (token && typeof token.browser_profile === 'string' && token.browser_profile)
+    ? token.browser_profile : ''
+  if (tokenProfile) {
+    if (!insideRoot(tokenProfile)) {
+      return { error: `the token-bound browser profile ${JSON.stringify(tokenProfile)} resolves outside the workspace root — refusing the browser action (fail closed)` }
+    }
+    return { profile: tokenProfile, note: 'identity seam unreadable at dispatch; using the prepare-time profile' }
+  }
+  return { profile: DEFAULT_PROFILE, note: 'identity seam unreadable at dispatch and no token-bound profile; using the lab default explicitly' }
+}
+
 // ---------- policy broker (R7) ----------
 //
 // The broker (tools/broker/) keeps the policy snapshot, the signing key and the
@@ -2384,6 +2442,17 @@ async function runControlledBrowser({ root, args }) {
     log('DENY(executor) dispatch-host browser ' + safeUrl + ' :: ' + dispatchDenied)
     return { ok: false, text: dispatchDenied }
   }
+  // The browser profile is bound, not defaulted: the identity binding declares the
+  // dedicated per-engagement profile and the runner always receives it explicitly.
+  // Prefer the live binding; a token-bound profile covers a dispatch-time seam
+  // outage, and the lab default is the last resort — always explicit, never silent.
+  const resolved = resolveBrowserProfile(root, token)
+  if (resolved.error) {
+    releaseClaim(claim.path)
+    log('DENY(executor) profile browser ' + safeUrl + ' :: ' + resolved.error)
+    return { ok: false, text: `research_os_browser: ${resolved.error}` }
+  }
+  const browserProfile = resolved.profile
   const runner = join(root, 'tools', 'bua', 'run.mjs')
   const rel = join('08_artifacts', 'raw', `${token.action_id}-${new Date().toISOString().replace(/[:.]/g, '-')}.browser.log`)
   const abs = join(root, rel)
@@ -2399,7 +2468,7 @@ async function runControlledBrowser({ root, args }) {
     try {
       dispatched = true
       stdout = execFileSync('node', [runner, '--url', shape.url, '--principal', shape.principal,
-        '--out-dir', '08_artifacts/raw', '--action', token.action_id],
+        '--out-dir', '08_artifacts/raw', '--action', token.action_id, '--profile', browserProfile],
       { cwd: root, encoding: 'utf8', timeout: 180000 })
       exitCode = 0
     } catch (e) {
@@ -2416,7 +2485,7 @@ async function runControlledBrowser({ root, args }) {
       `# action: ${token.action_id} | cycle: ${token.cycle_id} | principal: ${shape.principal} | time: ${new Date().toISOString()}`,
       '',
       '--- runner',
-      `node tools/bua/run.mjs --url ${safeUrl} --principal ${shape.principal} --out-dir 08_artifacts/raw --action ${token.action_id}`,
+      `node tools/bua/run.mjs --url ${safeUrl} --principal ${shape.principal} --out-dir 08_artifacts/raw --action ${token.action_id} --profile ${browserProfile}`,
       `exit: ${exitCode === null ? 'not started' : exitCode}`,
       ...(error ? ['error: ' + error] : []),
       '',
@@ -2436,7 +2505,7 @@ async function runControlledBrowser({ root, args }) {
   const summary = exitCode === 0
     ? 'runner exit 0'
     : `runner ${exitCode === null ? 'not started' : 'exit ' + exitCode}${error ? ' — ' + error : ''}`
-  const base = `research_os_browser ${safeUrl} → ${summary}\n- action: ${token.action_id} (token consumed)\n- evidence: ${recorded && evidence ? evidence : (evidence || 'NOT REGISTERED')}\n- capture: ${relPath}`
+  const base = `research_os_browser ${safeUrl} → ${summary}\n- action: ${token.action_id} (token consumed)\n- profile: ${browserProfile}${resolved.note ? ' (' + resolved.note + ')' : ''}\n- evidence: ${recorded && evidence ? evidence : (evidence || 'NOT REGISTERED')}\n- capture: ${relPath}`
   // Once the runner was started, a failed receipt must surface even on a non-zero exit.
   if (dispatched && !receipted) {
     return { ok: false, text: `${base}\n\nWARNING: ${RECEIPT_FAILURE_WARNING}` }
@@ -2537,5 +2606,5 @@ export { name, inject, apply }
 // Test surface (pure helpers + executor core): conformance and integration suites.
 export { canonicalDigest, shapeFromArgs, browserShapeFromArgs, loadTokenStates, selectToken, runControlledRequest, runControlledBrowser, scopeReasonFor, redactSecrets, redactHeaderLine, redactUrlSecrets, redactShapeForText, mentionsProtected }
 export { brokerPath, brokerWorkspace, brokerCall, brokerConsumeToken, consumeBrokerToken, brokerPolicyGet, brokerScopeReason }
-export { claimToken, dispatchHostReason, safeTokenSegment, sanitizeTokenIdentity }
+export { claimToken, dispatchHostReason, safeTokenSegment, sanitizeTokenIdentity, browserProfileFor }
 export { scopeSyncDirtyReason }

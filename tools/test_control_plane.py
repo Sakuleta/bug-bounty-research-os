@@ -3286,5 +3286,68 @@ try:
 except ValueError as exc:
     check("v8.2 W9: the snapshot is immutable", "immutable" in str(exc))
 
+# v8.2 W2: identity binding — declared accounts enforced at prepare, malformed
+# fails closed, absent/placeholder allows with an audit warning; the browser
+# profile rides the token explicitly and outside-root profiles are refused.
+_BINDING = (
+    "binding_version: 1\nengagement: probe\nplatform: DIRECT\nprogram: Probe\n"
+    "expected_identity:\n  public_handle: researcher-x\n  account_reference: acct-binding-1\n"
+    "session:\n  browser_profile: lab/bua-prog\n  session_must_match_identity: true\n"
+    "  cross_engagement_session_reuse: false\n")
+
+
+def _w2_root(binding: str | None = _BINDING) -> tuple:
+    r, c = _w7_root()
+    if binding is not None:
+        (r / "00_control/identity-binding.yaml").write_text(binding)
+    return r, c
+
+
+_nr2, _nc2 = _w2_root()
+try:
+    _nc2.prepare_action({**_w7_action(), "account": "intruder-acct"})
+    check("v8.2 W2: prepare refuses an account outside the binding", False)
+except ValueError as exc:
+    check("v8.2 W2: prepare refuses an account outside the binding", "identity binding" in str(exc))
+_tok2 = _nc2.prepare_action({**_w7_action(), "account": "acct-binding-1"})
+check("v8.2 W2: prepare allows the bound account", _tok2["action_id"].startswith("A-"))
+_browser_payload = {**_w7_action(), "account": "acct-binding-1", "tool_family": "browser",
+                    "request_shape": {"url": "https://example.test/app", "principal": "researcher-A"}}
+_tok2b = _nc2.prepare_action(_browser_payload)
+check("v8.2 W2: browser prepare binds the declared profile",
+      _tok2b.get("browser_profile") == "lab/bua-prog")
+_nr2m, _nc2m = _w2_root("expected_identity:\n\taccount_reference: x\n")
+try:
+    _nc2m.prepare_action({**_w7_action(), "account": "acct-binding-1"})
+    check("v8.2 W2: malformed binding fails prepare closed", False)
+except ValueError as exc:
+    check("v8.2 W2: malformed binding fails prepare closed", "malformed" in str(exc))
+_nr2a, _nc2a = _w2_root(None)
+_tok2a = _nc2a.prepare_action(_w7_action())
+check("v8.2 W2: absent binding allows prepare (template workspaces)",
+      _tok2a["action_id"].startswith("A-"))
+_nr2p, _nc2p = _w2_root(
+    "binding_version: 1\nexpected_identity:\n  account_reference: <NON_SECRET_ACCOUNT_REFERENCE>\n"
+    "session:\n  browser_profile: <DEDICATED_BROWSER_PROFILE>\n")
+_tok2p = _nc2p.prepare_action(_w7_action())
+check("v8.2 W2: placeholder-only binding allows prepare",
+      _tok2p["action_id"].startswith("A-")
+      and _nc2p.prepare_action({**_browser_payload, "account": "researcher-A"}).get("browser_profile") == "lab/bua-profile")
+_nr2o, _nc2o = _w2_root(_BINDING.replace("lab/bua-prog", "../outside"))
+try:
+    _nc2o.prepare_action(_browser_payload)
+    check("v8.2 W2: outside-root profiles are refused", False)
+except ValueError as exc:
+    check("v8.2 W2: outside-root profiles are refused", "outside the workspace" in str(exc))
+_sub2 = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nr2a)],
+                       capture_output=True, text=True)
+check("v8.2 W2: missing binding warns the audit",
+      _sub2.returncode == 0 and "identity binding" in (_sub2.stdout + _sub2.stderr))
+_nc2.record_action({**_w7_action(), "account": "intruder-acct"})
+_sub2m = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nr2)],
+                        capture_output=True, text=True)
+check("v8.2 W2: the audit errors on an action outside the binding",
+      _sub2m.returncode != 0 and "identity binding" in (_sub2m.stdout + _sub2m.stderr))
+
 
 print(f"\n{len(passed)} checks passed")

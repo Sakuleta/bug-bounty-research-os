@@ -228,6 +228,9 @@ def main() -> int:
     w = sub.add_parser("worker")
     w.add_argument("json")
     w.set_defaults(fn="worker")
+    ib = sub.add_parser("identity-binding", help="print the parsed engagement identity binding "
+                                                 "(account reference, browser profile, session flags)")
+    ib.set_defaults(fn="identity-binding")
     ri = sub.add_parser("review-issue", help="issue a broker-attested review voucher for a "
                                              "review packet and embed it as review.attestation "
                                              "(one voucher per axis; the broker must be running)")
@@ -321,6 +324,14 @@ def main() -> int:
             out = cp.set_budget(load_json(ns.json))
         elif ns.fn == "worker":
             out = cp.merge_worker(load_json(ns.json))
+        elif ns.fn == "identity-binding":
+            from control_plane import identity_binding as _binding
+            binding = _binding(Path(ns.root))
+            if isinstance(binding, str):
+                raise ValueError(
+                    "00_control/identity-binding.yaml is present but malformed — repair the "
+                    "expected_identity/session contract (fail closed)")
+            out = {"binding_present": binding is not None, **(binding or {})}
         elif ns.fn == "review-issue":
             from control_plane import review_packet_digest as _packet_digest
             packet = load_json(ns.json)

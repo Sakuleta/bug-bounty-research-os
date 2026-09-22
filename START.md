@@ -40,7 +40,7 @@ OBSERVE
 
 ## Identity binding
 
-`00_control/identity-binding.yaml` defines the only research identity and session context permitted for this workspace. Before authenticated or identity-sensitive actions:
+`00_control/identity-binding.yaml` declares the research identity and session context for this workspace, and the tools enforce it — it is not prose. Before authenticated or identity-sensitive actions:
 
 ```text
 EXPECTED IDENTITY
@@ -48,7 +48,7 @@ EXPECTED IDENTITY
 → MATCH
 ```
 
-Do not infer identity from the workspace name, email filename, or conversation memory. If the active session does not match, repair or switch to the dedicated authorized session autonomously when possible. Ask the researcher only for a genuinely human-owned authentication factor or an explicit decision. Never mix credentials, sessions, artifacts, evidence, or state across engagements.
+Machine-checked: `researchctl prepare` refuses a live preflight whose `account` differs from the bound `expected_identity.account_reference` (a garbled binding file fails closed too); the browser executor passes the bound `session.browser_profile` to `tools/bua/run.mjs` explicitly and refuses profiles outside the workspace; `tools/audit.py` errors on recorded actions outside the binding and warns when no identity is declared (template workspaces with `<placeholder>` values). Do not infer identity from the workspace name, email filename, or conversation memory. If the active session does not match, repair or switch to the dedicated authorized session autonomously when possible. Ask the researcher only for a genuinely human-owned authentication factor or an explicit decision. Never mix credentials, sessions, artifacts, evidence, or state across engagements.
 
 ## Before every live action
 

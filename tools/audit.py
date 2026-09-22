@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from control_plane import (CYCLE_EDGES, EVENT_TYPES, HYP_EDGES, KNOWLEDGE_RESOLUTIONS,  # noqa: E402
                            METHOD_SELF_ATTACK_ROWS, REQUIRED_AUDIT_CLASSES, TECHNIQUE_RESULTS,
                            ControlPlane, asset_hosts, broker_consumed_nonces, budget_limits,
-                           engagement_assets, evidence_id_ok, host_in_scope,
+                           engagement_assets, evidence_id_ok, host_in_scope, identity_binding,
                            never_considered_in_window, normalize_cycle_state, pack_change_problem,
                            review_packet_digest, review_quote_problem, scope_check,
                            secret_pattern_hits, sha256_file, snapshot_demands)
@@ -675,6 +675,35 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
             errors.append(message)
         else:
             warnings.append(f"legacy action record (pre-7.3, no os_version): {message}")
+
+    # Identity binding: the workspace declares its one research identity; recorded
+    # action accounts must carry it. No binding file (or a placeholder-only one, as
+    # templates ship) warns; a garbled binding errors; a mismatched account on a
+    # versioned action errors (legacy warns).
+    binding = identity_binding(root)
+    if isinstance(binding, str):
+        errors.append(
+            "00_control/identity-binding.yaml is present but malformed — repair the "
+            "expected_identity/session contract; live actions are refused until then"
+        )
+    elif binding is None or not binding["account_reference"]:
+        warnings.append(
+            "no declared research identity binding (00_control/identity-binding.yaml "
+            "missing or placeholder-only) — record the engagement identity before live work"
+        )
+    else:
+        reference = binding["account_reference"]
+        for e in events:
+            if e.get("type") != "ACTION_RECORDED":
+                continue
+            account = str((e.get("payload") or {}).get("account", "")).strip()
+            if account and account != reference:
+                message = (f"action {e.get('entity_id')} account {account!r} does not match "
+                           f"the identity binding ({reference!r})")
+                if e.get("os_version"):
+                    errors.append(message)
+                else:
+                    warnings.append(f"legacy action record (pre-7.3, no os_version): {message}")
 
     # Scope is a live invariant: each recorded action is re-checked against the CURRENT
     # asset list, so a scope narrowed after the fact cannot stay silent. request_shape.url

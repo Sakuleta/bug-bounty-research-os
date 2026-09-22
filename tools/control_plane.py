@@ -426,6 +426,93 @@ def external_judgment_allowed(root: Path) -> bool:
 
 BUDGET_MALFORMED = "malformed"
 BUDGET_KEYS = ("max_actions_per_cycle", "max_actions_per_engagement")
+IDENTITY_BINDING_REL = "00_control/identity-binding.yaml"
+IDENTITY_MALFORMED = "malformed"
+
+
+def _unquote_scalar(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def _is_binding_placeholder(value: str) -> bool:
+    """`<...>` template values are ABSENT, not literals (mirrors build_context)."""
+    return bool(re.fullmatch(r"<[^<>]*>", value.strip()))
+
+
+def _parse_binding_bool(value: str) -> bool | None:
+    text = _unquote_scalar(value).strip().lower()
+    if text == "true":
+        return True
+    if text == "false":
+        return False
+    return None
+
+
+def identity_binding(root: Path) -> dict[str, Any] | str | None:
+    """Parse the engagement identity binding (`00_control/identity-binding.yaml`).
+
+    Returns None when the file is absent (template workspaces: callers allow and
+    the audit warns); a dict with `account_reference` / `browser_profile` (None
+    when undeclared — `<placeholder>` values count as absent), plus
+    `session_must_match_identity` (default True) and
+    `cross_engagement_session_reuse` (default False); and the IDENTITY_MALFORMED
+    marker when the file exists but is not a readable binding (callers fail
+    closed — a garbled contract must never read as "no binding").
+    """
+    path = Path(root) / IDENTITY_BINDING_REL
+    if not path.is_file():
+        return None
+    try:
+        lines = path.read_text(errors="strict").splitlines()
+    except OSError:
+        return IDENTITY_MALFORMED
+    section: str | None = None
+    fields: dict[str, str] = {}
+    for lineno, raw in enumerate(lines, 1):
+        line = raw.split("#", 1)[0] if not raw.lstrip().startswith("#") else ""
+        # A `#` inside a quoted scalar is data, not a comment — re-take it.
+        stripped = raw.strip()
+        if stripped and stripped[0] not in {"#"} and "#" in line:
+            for quote in ("'", '"'):
+                if stripped.count(quote) >= 2:
+                    first, last = stripped.find(quote), stripped.rfind(quote)
+                    if "#" in stripped[first:last + 1]:
+                        line = raw
+                        break
+        if not line.strip():
+            continue
+        if "\t" in raw:
+            return IDENTITY_MALFORMED
+        if not raw[0] in {" ", "\t"}:
+            m = re.match(r"^([A-Za-z0-9_.-]+):\s*(.*?)\s*$", line.strip())
+            if not m:
+                return IDENTITY_MALFORMED
+            key, value = m.group(1), m.group(2)
+            section = key if not value else None
+            if value:
+                fields[f"{key}"] = value
+        else:
+            m = re.match(r"^\s+([A-Za-z0-9_.-]+):\s*(.*?)\s*$", line.rstrip())
+            if not m or section is None:
+                return IDENTITY_MALFORMED
+            fields[f"{section}.{m.group(1)}"] = m.group(2)
+    account = _unquote_scalar(fields.get("expected_identity.account_reference", ""))
+    profile = _unquote_scalar(fields.get("session.browser_profile", ""))
+    must_match_raw = fields.get("session.session_must_match_identity")
+    reuse_raw = fields.get("session.cross_engagement_session_reuse")
+    must_match = True if must_match_raw is None else _parse_binding_bool(must_match_raw)
+    reuse = False if reuse_raw is None else _parse_binding_bool(reuse_raw)
+    if must_match is None or reuse is None:
+        return IDENTITY_MALFORMED
+    return {
+        "account_reference": None if (not account or _is_binding_placeholder(account)) else account,
+        "browser_profile": None if (not profile or _is_binding_placeholder(profile)) else profile,
+        "session_must_match_identity": must_match,
+        "cross_engagement_session_reuse": reuse,
+    }
 
 # Durable scope-sync marker (11_runtime/.scope-sync-dirty): present while the local
 # scope binding was committed but the broker push failed or was refused. Browser
@@ -2835,6 +2922,24 @@ class ControlPlane:
         hyp = str(action.get("hypothesis", ""))
         if hyp.startswith("H-") and self.hypothesis_status(hyp) is None:
             raise ValueError(f"live-action preflight references unknown hypothesis: {hyp}")
+        # Identity binding: the workspace declares its one research identity, and a
+        # live preflight must carry it. A garbled binding fails closed; an absent
+        # (or placeholder-only) binding leaves the account unchecked (template
+        # workspaces) while the audit warns.
+        binding = identity_binding(self.root)
+        if isinstance(binding, str):
+            raise ValueError(
+                "00_control/identity-binding.yaml is present but malformed — repair the "
+                "expected_identity/session contract before any live action (fail closed)"
+            )
+        if binding is not None and binding["account_reference"] and binding["session_must_match_identity"]:
+            account = str(action.get("account") or "").strip()
+            if account != binding["account_reference"]:
+                raise ValueError(
+                    f"preflight account {account!r} does not match the workspace identity binding "
+                    f"({binding['account_reference']!r} in 00_control/identity-binding.yaml) — "
+                    "live actions run under the bound research identity only"
+                )
         shape = action.get("request_shape")
         if not isinstance(shape, dict) or not shape:
             raise ValueError("request_shape must be a non-empty object (canonical digest input)")
@@ -2888,13 +2993,14 @@ class ControlPlane:
             if client is None:
                 existing = self._read_events()
                 aid = self._next_action_id(existing)
+                family = str(action.get("tool_family", "http"))
                 token = {
                     "action_id": aid,
                     "nonce": secrets.token_hex(16),
                     "issued_at": now(),
                     "expires_at": datetime.fromtimestamp(issued + max(30, int(ttl_seconds)),
                                                          tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "tool_family": str(action.get("tool_family", "http")),
+                    "tool_family": family,
                     "argument_digest": digest,
                     "cycle_id": cycle_id,
                     "hypothesis": hyp,
@@ -2904,6 +3010,8 @@ class ControlPlane:
                     # executor can write ACTION_RECORDED after the call without re-typing it.
                     "preflight": redact(dict(normalized)),
                 }
+                if family == "browser":
+                    token["browser_profile"] = self._bound_browser_profile()
             else:
                 token = self._broker_token(client, normalized, shape, digest, cycle_id, hyp, ttl_seconds)
             # The token store and the prepare output are audit-visible: scrub the same
@@ -2915,6 +3023,32 @@ class ControlPlane:
                 fh.write(_json_dump(token) + "\n")
         self.refresh()
         return token
+
+    def _bound_browser_profile(self) -> str:
+        """The dedicated runner profile for a browser preflight, validated.
+
+        The engagement identity binding declares it; an absent (or
+        placeholder-only) binding means the lab default — always explicit, never
+        a silent runner fallback. A garbled binding or a profile outside the
+        workspace root fails closed before any token is minted.
+        """
+        binding = identity_binding(self.root)
+        if isinstance(binding, str):
+            raise ValueError(
+                "00_control/identity-binding.yaml is present but malformed — repair the "
+                "expected_identity/session contract before any live action (fail closed)"
+            )
+        profile = ((binding or {}).get("browser_profile") or "lab/bua-profile").strip()
+        if not profile:
+            profile = "lab/bua-profile"
+        try:
+            (self.root / profile).resolve().relative_to(self.root)
+        except ValueError:
+            raise ValueError(
+                f"the bound browser profile {profile!r} resolves outside the workspace root — "
+                "point session.browser_profile at a dedicated profile inside the workspace"
+            ) from None
+        return profile
 
     def _require_broker_policy(self, client) -> None:
         """A present broker is the token authority: no policy means no token (fail closed)."""
@@ -2956,7 +3090,7 @@ class ControlPlane:
             raise ValueError(
                 "the broker digest disagrees with the local canonical digest — refusing the token "
                 "(canonicalization drift between prepare and the broker)")
-        return {
+        mirror = {
             "action_id": minted["action_id"],
             "nonce": minted["nonce"],
             "broker_nonce": minted["nonce"],
@@ -2972,6 +3106,9 @@ class ControlPlane:
             "consumed": False,
             "preflight": redact(dict(normalized)),
         }
+        if family == "browser":
+            mirror["browser_profile"] = self._bound_browser_profile()
+        return mirror
 
     def request_gate(self, gid: str, request: dict[str, Any], actor: str = "controller") -> dict[str, Any]:
         if not gate_id_ok(gid):

@@ -662,6 +662,34 @@ check('a non-zero browser runner with a failed receipt still carries the warning
   check('the runner refuses a path-shaped --action label', exited === 2)
 }
 
+// 10g. v8.2 W2: the bound browser profile reaches the runner explicitly.
+{
+  cpSync(join(OS_REPO, 'tools', 'bua', 'run.mjs'), join(root, 'tools', 'bua', 'run.mjs'))
+  writeFileSync(join(root, '00_control', 'identity-binding.yaml'),
+    'binding_version: 1\nengagement: exec\nplatform: DIRECT\nprogram: Exec\n'
+    + 'expected_identity:\n  public_handle: researcher-A\n  account_reference: researcher-A\n'
+    + 'session:\n  browser_profile: lab/bua-w2\n  session_must_match_identity: true\n'
+    + '  cross_engagement_session_reuse: false\n')
+  writeFileSync(join(root, 'tools', 'bua', 'run.mjs'), [
+    "import { mkdirSync, writeFileSync } from 'node:fs'",
+    "import { join } from 'node:path'",
+    "mkdirSync('08_artifacts/raw', { recursive: true })",
+    "writeFileSync(join('08_artifacts/raw', 'argv.json'), JSON.stringify(process.argv.slice(2)))",
+    "writeFileSync(join('08_artifacts/raw', 'stub.png'), 'png')",
+    "console.log('stub runner ok')",
+    'process.exit(0)',
+  ].join('\n') + '\n')
+  const browserUrl = new URL('/w2', url).toString()
+  writeFileSync(preparePath, JSON.stringify({ ...preparePayload, target: browserUrl, tool_family: 'browser', request_shape: browserShapeFromArgs({ url: browserUrl, principal: 'researcher-A' }) }))
+  const prepared = JSON.parse(execFileSync('python3', [join(root, 'tools', 'researchctl.py'), root, 'prepare', preparePath], { encoding: 'utf8', timeout: 60000 }))
+  check('browser prepare binds the declared profile', prepared.browser_profile === 'lab/bua-w2')
+  const w2 = await runControlledBrowser({ root, args: { url: browserUrl, principal: 'researcher-A' } })
+  const seenArgv = JSON.parse(readFileSync(join(root, '08_artifacts', 'raw', 'argv.json'), 'utf8'))
+  check('the executor passes the bound profile explicitly, never the silent default',
+    w2.ok === true && seenArgv.includes('--profile') && seenArgv[seenArgv.indexOf('--profile') + 1] === 'lab/bua-w2'
+    && w2.text.includes('profile: lab/bua-w2'))
+}
+
 server.close()
 rmSync(root, { recursive: true, force: true })
 console.log(`\n${passed}/${passed + failures.length} passed`)
