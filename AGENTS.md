@@ -37,7 +37,23 @@ Choice with a `none` option, IDF fallback without `TYPESAFE_API_KEY`). USE means
 loading the pack's skill at `.dsh/skills/<pack>/SKILL.md`, which points at the field
 guide. When the technology is unfamiliar or the last current-research check is stale
 (`researchctl freshness status`), run web research first and record references; never
-replay public exploits without proving architectural relevance.
+replay public exploits without proving architectural relevance. Every triage disposition
+feeds the usage projection (`10_learning/knowledge-usage.yaml`, `researchctl knowledge
+usage`), and a `TECHNIQUE_EVALUATED` payload may cite the packs it used through the
+optional `knowledge_packs` list — packs never considered stay visible instead of rotting
+(the audit warns about packs not considered in the last 10 cycles, first 10 names).
+
+Promotion back into `12_knowledge/` is reviewed and proven, never silent: `researchctl
+knowledge propose` redacts the title/body, writes the proposal under the protected
+`10_learning/knowledge-proposals/` (the enforcer denies writes and destructive targets
+there) and records the artifact's `body_sha256` plus a `pack_digests` snapshot of every
+INDEX-declared pack file. `researchctl knowledge resolve <KP-id> APPLIED|REJECTED
+--reference <human ref> [--gate G-xxxx]` resolves it: APPLIED recomputes the digests and
+refuses unless real content differs (a timestamp touch is refused; missing/unreadable
+files are errors), `--reference` is recorded friction, not proof, and `--gate` binds the
+resolution to an existing RESOLVED human gate. The audit re-validates resolutions, pack
+names and proposal digests, so a hand edit cannot smuggle a false APPLIED or a
+digest-less proposal past it.
 
 A cycle ends in exactly one of: verified result, false positive, named blocker,
 non-applicability decision, or a newly justified next hypothesis. Never run large

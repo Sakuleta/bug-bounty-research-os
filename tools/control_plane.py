@@ -23,7 +23,14 @@ from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import unquote
 
-from knowledge_index import index_problem, selection_cap, selection_query, top_packs
+from knowledge_index import (
+    index_problem,
+    parse_index,
+    resolve_ref,
+    selection_cap,
+    selection_query,
+    top_packs,
+)
 
 CYCLE_EDGES = {
     "PLANNED": {"READY", "BLOCKED"},
@@ -64,6 +71,7 @@ EVENT_TYPES = {
     "HYPOTHESIS_CREATED", "HYPOTHESIS_UPDATED", "HYPOTHESIS_TRANSITIONED",
     "EVIDENCE_REGISTERED", "ACTION_RECORDED", "TECHNIQUE_EVALUATED", "WORKER_RESULT",
     "HUMAN_GATE_REQUESTED", "HUMAN_GATE_RESOLVED", "AUDIT_RECORDED", "FRESHNESS_RECORDED",
+    "KNOWLEDGE_PROPOSED", "KNOWLEDGE_RESOLVED",
     "STATE_CHANGE", "NOTE", "SCOPE_CHANGED", "BUDGET_CHANGED",
 }
 HUMAN_GATE_DECISIONS = {"RESUME", "PROVIDED", "APPROVED", "DENIED", "CANCELLED"}
@@ -73,6 +81,11 @@ EVIDENCE_STORE = "11_runtime/evidence-store"
 FRESHNESS_DEFAULT_MAX_AGE_DAYS = 14
 CYCLE_TYPES = {"DISCOVERY", "HYPOTHESIS", "VALIDATION", "AUDIT", "RESEARCH"}
 TRIAGE_VERDICTS = {"USE", "SKIP"}
+# Reviewed promotion path (backlog #28): a pack proposal is a reviewed artifact, not a
+# note. The body floor keeps a proposal reviewable; the title reuses the shared sentence
+# rule so a placeholder can never stand in for a claim.
+KNOWLEDGE_PROPOSAL_BODY_MIN = 80
+KNOWLEDGE_RESOLUTIONS = {"APPLIED", "REJECTED"}
 # Controlled vocabulary for technique outcomes. Free-text results were the root of the
 # "learning never reaches a file" failure; a closed enum can be projected and audited.
 TECHNIQUE_RESULTS = {"CONFIRMED", "FALSE_POSITIVE", "NOT_APPLICABLE", "INCONCLUSIVE", "NEGATIVE"}
@@ -458,6 +471,31 @@ def sentence_too_thin(value: str) -> bool:
     """
     stripped = str(value or "").strip()
     return len(stripped) < 20 or len(stripped.split()) < 3
+
+
+def never_considered_packs(usage: dict[str, Any]) -> list[str]:
+    """All-time view: zero use, zero skip, zero cited.
+
+    Shared by `researchctl knowledge usage` and its `--unused` filter, so the CLI and
+    the filter cannot drift apart.
+    """
+    return [name for name, row in usage["packs"].items()
+            if not (row["use"] or row["skip"] or row["cited"])]
+
+
+def never_considered_in_window(usage: dict[str, Any], cycle_ids: list[str],
+                               window: int = 10) -> list[str]:
+    """Packs with no disposition and no citation in the last `window` cycles.
+
+    The all-time view answers "has this pack ever been considered?"; this windowed
+    view answers "is it being considered now?", so the audit can surface a pack that
+    was used once and then silently abandoned. Citation cycles come from the
+    TECHNIQUE_EVALUATED event's cycle_id.
+    """
+    recent = set(cycle_ids[-window:]) if window > 0 else set(cycle_ids)
+    return [name for name, row in usage["packs"].items()
+            if not (set(row["cycles"]) & recent)
+            and not (set(row.get("cited_cycles") or []) & recent)]
 
 
 def review_quote_problem(root: Path, index: dict[str, dict[str, Any]], item: Any, i: int,
@@ -1217,6 +1255,25 @@ class ControlPlane:
         if not refs:
             raise ValueError("technique evaluation requires evidence_refs")
         data["result"] = result
+        packs = data.get("knowledge_packs")
+        if packs is not None:
+            if not isinstance(packs, list) or any(not isinstance(p, str) for p in packs):
+                raise ValueError("technique evaluation knowledge_packs must be a list of pack names")
+            problem = index_problem(self.root)
+            if problem:
+                raise ValueError(
+                    "knowledge index missing/unparseable — cannot validate knowledge_packs "
+                    f"({problem})"
+                )
+            named = [p.strip() for p in packs]
+            known = set(self.indexed_packs())
+            bad = [p or "<empty>" for p in named if p not in known]
+            if bad:
+                raise ValueError(
+                    f"unknown knowledge pack in knowledge_packs: {', '.join(bad)} — "
+                    "cite packs listed in 12_knowledge/INDEX.yaml"
+                )
+            data["knowledge_packs"] = named
         with _lock(self.root):
             self._validate_refs(refs)
             events = self._read_events()
@@ -1228,6 +1285,392 @@ class ControlPlane:
             event = self._append_locked("TECHNIQUE_EVALUATED", "technique", tid, actor=actor,
                                         reason=f"technique evaluated: {result}", evidence_refs=refs,
                                         payload=data, cycle_id=cid)
+        self.refresh()
+        return event
+
+    # ---------- knowledge lifecycle: usage telemetry + reviewed promotion ----------
+    def indexed_packs(self) -> list[str]:
+        """Pack names listed in 12_knowledge/INDEX.yaml, sorted; [] when unreadable."""
+        idx = self.root / "12_knowledge" / "INDEX.yaml"
+        if not idx.is_file() or index_problem(self.root):
+            return []
+        return sorted(parse_index(idx))
+
+    def knowledge_usage(self) -> dict[str, Any]:
+        """Per-pack disposition and citation counters derived from the existing ledger.
+
+        One disposition per (cycle, pack): the latest CYCLE_CREATED/CYCLE_UPDATED
+        `knowledge_triage` list for a cycle replaces the earlier list (CYCLE_UPDATED can
+        rewrite triage) and the latest row for a duplicate pack inside a list wins, so a
+        pack counts at most once per cycle. A row counts only when complete: pack a
+        non-empty string (a non-string pack is skipped, never stringified), verdict in
+        USE/SKIP and a non-empty reason. Citations come from the optional
+        `knowledge_packs` list on TECHNIQUE_EVALUATED payloads, deduplicated per event
+        (set semantics) and attributed to the event's cycle. Indexed packs with no events
+        stay at zero, which is what makes "never considered" visible.
+        """
+        use: dict[str, int] = {}
+        skip: dict[str, int] = {}
+        cited: dict[str, int] = {}
+        last_used: dict[str, str] = {}
+        last_cited: dict[str, str] = {}
+        cycles: dict[str, list[str]] = {}
+        cited_cycles: dict[str, list[str]] = {}
+        per_cycle: dict[str, dict[str, dict[str, Any]]] = {}
+
+        def note(store: dict[str, str], pack: str, when: Any) -> None:
+            if when and (pack not in store or str(when) > store[pack]):
+                store[pack] = str(when)
+
+        def note_cycle(store: dict[str, list[str]], pack: str, cid: str) -> None:
+            if cid and cid not in store.setdefault(pack, []):
+                store[pack].append(cid)
+
+        for e in self._read_events():
+            etype = e.get("type")
+            if etype in {"CYCLE_CREATED", "CYCLE_UPDATED"}:
+                triage = (e.get("payload") or {}).get("knowledge_triage")
+                if not isinstance(triage, list):
+                    continue
+                cid = str(e.get("cycle_id") or e.get("entity_id") or "")
+                rows: dict[str, dict[str, Any]] = {}
+                for entry in triage:
+                    if not isinstance(entry, dict):
+                        continue
+                    pack = entry.get("pack")
+                    verdict = entry.get("verdict")
+                    reason = entry.get("reason")
+                    if not isinstance(pack, str) or not pack.strip():
+                        continue
+                    if not isinstance(verdict, str) or verdict.strip().upper() not in TRIAGE_VERDICTS:
+                        continue
+                    if not isinstance(reason, str) or not reason.strip():
+                        continue
+                    rows[pack.strip()] = {"verdict": verdict.strip().upper(), "time": e.get("time")}
+                per_cycle[cid] = rows
+            elif etype == "TECHNIQUE_EVALUATED":
+                packs = (e.get("payload") or {}).get("knowledge_packs")
+                if not isinstance(packs, list):
+                    continue
+                cid = str(e.get("cycle_id") or "")
+                for name in sorted({p.strip() for p in packs
+                                    if isinstance(p, str) and p.strip()}):
+                    cited[name] = cited.get(name, 0) + 1
+                    note(last_cited, name, e.get("time"))
+                    note_cycle(cited_cycles, name, cid)
+
+        for cid, rows in per_cycle.items():
+            for pack, row in rows.items():
+                note_cycle(cycles, pack, cid)
+                if row["verdict"] == "USE":
+                    use[pack] = use.get(pack, 0) + 1
+                    note(last_used, pack, row["time"])
+                else:
+                    skip[pack] = skip.get(pack, 0) + 1
+
+        names = sorted(set(self.indexed_packs()) | set(use) | set(skip) | set(cited)
+                       | set(cycles) | set(cited_cycles))
+        packs = {
+            name: {
+                "use": use.get(name, 0),
+                "skip": skip.get(name, 0),
+                "cited": cited.get(name, 0),
+                "last_used": last_used.get(name),
+                "last_cited": last_cited.get(name),
+                "cycles": cycles.get(name, []),
+                "cited_cycles": cited_cycles.get(name, []),
+            }
+            for name in names
+        }
+        return {
+            "totals": {"use": sum(use.values()), "skip": sum(skip.values()), "cited": sum(cited.values())},
+            "packs": packs,
+        }
+
+    def _write_knowledge_usage_projection(self) -> None:
+        usage = self.knowledge_usage()
+        p = self.root / "10_learning" / "knowledge-usage.yaml"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        lines = [GENERATED_HEADER, "totals:"]
+        for key in ("use", "skip", "cited"):
+            lines.append(f"  {key}: {usage['totals'][key]}")
+        if not usage["packs"]:
+            lines.append("packs: {}")
+        else:
+            lines.append("packs:")
+            for name, row in usage["packs"].items():
+                lines.append(f"  {json.dumps(name)}:")
+                for key in ("use", "skip", "cited"):
+                    lines.append(f"    {key}: {row[key]}")
+                lines.append(f"    last_used: {json.dumps(row['last_used'])}")
+                lines.append(f"    last_cited: {json.dumps(row['last_cited'])}")
+                lines.append(f"    cycles: {json.dumps(row['cycles'])}")
+                lines.append(f"    cited_cycles: {json.dumps(row['cited_cycles'])}")
+        p.write_text("\n".join(lines) + "\n")
+
+    def knowledge_propose(self, payload: dict[str, Any], actor: str = "controller") -> dict[str, Any]:
+        """Write a proposal file and record KNOWLEDGE_PROPOSED.
+
+        The proposal is the reviewable artifact: title and body are redacted before they
+        reach disk (the ledger redacts on write, so file and ledger must agree) and must be
+        real content, the pack must exist, the optional technique_ref must name a recorded
+        technique, and an optional recheck_date must be a future YYYY-MM-DD. The event
+        snapshots every INDEX-declared pack file digest plus the artifact digest, so APPLIED
+        can later prove a CONTENT change — a timestamp touch is not an edit. Ids run KP-0001
+        upward from the recorded count and skip any collision, so a retry after a partial
+        failure lands on the same id.
+        """
+        data = dict(payload)
+        problem = index_problem(self.root)
+        if problem:
+            raise ValueError(
+                f"knowledge index missing/unparseable — cannot validate pack ({problem})"
+            )
+        pack = str(data.get("pack", "")).strip()
+        if pack not in self.indexed_packs():
+            raise ValueError(
+                f"unknown knowledge pack: {pack or '<empty>'} — not listed in 12_knowledge/INDEX.yaml"
+            )
+        title = redact(str(data.get("title", "")).strip())
+        if sentence_too_thin(title):
+            raise ValueError(
+                "knowledge proposal title must be a real sentence (>= 20 characters, >= 3 words) — "
+                "name what the pack should record"
+            )
+        body = redact(str(data.get("body", "")).strip())
+        if len(body) < KNOWLEDGE_PROPOSAL_BODY_MIN:
+            raise ValueError(
+                f"knowledge proposal body must be at least {KNOWLEDGE_PROPOSAL_BODY_MIN} characters "
+                "of real content — the proposal is the reviewable artifact"
+            )
+        technique_ref = str(data.get("technique_ref") or "").strip()
+        if technique_ref and not any(
+            e.get("type") == "TECHNIQUE_EVALUATED" and e.get("entity_id") == technique_ref
+            for e in self.events_for("technique", technique_ref)
+        ):
+            raise ValueError(
+                f"unknown technique_ref: {technique_ref} — record the technique first with "
+                "researchctl technique evaluate"
+            )
+        refs = [str(r) for r in (data.get("evidence_refs") or [])]
+        recheck = str(data.get("recheck_date") or "").strip()
+        if recheck:
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", recheck):
+                raise ValueError("recheck_date must be YYYY-MM-DD")
+            today = datetime.now(timezone.utc).date()
+            if datetime.strptime(recheck, "%Y-%m-%d").date() <= today:
+                raise ValueError(f"recheck_date must be in the future (today: {today.isoformat()})")
+        pack_digests: dict[str, str] = {}
+        for declared in parse_index(self.root / "12_knowledge" / "INDEX.yaml").get(pack, ([], []))[1]:
+            target = resolve_ref(self.root, pack, declared)
+            if target is None:
+                raise ValueError(
+                    f"pack {pack} declares unreadable/missing file {declared} — repair "
+                    f"12_knowledge/{pack}/{declared} before proposing"
+                )
+            pack_digests[str(declared)] = sha256_file(target)
+        if not pack_digests:
+            raise ValueError(
+                f"pack {pack} declares no files in 12_knowledge/INDEX.yaml — index the pack "
+                "content before proposing a change to it"
+            )
+        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60].strip("-") or "proposal"
+        with _lock(self.root):
+            self._validate_refs(refs)
+            events = self._read_events()
+            taken = {str(e.get("entity_id")) for e in events if e.get("type") == "KNOWLEDGE_PROPOSED"}
+            n = sum(1 for e in events if e.get("type") == "KNOWLEDGE_PROPOSED") + 1
+            directory = self.root / "10_learning" / "knowledge-proposals"
+            while True:
+                kp_id = f"KP-{n:04d}"
+                if kp_id not in taken and not list(directory.glob(f"{kp_id}-*.md")):
+                    break
+                n += 1
+            created = now()
+            rel = f"10_learning/knowledge-proposals/{kp_id}-{slug}.md"
+            front = {
+                "id": kp_id, "pack": pack, "title": title, "created": created,
+                "status": "PROPOSED", "technique_ref": technique_ref or None,
+                "evidence_refs": refs, "recheck_date": recheck or None,
+            }
+            artifact = "\n".join(
+                ["---"] + [f"{k}: {json.dumps(v)}" for k, v in front.items()] + ["---", "", body, ""])
+            body_sha256 = hashlib.sha256(artifact.encode("utf-8")).hexdigest()
+            directory.mkdir(parents=True, exist_ok=True)
+            (self.root / rel).write_text(artifact)
+            event = self._append_locked(
+                "KNOWLEDGE_PROPOSED", "knowledge_proposal", kp_id, actor=actor,
+                reason=f"knowledge proposed for pack {pack}", evidence_refs=refs,
+                payload={**front, "proposal_path": rel, "body_sha256": body_sha256,
+                         "pack_digests": pack_digests})
+        self.refresh()
+        return event
+
+    def _knowledge_proposal_rows(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        proposals: dict[str, dict[str, Any]] = {}
+        for e in events:
+            if e.get("type") == "KNOWLEDGE_PROPOSED":
+                p = e.get("payload") or {}
+                pid = str(p.get("id") or e.get("entity_id"))
+                proposals[pid] = {
+                    "id": pid, "pack": p.get("pack"), "title": p.get("title"),
+                    "proposal_path": p.get("proposal_path"), "technique_ref": p.get("technique_ref"),
+                    "evidence_refs": p.get("evidence_refs") or [], "recheck_date": p.get("recheck_date"),
+                    "created": p.get("created") or e.get("time"), "status": "PROPOSED",
+                    "body_sha256": p.get("body_sha256"), "pack_digests": p.get("pack_digests"),
+                    "reference": None, "resolved": None,
+                }
+            elif e.get("type") == "KNOWLEDGE_RESOLVED":
+                p = e.get("payload") or {}
+                pid = str(p.get("id") or e.get("entity_id"))
+                if pid in proposals:
+                    decision = str(p.get("decision") or "").strip().upper()
+                    proposals[pid]["status"] = (
+                        decision if decision in KNOWLEDGE_RESOLUTIONS else "INVALID")
+                    proposals[pid]["reference"] = p.get("reference")
+                    proposals[pid]["resolved"] = e.get("time")
+        return [proposals[pid] for pid in sorted(proposals)]
+
+    def _write_knowledge_proposal_projection(self, events: list[dict[str, Any]]) -> None:
+        p = self.root / "10_learning" / "knowledge-proposals.yaml"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        lines = [GENERATED_HEADER]
+        rows = self._knowledge_proposal_rows(events)
+        if not rows:
+            lines.append("proposals: []")
+        else:
+            lines.append("proposals:")
+            lines.extend("  - " + json.dumps(row, ensure_ascii=False) for row in rows)
+        p.write_text("\n".join(lines) + "\n")
+
+    def knowledge_proposals(self) -> list[dict[str, Any]]:
+        """Read the proposals projection; absent, compute rows in memory — never mutate.
+
+        The read path is used by the audit, so it must not persist anything: the
+        projection is rendered by refresh(), and a workspace without projections gets
+        the ledger-derived view without side effects. Latest resolution wins.
+        """
+        p = self.root / "10_learning" / "knowledge-proposals.yaml"
+        if p.is_file():
+            rows = self._parse_knowledge_proposal_projection(p)
+        else:
+            rows = self._knowledge_proposal_rows(self._read_events())
+        today = datetime.now(timezone.utc).date().isoformat()
+        for row in rows:
+            recheck = str(row.get("recheck_date") or "")
+            row["overdue"] = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", recheck)
+                                  and recheck < today and row.get("status") == "PROPOSED")
+        return rows
+
+    @staticmethod
+    def _parse_knowledge_proposal_projection(p: Path) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for lineno, line in enumerate(p.read_text(errors="strict").splitlines(), 1):
+            body = line.strip()
+            if not body.startswith("- "):
+                continue
+            try:
+                rows.append(json.loads(body[2:]))
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"knowledge-proposals projection is malformed at line {lineno}: {exc}"
+                ) from exc
+        return rows
+
+    def _require_pack_changed(self, row: dict[str, Any]) -> None:
+        """APPLIED is only legal after an INDEX-declared pack file's CONTENT changed.
+
+        The proposal snapshotted each declared file's sha256; a matching digest means the
+        bytes are identical, so an `utime`/touch (any mtime) is refused. Missing or
+        unreadable files are errors, never silently skipped.
+        """
+        proposal_id = str(row.get("id") or "")
+        pack = str(row.get("pack") or "")
+        digests = row.get("pack_digests")
+        if not isinstance(digests, dict) or not digests:
+            raise ValueError(
+                f"proposal {proposal_id} carries no pack_digests — it predates content "
+                "verification; re-propose the change so APPLIED can be proven"
+            )
+        pack_dir = self.root / "12_knowledge" / pack
+        changed: list[str] = []
+        problems: list[str] = []
+        for ref, recorded in sorted(digests.items()):
+            if not isinstance(recorded, str) or not re.fullmatch(r"[0-9a-f]{64}", recorded):
+                problems.append(f"{ref} has a malformed recorded digest")
+                continue
+            target = (pack_dir / str(ref)).resolve()
+            try:
+                target.relative_to(self.root)
+            except ValueError:
+                problems.append(f"{ref} escapes the workspace")
+                continue
+            if not target.is_file():
+                problems.append(f"{ref} is missing")
+                continue
+            try:
+                current = sha256_file(target)
+            except OSError as exc:
+                problems.append(f"{ref} is unreadable ({exc})")
+                continue
+            if current != recorded:
+                changed.append(str(ref))
+        if problems:
+            raise ValueError(
+                f"cannot verify the {pack} pack content for proposal {proposal_id}: "
+                + "; ".join(problems)
+                + f" — restore or repair 12_knowledge/{pack}/ before resolving APPLIED"
+            )
+        if not changed:
+            raise ValueError(
+                f"pack {pack} content is unchanged since proposal {proposal_id} was created "
+                "— a timestamp touch is not an edit; edit the INDEX-declared pack file(s) "
+                "with real content, then resolve"
+            )
+
+    def knowledge_resolve(self, kp_id: str, decision: str, reference: str,
+                          actor: str = "human", gate: str | None = None) -> dict[str, Any]:
+        """Record a human resolution; APPLIED additionally proves the pack edit happened.
+
+        `reference` is the recorded friction (a human ticket/message id): a provenance
+        string, not cryptographic proof. Passing `gate` binds the resolution to an
+        existing RESOLVED human gate and records it; without `gate` the resolution is not
+        bound to any gate.
+        """
+        pid = str(kp_id or "").strip()
+        decision = str(decision or "").upper()
+        if decision not in KNOWLEDGE_RESOLUTIONS:
+            raise ValueError("knowledge resolve decision must be APPLIED or REJECTED")
+        reference = str(reference or "").strip()
+        if not reference:
+            raise ValueError(
+                "knowledge resolve requires --reference (a human ticket/message id) — "
+                "the resolution is a human decision and must name its source"
+            )
+        gate_id = str(gate or "").strip()
+        if gate_id:
+            g = self.gate(gate_id)
+            if not g:
+                raise ValueError(
+                    f"unknown gate: {gate_id} — request it with researchctl gate request"
+                )
+            if g.get("status") != "RESOLVED":
+                raise ValueError(
+                    f"gate {gate_id} is not RESOLVED (status: {g.get('status') or 'unknown'}) — "
+                    "resolve it with researchctl gate resolve before binding it to a knowledge resolution"
+                )
+        row = next((r for r in self.knowledge_proposals() if r.get("id") == pid), None)
+        if row is None:
+            raise ValueError(f"unknown knowledge proposal: {pid}")
+        if decision == "APPLIED":
+            self._require_pack_changed(row)
+        payload: dict[str, Any] = {"id": pid, "decision": decision, "reference": reference}
+        if gate_id:
+            payload["gate"] = gate_id
+        with _lock(self.root):
+            event = self._append_locked(
+                "KNOWLEDGE_RESOLVED", "knowledge_proposal", pid, actor=actor,
+                reason=f"knowledge proposal {decision.lower()} ({reference})", payload=payload)
         self.refresh()
         return event
 
@@ -2197,6 +2640,8 @@ class ControlPlane:
         self._write_audit_projection(events)
         self._write_technique_projections(events)
         self._write_freshness_projection()
+        self._write_knowledge_usage_projection()
+        self._write_knowledge_proposal_projection(events)
         self._rebuild_context()
         return merged
 

@@ -2,11 +2,13 @@
 """End-to-end invariants for the canonical control plane and integrity audit."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -15,9 +17,10 @@ ROOT_REPO = TOOLS.parent
 sys.path.insert(0, str(TOOLS))
 import audit as _audit  # noqa: E402
 import control_plane as _control_plane  # noqa: E402
-from control_plane import (CYCLE_EDGES, ControlPlane, METHOD_SELF_ATTACK_ROWS,  # noqa: E402
-                           REQUIRED_AUDIT_CLASSES, asset_hosts, engagement_assets,
-                           external_judgment_allowed, host_in_scope, redact, scope_check)
+from control_plane import (CYCLE_EDGES, GENERATED_HEADER, ControlPlane,  # noqa: E402
+                           METHOD_SELF_ATTACK_ROWS, REQUIRED_AUDIT_CLASSES, asset_hosts,
+                           engagement_assets, external_judgment_allowed, host_in_scope,
+                           never_considered_packs, redact, scope_check)
 
 passed: list[str] = []
 
@@ -2372,5 +2375,524 @@ check("an unmasked token capture fails the idempotence check",
       sub.returncode != 0 and "not idempotent" in sub.stdout)
 check("the idempotence diff prints the masked form, never the raw token",
       raw_token not in sub.stdout and raw_token not in sub.stderr and "[REDACTED]" in sub.stdout)
+
+
+# 24. Knowledge lifecycle telemetry: per-pack USE/SKIP counters and technique citations
+# derive from the existing ledger into 10_learning/knowledge-usage.yaml; the CLI renders
+# them; the audit warns when a modern workspace never considered an indexed pack.
+def usage_root() -> tuple[Path, ControlPlane]:
+    """Workspace indexing two packs: `fixture` gets dispositions, `extra` stays untouched."""
+    r = fresh_root()
+    for name in ("fixture", "extra"):
+        (r / "12_knowledge" / name).mkdir(parents=True, exist_ok=True)
+        (r / f"12_knowledge/{name}/{name}.md").write_text(f"# {name} pack\n")
+    (r / "12_knowledge/INDEX.yaml").write_text(
+        "packs:\n"
+        "  fixture:\n"
+        "    load_when: [test, question, placeholder, review, closure, fixture]\n"
+        "    files: [fixture.md]\n"
+        "  extra:\n"
+        "    load_when: [telemetry, unused, ranking]\n"
+        "    files: [extra.md]\n")
+    return r, ControlPlane(r)
+
+
+def usage_cycle(cid: str, triage: list) -> dict:
+    return {"id": cid, "type": "DISCOVERY", "objective": f"usage question {cid}",
+            "allowed_scope": ["example.test"], "stop_conditions": ["stop"], "controls": [],
+            "status": "PLANNED", "knowledge_triage": triage}
+
+
+def usage_reason(pack: str) -> str:
+    return f"the {pack} pack relevance to this cycle was reviewed for telemetry"
+
+
+def run_researchctl(root: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(TOOLS / "researchctl.py"), str(root), *args],
+                          capture_output=True, text=True)
+
+
+ur, ucp = usage_root()
+with mock.patch.object(_control_plane, "now", return_value="2026-09-01T00:00:01Z"):
+    ucp.create_cycle("C-0001", usage_cycle("C-0001", [
+        {"pack": "fixture", "verdict": "USE", "reason": usage_reason("fixture")}]))
+with mock.patch.object(_control_plane, "now", return_value="2026-09-01T00:00:02Z"):
+    ucp.create_cycle("C-0002", usage_cycle("C-0002", [
+        {"pack": "fixture", "verdict": "SKIP", "reason": usage_reason("fixture")}]))
+with mock.patch.object(_control_plane, "now", return_value="2026-09-01T00:00:03Z"):
+    ucp.create_cycle("C-0003", usage_cycle("C-0003", [
+        {"pack": "fixture", "verdict": "USE", "reason": usage_reason("fixture")}]))
+(ur / "usage-capture.txt").write_text("usage probe capture: the fixture oracle fired under the control\n")
+ueid = ucp.register_evidence("usage-capture.txt", kind="raw", source="researcher-owned")["payload"]["id"]
+
+
+def usage_technique(**over) -> dict:
+    payload = {"cycle_id": "C-0001", "result": "CONFIRMED", "technique_family": "oracle-probe",
+               "interpretation": "the fixture oracle fired under the clean control",
+               "learning": "the fixture pack oracle note should cite the repetition requirement",
+               "evidence_refs": [ueid]}
+    payload.update(over)
+    return payload
+
+
+try:
+    ucp.evaluate_technique(usage_technique(knowledge_packs=["nope-pack"]))
+    check("technique knowledge_packs rejects an unknown pack by name", False)
+except ValueError as exc:
+    check("technique knowledge_packs rejects an unknown pack by name", "nope-pack" in str(exc))
+try:
+    ucp.evaluate_technique(usage_technique(knowledge_packs="fixture"))
+    check("technique knowledge_packs must be a list of names", False)
+except ValueError as exc:
+    check("technique knowledge_packs must be a list of names", "knowledge_packs" in str(exc))
+with mock.patch.object(_control_plane, "now", return_value="2026-09-01T00:00:04Z"):
+    ucp.evaluate_technique(usage_technique(knowledge_packs=["fixture"]))
+
+usage = ucp.knowledge_usage()
+check("knowledge usage counts USE and SKIP dispositions per pack",
+      usage["packs"]["fixture"]["use"] == 2 and usage["packs"]["fixture"]["skip"] == 1)
+check("knowledge usage leaves a never-disposed indexed pack at zero",
+      usage["packs"]["extra"] == {"use": 0, "skip": 0, "cited": 0,
+                                  "last_used": None, "last_cited": None,
+                                  "cycles": [], "cited_cycles": []})
+check("knowledge usage keeps last_used from the latest USE disposition",
+      usage["packs"]["fixture"]["last_used"] == "2026-09-01T00:00:03Z")
+check("knowledge usage counts technique knowledge_packs citations",
+      usage["packs"]["fixture"]["cited"] == 1
+      and usage["packs"]["fixture"]["last_cited"] == "2026-09-01T00:00:04Z")
+check("knowledge usage tracks the cycles that disposed the pack",
+      usage["packs"]["fixture"]["cycles"] == ["C-0001", "C-0002", "C-0003"])
+check("knowledge usage tracks the cycles that cited the pack",
+      usage["packs"]["fixture"]["cited_cycles"] == ["C-0001"])
+check("knowledge usage aggregates totals", usage["totals"] == {"use": 2, "skip": 1, "cited": 1})
+
+ucp.create_cycle("C-0004", usage_cycle("C-0004", [
+    "junk", {"pack": ""}, {"pack": "fixture", "verdict": "MAYBE", "reason": "not a verdict"}]))
+ucp.update_cycle("C-0004", {"knowledge_triage": [
+    {"pack": "fixture", "verdict": "SKIP", "reason": usage_reason("fixture")}]})
+usage = ucp.knowledge_usage()
+check("malformed triage entries are skipped while later updates still count",
+      usage["packs"]["fixture"]["use"] == 2 and usage["packs"]["fixture"]["skip"] == 2
+      and usage["totals"] == {"use": 2, "skip": 2, "cited": 1})
+
+ucp.create_cycle("C-0005", usage_cycle("C-0005", [
+    {"pack": "fixture", "verdict": "USE", "reason": usage_reason("fixture")},
+    {"pack": "fixture", "verdict": "SKIP", "reason": usage_reason("fixture")}]))
+usage = ucp.knowledge_usage()
+check("a pack counts once per cycle and the latest row in its list wins",
+      usage["packs"]["fixture"]["skip"] == 3 and usage["packs"]["fixture"]["use"] == 2
+      and usage["packs"]["fixture"]["cycles"].count("C-0005") == 1)
+
+ucp.create_cycle("C-0006", usage_cycle("C-0006", [
+    {"pack": "fixture", "verdict": "USE", "reason": usage_reason("fixture")}]))
+ucp.update_cycle("C-0006", {"knowledge_triage": [
+    {"pack": "fixture", "verdict": "SKIP", "reason": usage_reason("fixture")}]})
+usage = ucp.knowledge_usage()
+check("CYCLE_UPDATED rewrites the cycle disposition (latest event wins)",
+      usage["packs"]["fixture"]["skip"] == 4 and usage["packs"]["fixture"]["use"] == 2
+      and usage["packs"]["fixture"]["cycles"].count("C-0006") == 1)
+
+ucp.create_cycle("C-0007", usage_cycle("C-0007", [
+    {"pack": "extra", "verdict": "USE", "reason": usage_reason("extra")}]))
+ucp.update_cycle("C-0007", {"knowledge_triage": [
+    {"pack": "fixture", "verdict": "SKIP", "reason": usage_reason("fixture")}]})
+usage = ucp.knowledge_usage()
+check("a rewritten triage list replaces the earlier cycle disposition entirely",
+      usage["packs"]["extra"]["use"] == 0 and "C-0007" not in usage["packs"]["extra"]["cycles"]
+      and usage["packs"]["fixture"]["skip"] == 5
+      and "C-0007" in usage["packs"]["fixture"]["cycles"])
+
+ucp.create_cycle("C-0008", usage_cycle("C-0008", [
+    {"pack": 12345, "verdict": "USE", "reason": usage_reason("fixture")},
+    {"pack": "fixture", "verdict": "USE"},
+    {"pack": "fixture", "verdict": 7, "reason": usage_reason("fixture")},
+    {"pack": "fixture", "verdict": "USE", "reason": "   "}]))
+usage = ucp.knowledge_usage()
+check("incomplete dispositions are ignored (non-string pack never stringified, missing reason)",
+      "12345" not in usage["packs"] and usage["packs"]["fixture"]["use"] == 2
+      and "C-0008" not in usage["packs"]["fixture"]["cycles"])
+
+with mock.patch.object(_control_plane, "now", return_value="2026-09-01T00:00:05Z"):
+    ucp.evaluate_technique(usage_technique(knowledge_packs=["fixture", "fixture"]))
+usage = ucp.knowledge_usage()
+check("technique knowledge_packs dedupes per event (set semantics)",
+      usage["packs"]["fixture"]["cited"] == 2
+      and usage["packs"]["fixture"]["last_cited"] == "2026-09-01T00:00:05Z")
+
+usage_projection = ur / "10_learning/knowledge-usage.yaml"
+rendered = usage_projection.read_text()
+check("knowledge usage projection is a generated per-pack view",
+      rendered.startswith(GENERATED_HEADER) and "packs:" in rendered
+      and "last_cited" in rendered and '"fixture":' in rendered)
+ucp.refresh()
+check("knowledge usage projection rebuild is idempotent",
+      usage_projection.read_text() == rendered)
+
+sub = run_researchctl(ur, "knowledge", "usage")
+out = json.loads(sub.stdout)
+check("researchctl knowledge usage prints JSON counters plus a human summary",
+      sub.returncode == 0 and out["packs"]["fixture"]["cited"] == 2
+      and "never_considered=1" in sub.stderr)
+sub = run_researchctl(ur, "knowledge", "usage", "--unused")
+out = json.loads(sub.stdout)
+check("researchctl knowledge usage --unused lists never-considered packs only",
+      list(out["packs"]) == ["extra"] and "unused packs: extra" in sub.stderr)
+
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(ur)], capture_output=True, text=True)
+check("audit warns when a modern workspace never considered an indexed pack",
+      "not considered in the last 10 cycles" in sub.stdout and "extra" in sub.stdout
+      and "ERROR" not in sub.stdout and sub.returncode == 0)
+legacyize(ur)
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(ur)], capture_output=True, text=True)
+check("the never-considered warning stays silent for a legacy workspace",
+      "not considered" not in sub.stdout and sub.returncode == 0)
+
+# 24b. The audit warning is windowed to the last 10 cycles: a pack disposed only in the
+# first cycles of a long ledger is drifting again, while a recently considered pack is
+# not nagged about. `--unused` stays the all-time view.
+wr, wcp = usage_root()
+for i in range(1, 13):
+    triage = ([{"pack": "fixture", "verdict": "USE", "reason": usage_reason("fixture")}] if i <= 2
+              else [{"pack": "extra", "verdict": "SKIP", "reason": usage_reason("extra")}])
+    wcp.create_cycle(f"C-{i:04d}", usage_cycle(f"C-{i:04d}", triage))
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(wr)], capture_output=True, text=True)
+warning = next((line for line in sub.stdout.splitlines()
+                if line.startswith("WARN: knowledge packs not considered")), "")
+check("the audit never-considered warning names the 10-cycle window and flags stale packs",
+      "not considered in the last 10 cycles" in warning and "fixture" in warning
+      and "extra" not in warning and "ERROR" not in sub.stdout)
+usage = wcp.knowledge_usage()
+check("the windowed warning is not the all-time view (both packs have history)",
+      usage["packs"]["fixture"]["use"] == 2 and usage["packs"]["extra"]["skip"] == 10
+      and "fixture" not in never_considered_packs(usage)
+      and "extra" not in never_considered_packs(usage))
+
+# 25. Reviewed promotion path: an engagement learning is proposed against a pack,
+# reviewed, and only then resolved; APPLIED requires the pack edit to exist.
+PROPOSAL_TITLE = "Fixture pack needs the repetition oracle note"
+PROPOSAL_BODY = (
+    "The fixture pack's oracle list needs the negative-control note observed in this "
+    "engagement: with the control clean the oracle fired twice in a row, so the pack "
+    "should record the repetition requirement and the stop condition it implies.")
+
+
+def proposal_root() -> tuple[Path, ControlPlane]:
+    r, cp = usage_root()
+    cp.create_cycle("C-0001", usage_cycle("C-0001", [
+        {"pack": "fixture", "verdict": "USE", "reason": usage_reason("fixture")}]))
+    (r / "promotion-capture.txt").write_text("promotion capture: the fixture oracle fired under a clean control\n")
+    eid = cp.register_evidence("promotion-capture.txt", kind="raw", source="researcher-owned",
+                               cycle_id="C-0001")["payload"]["id"]
+    cp.evaluate_technique(usage_technique(evidence_refs=[eid]))
+    return r, cp
+
+
+pr, pcp = proposal_root()
+pr_eid = next(iter(pcp.evidence_index()))
+proposal = pcp.knowledge_propose({
+    "pack": "fixture", "title": PROPOSAL_TITLE, "body": PROPOSAL_BODY,
+    "technique_ref": "T-000001", "evidence_refs": [pr_eid], "recheck_date": "2999-12-31"})
+check("knowledge propose writes the proposal file and event with a KP id",
+      proposal["payload"]["id"] == "KP-0001"
+      and (pr / proposal["payload"]["proposal_path"]).is_file())
+proposal_text = (pr / proposal["payload"]["proposal_path"]).read_text()
+pack_target = pr / "12_knowledge/fixture/fixture.md"
+check("the proposal front matter carries the review fields",
+      all(marker in proposal_text for marker in (
+          'id: "KP-0001"', 'pack: "fixture"', 'status: "PROPOSED"',
+          'technique_ref: "T-000001"', 'recheck_date: "2999-12-31"'))
+      and PROPOSAL_BODY in proposal_text)
+check("the proposal payload snapshots a sha256 per INDEX-declared pack file",
+      proposal["payload"]["pack_digests"]
+      == {"fixture.md": hashlib.sha256(pack_target.read_bytes()).hexdigest()})
+check("the proposal payload carries the digest of the written artifact",
+      proposal["payload"]["body_sha256"] == hashlib.sha256(proposal_text.encode()).hexdigest())
+second = pcp.knowledge_propose({"pack": "fixture", "title": "Second promotion candidate note",
+                                "body": PROPOSAL_BODY})
+check("knowledge propose ids increment from the recorded count",
+      second["payload"]["id"] == "KP-0002"
+      and second["payload"]["recheck_date"] is None
+      and second["payload"]["technique_ref"] is None)
+
+
+def propose_error(payload: dict) -> str:
+    try:
+        pcp.knowledge_propose(payload)
+    except ValueError as exc:
+        return str(exc)
+    return ""
+
+
+check("knowledge propose rejects an unknown pack by name",
+      "nope-pack" in propose_error({"pack": "nope-pack", "title": PROPOSAL_TITLE, "body": PROPOSAL_BODY}))
+check("knowledge propose rejects a thin title",
+      "title" in propose_error({"pack": "fixture", "title": "ok", "body": PROPOSAL_BODY}))
+check("knowledge propose rejects a short body",
+      "body" in propose_error({"pack": "fixture", "title": PROPOSAL_TITLE, "body": "too short"}))
+check("knowledge propose rejects a malformed recheck_date",
+      "recheck_date" in propose_error({"pack": "fixture", "title": PROPOSAL_TITLE,
+                                       "body": PROPOSAL_BODY, "recheck_date": "31-12-2999"}))
+check("knowledge propose rejects a past recheck_date",
+      "future" in propose_error({"pack": "fixture", "title": PROPOSAL_TITLE,
+                                 "body": PROPOSAL_BODY, "recheck_date": "2020-01-01"}))
+check("knowledge propose rejects an unknown technique_ref",
+      "T-9999" in propose_error({"pack": "fixture", "title": PROPOSAL_TITLE,
+                                 "body": PROPOSAL_BODY, "technique_ref": "T-9999"}))
+check("knowledge propose validates evidence_refs like every other ref list",
+      "E-999999" in propose_error({"pack": "fixture", "title": PROPOSAL_TITLE,
+                                   "body": PROPOSAL_BODY, "evidence_refs": ["E-999999"]}))
+
+created = next(e for e in pcp.events_for("knowledge_proposal", "KP-0001")
+               if e["type"] == "KNOWLEDGE_PROPOSED")["time"]
+created_epoch = datetime.strptime(created, "%Y-%m-%dT%H:%M:%SZ").replace(
+    tzinfo=timezone.utc).timestamp()
+os.utime(pack_target, (created_epoch - 120, created_epoch - 120))
+try:
+    pcp.knowledge_resolve("KP-0001", "APPLIED", "ticket-42")
+    check("resolve APPLIED refuses a backdated but byte-identical pack", False)
+except ValueError as exc:
+    check("resolve APPLIED refuses a backdated but byte-identical pack",
+          "timestamp touch is not an edit" in str(exc))
+os.utime(pack_target, (created_epoch + 120, created_epoch + 120))
+try:
+    pcp.knowledge_resolve("KP-0001", "APPLIED", "ticket-42")
+    check("resolve APPLIED refuses utime-only (mtime moved forward, bytes identical)", False)
+except ValueError as exc:
+    check("resolve APPLIED refuses utime-only (mtime moved forward, bytes identical)",
+          "unchanged since proposal KP-0001" in str(exc))
+try:
+    pcp.knowledge_resolve("KP-0001", "APPLIED", "")
+    check("resolve requires a human reference", False)
+except ValueError as exc:
+    check("resolve requires a human reference", "reference" in str(exc))
+try:
+    pcp.knowledge_resolve("KP-9999", "REJECTED", "ticket-42")
+    check("resolve refuses an unknown proposal", False)
+except ValueError as exc:
+    check("resolve refuses an unknown proposal", "KP-9999" in str(exc))
+pack_backup = pack_target.read_bytes()
+pack_target.rename(pack_target.with_suffix(".md.bak"))
+try:
+    pcp.knowledge_resolve("KP-0002", "APPLIED", "ticket-42")
+    check("resolve APPLIED refuses when an INDEX-declared pack file is missing", False)
+except ValueError as exc:
+    check("resolve APPLIED refuses when an INDEX-declared pack file is missing",
+          "fixture.md is missing" in str(exc) and "repair" in str(exc))
+pack_target.write_bytes(pack_backup)
+os.chmod(pack_target, 0o000)
+try:
+    if os.geteuid() != 0:
+        try:
+            pcp.knowledge_resolve("KP-0002", "APPLIED", "ticket-42")
+            check("resolve APPLIED refuses an unreadable INDEX-declared pack file", False)
+        except ValueError as exc:
+            check("resolve APPLIED refuses an unreadable INDEX-declared pack file",
+                  "unreadable" in str(exc))
+finally:
+    os.chmod(pack_target, 0o644)
+pack_target.write_text(pack_target.read_text()
+                       + "\n- Repetition requirement: control fires twice before trusting the oracle.\n")
+resolved = pcp.knowledge_resolve("KP-0001", "APPLIED", "ticket-42")
+check("resolve APPLIED records the resolution after a real content edit",
+      resolved["payload"] == {"id": "KP-0001", "decision": "APPLIED", "reference": "ticket-42"}
+      and proposal["payload"]["pack_digests"]["fixture.md"]
+      != hashlib.sha256(pack_target.read_bytes()).hexdigest())
+rejected = pcp.knowledge_resolve("KP-0002", "REJECTED", "ticket-43")
+check("resolve REJECTED needs no pack edit",
+      rejected["payload"]["decision"] == "REJECTED")
+pcp.knowledge_resolve("KP-0001", "REJECTED", "ticket-45")
+pcp.knowledge_resolve("KP-0001", "APPLIED", "ticket-46")
+rows = pcp.knowledge_proposals()
+row = next(r for r in rows if r["id"] == "KP-0001")
+check("the proposals projection keeps the latest resolution",
+      row["status"] == "APPLIED" and row["reference"] == "ticket-46")
+check("knowledge proposals rows carry the review fields and overdue flag",
+      {"id", "pack", "title", "status", "created", "recheck_date", "overdue"} <= set(row)
+      and row["pack"] == "fixture" and row["title"] == PROPOSAL_TITLE and row["overdue"] is False)
+check("knowledge proposals projection is a generated view",
+      (pr / "10_learning/knowledge-proposals.yaml").read_text().startswith(GENERATED_HEADER))
+
+payload_file = pr / "proposal-payload.json"
+payload_file.write_text(json.dumps({"pack": "fixture", "title": "Third promotion candidate note",
+                                    "body": PROPOSAL_BODY}))
+sub = run_researchctl(pr, "knowledge", "propose", str(payload_file))
+check("researchctl knowledge propose wires through the canonical seam",
+      sub.returncode == 0 and json.loads(sub.stdout)["payload"]["id"] == "KP-0003"
+      and "KP-0003" in sub.stderr)
+sub = run_researchctl(pr, "knowledge", "proposals")
+out = json.loads(sub.stdout)
+check("researchctl knowledge proposals prints the JSON list plus a human summary",
+      sub.returncode == 0 and [r["id"] for r in out] == ["KP-0001", "KP-0002", "KP-0003"]
+      and "proposals" in sub.stderr)
+sub = run_researchctl(pr, "knowledge", "resolve", "KP-0003", "REJECTED", "--reference", "ticket-47")
+check("researchctl knowledge resolve wires through the canonical seam",
+      sub.returncode == 0 and json.loads(sub.stdout)["payload"]["decision"] == "REJECTED"
+      and "KP-0003" in sub.stderr)
+kp5 = pr / "10_learning/knowledge-proposals/KP-0004-forged-digest.md"
+kp5.write_text("---\nid: \"KP-0004\"\n---\n\nForged digest fixture body recorded for the malformed digest check.\n")
+pcp._append_locked("KNOWLEDGE_PROPOSED", "knowledge_proposal", "KP-0004",
+                   payload={"id": "KP-0004", "pack": "fixture",
+                            "title": "Forged digest candidate note",
+                            "proposal_path": "10_learning/knowledge-proposals/KP-0004-forged-digest.md",
+                            "body_sha256": hashlib.sha256(kp5.read_bytes()).hexdigest(),
+                            "pack_digests": {"fixture.md": "not-a-digest"},
+                            "technique_ref": None, "evidence_refs": [], "recheck_date": None})
+pcp.refresh()
+try:
+    pcp.knowledge_resolve("KP-0004", "APPLIED", "ticket-60")
+    check("resolve APPLIED refuses a malformed recorded digest", False)
+except ValueError as exc:
+    check("resolve APPLIED refuses a malformed recorded digest", "malformed" in str(exc))
+REDACT_TITLE = ("Fixture pack records the exposed ghp_ABCDEFGHIJKLMNOPQRSTUVWX handling rule")
+REDACT_BODY = ("The promotion capture proves the exposed ghp_ABCDEFGHIJKLMNOPQRSTUVWX value must "
+               "never enter a pack: record only the shape and the remediation, never the credential "
+               "itself, so the library cannot become a secret store.")
+redacted = pcp.knowledge_propose({"pack": "fixture", "title": REDACT_TITLE, "body": REDACT_BODY})
+redacted_text = (pr / redacted["payload"]["proposal_path"]).read_text()
+check("knowledge propose redacts secret-shaped title and body before writing the artifact",
+      "ghp_ABCDEFGHIJKLMNOPQRSTUVWX" not in redacted_text and "[REDACTED]" in redacted_text)
+check("the artifact front matter mirrors the redacted title and payload",
+      redacted["payload"]["title"] == redact(REDACT_TITLE)
+      and f'title: {json.dumps(redact(REDACT_TITLE))}' in redacted_text
+      and redacted["payload"]["body_sha256"] == hashlib.sha256(redacted_text.encode()).hexdigest())
+
+kp99_rel = "10_learning/knowledge-proposals/KP-0099-aged-promotion-candidate-note.md"
+kp99 = pr / kp99_rel
+kp99.parent.mkdir(parents=True, exist_ok=True)
+kp99.write_text("---\nid: \"KP-0099\"\n---\n\nAged promotion candidate note body recorded for the overdue fixture.\n")
+pcp.append("KNOWLEDGE_PROPOSED", "knowledge_proposal", "KP-0099",
+           payload={"id": "KP-0099", "pack": "fixture", "title": "Aged promotion candidate note",
+                    "proposal_path": kp99_rel,
+                    "body_sha256": hashlib.sha256(kp99.read_bytes()).hexdigest(),
+                    "technique_ref": None, "evidence_refs": [],
+                    "recheck_date": "2020-01-01"})
+rows = pcp.knowledge_proposals()
+check("the proposals projection flags an overdue PROPOSED recheck date",
+      next(r for r in rows if r["id"] == "KP-0099")["overdue"] is True)
+sub = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(pr)], capture_output=True, text=True)
+check("audit warns on an overdue proposal",
+      "overdue" in sub.stdout and "KP-0099" in sub.stdout and "ERROR" not in sub.stdout)
+
+
+def run_audit(root: Path) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(root)],
+                          capture_output=True, text=True)
+
+
+# 26. The read path used by the audit never mutates: knowledge_proposals() reads the
+# projection when present and otherwise computes in memory, with or without events.
+ro = fresh_root()
+rocp = ControlPlane(ro)
+before = sorted(str(p.relative_to(ro)) for p in ro.rglob("*"))
+rows = rocp.knowledge_proposals()
+after = sorted(str(p.relative_to(ro)) for p in ro.rglob("*"))
+check("knowledge_proposals on a projection-less workspace creates no files",
+      rows == [] and before == after)
+ap = "10_learning/knowledge-proposals/KP-0001-read-only-fixture-proposal.md"
+rocp._append_locked("KNOWLEDGE_PROPOSED", "knowledge_proposal", "KP-0001",
+                    payload={"id": "KP-0001", "pack": "fixture",
+                             "title": "Read-only fixture proposal note", "proposal_path": ap,
+                             "body_sha256": "0" * 64, "pack_digests": {"fixture.md": "1" * 64},
+                             "technique_ref": None, "evidence_refs": [], "recheck_date": None})
+before = sorted(str(p.relative_to(ro)) for p in ro.rglob("*"))
+rows = rocp.knowledge_proposals()
+after = sorted(str(p.relative_to(ro)) for p in ro.rglob("*"))
+check("knowledge_proposals computes event rows in memory without persisting a projection",
+      [r["id"] for r in rows] == ["KP-0001"] and rows[0]["status"] == "PROPOSED"
+      and before == after and not (ro / "10_learning/knowledge-proposals.yaml").exists())
+
+# 27. The audit re-validates knowledge events a hand edit or raw append could smuggle in.
+ar, acp = usage_root()
+acp.create_cycle("C-0001", usage_cycle("C-0001", [
+    {"pack": "fixture", "verdict": "USE", "reason": usage_reason("fixture")}]))
+(ar / "audit-capture.txt").write_text("audit capture: the fixture oracle fired under the control\n")
+aeid = acp.register_evidence("audit-capture.txt", kind="raw", source="researcher-owned")["payload"]["id"]
+acp._append_locked(
+    "TECHNIQUE_EVALUATED", "technique", "T-000001", evidence_refs=[aeid], cycle_id="C-0001",
+    payload={"id": "T-000001", "cycle_id": "C-0001", "result": "CONFIRMED",
+             "technique_family": "oracle-probe",
+             "interpretation": "the fixture oracle fired under the clean control",
+             "learning": "the fixture pack oracle note should cite the repetition requirement",
+             "knowledge_packs": ["nope-pack"]})
+sub = run_audit(ar)
+check("audit flags knowledge_packs naming an unknown pack (versioned: ERROR)",
+      sub.returncode == 1 and "nope-pack" in sub.stdout)
+legacyize(ar)
+sub = run_audit(ar)
+check("the knowledge_packs backstop degrades to WARNING for a legacy ledger",
+      sub.returncode == 0 and "nope-pack" in sub.stdout and "ERROR" not in sub.stdout)
+
+br, bcp = proposal_root()
+bprop = bcp.knowledge_propose({"pack": "fixture", "title": PROPOSAL_TITLE, "body": PROPOSAL_BODY})
+bcp._append_locked("KNOWLEDGE_RESOLVED", "knowledge_proposal", bprop["payload"]["id"],
+                   payload={"id": bprop["payload"]["id"], "decision": "MAYBE",
+                            "reference": "hand-edit"})
+bcp.refresh()
+brow = next(r for r in bcp.knowledge_proposals() if r["id"] == bprop["payload"]["id"])
+check("an unknown resolution decision projects as an explicit INVALID marker",
+      brow["status"] == "INVALID")
+sub = run_audit(br)
+check("audit flags an unknown KNOWLEDGE_RESOLVED decision (versioned: ERROR)",
+      sub.returncode == 1 and "MAYBE" in sub.stdout)
+legacyize(br)
+sub = run_audit(br)
+check("the decision backstop degrades to WARNING for a legacy ledger",
+      sub.returncode == 0 and "MAYBE" in sub.stdout and "ERROR" not in sub.stdout)
+
+cr, ccp = proposal_root()
+cprop = ccp.knowledge_propose({"pack": "fixture", "title": PROPOSAL_TITLE, "body": PROPOSAL_BODY})
+cartifact = cr / cprop["payload"]["proposal_path"]
+cartifact.write_text(cartifact.read_text() + "tampered after proposal\n")
+sub = run_audit(cr)
+check("audit flags a tampered proposal artifact (digest mismatch, versioned: ERROR)",
+      sub.returncode == 1 and "sha256 mismatch" in sub.stdout)
+legacyize(cr)
+sub = run_audit(cr)
+check("the proposal digest backstop degrades to WARNING for a legacy ledger",
+      sub.returncode == 0 and "sha256 mismatch" in sub.stdout and "ERROR" not in sub.stdout)
+
+dr, dcp = proposal_root()
+dcp._append_locked("KNOWLEDGE_PROPOSED", "knowledge_proposal", "KP-0002",
+                   payload={"id": "KP-0002", "pack": "fixture",
+                            "title": "A proposal missing its artifact evidence"})
+sub = run_audit(dr)
+check("audit requires the KNOWLEDGE_PROPOSED artifact fields (versioned: ERROR)",
+      sub.returncode == 1 and "proposal_path" in sub.stdout and "body_sha256" in sub.stdout)
+
+# 28. Resolution provenance: an optional --gate binds the resolution to a resolved human
+# gate; without it the free-text reference is the recorded friction, not cryptographic proof.
+gr, gcp = usage_root()
+gcp.create_cycle("C-0001", usage_cycle("C-0001", [
+    {"pack": "fixture", "verdict": "USE", "reason": usage_reason("fixture")},
+    {"pack": "extra", "verdict": "SKIP", "reason": usage_reason("extra")}]))
+gcp.transition_cycle("C-0001", "READY", reason="gate fixture ready")
+write_objective(gr, "C-0001")
+gcp.transition_cycle("C-0001", "RUNNING", reason="gate fixture running")
+gcp.request_gate("G-0001", {"cycle_id": "C-0001", "what_is_needed": "Review the promotion",
+                            "why_human_only": "Only the researcher can approve promotion",
+                            "resume_after": "Promotion resolved"})
+gprop = gcp.knowledge_propose({"pack": "fixture", "title": PROPOSAL_TITLE, "body": PROPOSAL_BODY})
+try:
+    gcp.knowledge_resolve(gprop["payload"]["id"], "REJECTED", "ticket-50", gate="G-9999")
+    check("resolve --gate refuses an unknown gate", False)
+except ValueError as exc:
+    check("resolve --gate refuses an unknown gate", "G-9999" in str(exc) and "gate" in str(exc))
+try:
+    gcp.knowledge_resolve(gprop["payload"]["id"], "REJECTED", "ticket-50", gate="G-0001")
+    check("resolve --gate refuses a gate that is not RESOLVED", False)
+except ValueError as exc:
+    check("resolve --gate refuses a gate that is not RESOLVED", "not RESOLVED" in str(exc))
+gcp.resolve_gate("G-0001", decision="APPROVED", reference="ticket-50")
+gated = gcp.knowledge_resolve(gprop["payload"]["id"], "REJECTED", "ticket-50", gate="G-0001")
+check("resolve --gate records the gate on the resolution once it is RESOLVED",
+      gated["payload"]["gate"] == "G-0001"
+      and gated["payload"]["reference"] == "ticket-50")
+gsecond = gcp.knowledge_propose({"pack": "fixture", "title": "Second gate candidate note",
+                                 "body": PROPOSAL_BODY})
+sub = run_researchctl(gr, "knowledge", "resolve", gsecond["payload"]["id"], "REJECTED",
+                      "--reference", "ticket-51", "--gate", "G-0001")
+check("researchctl knowledge resolve --gate wires through the canonical seam",
+      sub.returncode == 0 and json.loads(sub.stdout)["payload"]["gate"] == "G-0001")
+
 
 print(f"\n{len(passed)} checks passed")

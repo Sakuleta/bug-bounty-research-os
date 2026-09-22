@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from control_plane import ControlPlane, scope_check  # noqa: E402
+from control_plane import ControlPlane, never_considered_packs, scope_check  # noqa: E402
 from ts_triage import suggest as triage_suggest  # noqa: E402
 from ts_claims import check_claims, check_draft  # noqa: E402
 
@@ -52,6 +52,28 @@ def main() -> int:
     t = sub.add_parser("technique")
     ts = t.add_subparsers(dest="op", required=True)
     x = ts.add_parser("evaluate"); x.add_argument("json"); x.set_defaults(fn="technique-evaluate")
+
+    k = sub.add_parser("knowledge")
+    ks = k.add_subparsers(dest="op", required=True)
+    x = ks.add_parser("usage", help="per-pack dispositions and citations derived from the ledger; "
+                                    "--unused lists indexed packs never considered")
+    x.add_argument("--unused", action="store_true")
+    x.set_defaults(fn="knowledge-usage")
+    x = ks.add_parser("propose", help="{pack, title, body, technique_ref?, evidence_refs?, "
+                                       "recheck_date?} — writes a reviewed proposal artifact")
+    x.add_argument("json")
+    x.set_defaults(fn="knowledge-propose")
+    x = ks.add_parser("proposals", help="proposal status projection (latest resolution wins)")
+    x.set_defaults(fn="knowledge-proposals")
+    x = ks.add_parser("resolve", help="record a human resolution; APPLIED requires the pack "
+                                      "file content to have changed first")
+    x.add_argument("id")
+    x.add_argument("decision", choices=["APPLIED", "REJECTED"])
+    x.add_argument("--reference", default="", help="human ticket/message id (required; the "
+                                                   "recorded friction, not cryptographic proof)")
+    x.add_argument("--gate", default="", help="optional G-xxxx gate that must exist and be "
+                                              "RESOLVED; binds the resolution to that gate")
+    x.set_defaults(fn="knowledge-resolve")
 
     g = sub.add_parser("gate")
     gs = g.add_subparsers(dest="op", required=True)
@@ -138,6 +160,17 @@ def main() -> int:
             out = cp.register_evidence(ns.path, kind=ns.kind, source=ns.source, cycle_id=ns.cycle)
         elif ns.fn == "technique-evaluate":
             out = cp.evaluate_technique(load_json(ns.json))
+        elif ns.fn == "knowledge-usage":
+            out = cp.knowledge_usage()
+            if ns.unused:
+                out = {"totals": out["totals"],
+                       "packs": {name: out["packs"][name] for name in never_considered_packs(out)}}
+        elif ns.fn == "knowledge-propose":
+            out = cp.knowledge_propose(load_json(ns.json))
+        elif ns.fn == "knowledge-proposals":
+            out = cp.knowledge_proposals()
+        elif ns.fn == "knowledge-resolve":
+            out = cp.knowledge_resolve(ns.id, ns.decision, ns.reference, gate=ns.gate)
         elif ns.fn == "gate-request":
             out = cp.request_gate(ns.id, load_json(ns.json))
         elif ns.fn == "gate-resolve":
@@ -189,6 +222,25 @@ def main() -> int:
             print("warning: the new caps are below the current recorded action counts — "
                   "tools/audit.py errors on the over-cap actions until a human-approved raise "
                   "(`researchctl budget set` with human_reference)", file=sys.stderr)
+        if ns.fn == "knowledge-usage":
+            totals = out["totals"]
+            never = never_considered_packs(out)
+            print(f"knowledge usage: use={totals['use']} skip={totals['skip']} cited={totals['cited']} "
+                  f"packs={len(out['packs'])} never_considered={len(never)}", file=sys.stderr)
+            if ns.unused:
+                print("unused packs: " + (", ".join(never) or "none"), file=sys.stderr)
+        elif ns.fn == "knowledge-propose":
+            print(f"knowledge propose: {out['payload']['id']} -> "
+                  f"{out['payload']['proposal_path']}", file=sys.stderr)
+        elif ns.fn == "knowledge-proposals":
+            print(f"knowledge proposals: total={len(out)} "
+                  f"proposed={sum(1 for r in out if r['status'] == 'PROPOSED')} "
+                  f"applied={sum(1 for r in out if r['status'] == 'APPLIED')} "
+                  f"rejected={sum(1 for r in out if r['status'] == 'REJECTED')} "
+                  f"overdue={sum(1 for r in out if r['overdue'])}", file=sys.stderr)
+        elif ns.fn == "knowledge-resolve":
+            print(f"knowledge resolve: {out['payload']['id']} {out['payload']['decision']} "
+                  f"(reference: {out['payload']['reference']})", file=sys.stderr)
         if ns.fn == "scope-check" and not out["in_scope"]:
             return 3
         return 0

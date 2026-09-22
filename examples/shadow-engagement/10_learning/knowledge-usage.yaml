@@ -1,0 +1,22 @@
+# GENERATED — do not edit by hand; rebuild via tools/researchctl.py (control plane)
+totals:
+  use: 1
+  skip: 1
+  cited: 0
+packs:
+  "http-edge-cache":
+    use: 1
+    skip: 0
+    cited: 0
+    last_used: "2026-09-21T17:50:12Z"
+    last_cited: null
+    cycles: ["C-0001"]
+    cited_cycles: []
+  "web-browser":
+    use: 0
+    skip: 1
+    cited: 0
+    last_used: null
+    last_cited: null
+    cycles: ["C-0001"]
+    cited_cycles: []

@@ -12,7 +12,10 @@
  *
  *   R1  Canonical/projection files are write-protected inside any detected Research
  *       OS workspace (fs tools + common shell write shapes): the runtime views, the
- *       freshness view (`10_learning/freshness.yaml`), the evidence store
+ *       freshness/usage views (`10_learning/freshness.yaml`,
+ *       `10_learning/knowledge-usage.yaml`), the proposal view and its artifact dir
+ *       (`10_learning/knowledge-proposals.yaml`, `10_learning/knowledge-proposals/**`),
+ *       the evidence store
  *       (`11_runtime/evidence-store/**`) and — outside BOOTSTRAP —
  *       `00_control/engagement.yaml` + `00_control/identity-binding.yaml` (the agent
  *       may fill those only while BOOTSTRAP; afterwards they are human-owned). Mutate
@@ -103,6 +106,9 @@ const PROTECTED_PATTERNS = [
   /^06_audits\/closure-readiness\.yaml$/,
   /^10_learning\/technique-discoveries\.md$/,
   /^10_learning\/freshness\.yaml$/,
+  /^10_learning\/knowledge-usage\.yaml$/,
+  /^10_learning\/knowledge-proposals\.yaml$/,
+  /^10_learning\/knowledge-proposals\//,
   BOOTSTRAP_CONDITIONAL,
 ]
 
@@ -113,6 +119,7 @@ const PROTECTED_MARKERS = [
   'evidence-index.jsonl', 'current-context.md', 'last-result.md', 'closure-readiness.yaml',
   'freshness.yaml', 'evidence-store', 'engagement.yaml', 'identity-binding.yaml',
   'technique-discoveries.md', '04_cycles', '03_hypotheses',
+  'knowledge-usage.yaml', 'knowledge-proposals.yaml', 'knowledge-proposals/',
 ]
 
 // Static protected files and directories the control plane owns. A destructive target
@@ -124,7 +131,9 @@ const PROTECTED_TARGETS = [
   '11_runtime/action-tokens.jsonl', '11_runtime/human-gates', '11_runtime/evidence-store',
   '04_cycles', '03_hypotheses/active', '03_hypotheses/archive',
   '06_audits/closure-readiness.yaml', '10_learning/technique-discoveries.md',
-  '10_learning/freshness.yaml', '00_control/engagement.yaml', '00_control/identity-binding.yaml',
+  '10_learning/freshness.yaml', '10_learning/knowledge-usage.yaml',
+  '10_learning/knowledge-proposals.yaml', '10_learning/knowledge-proposals',
+  '00_control/engagement.yaml', '00_control/identity-binding.yaml',
 ]
 
 // Commands that reach the network. Deliberately narrow: package installs and

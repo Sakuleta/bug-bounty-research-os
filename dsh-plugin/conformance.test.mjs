@@ -270,6 +270,16 @@ check('guard reason tells the model what to do instead',
 // ---- protected-path additions: freshness, evidence store, bootstrap-conditional ----
 check('write to 10_learning/freshness.yaml denied',
   !!h.guardReason(exec('write', { file_path: '10_learning/freshness.yaml', content: 'x' }, osRoot)))
+check('write to 10_learning/knowledge-usage.yaml denied',
+  !!h.guardReason(exec('write', { file_path: '10_learning/knowledge-usage.yaml', content: 'x' }, osRoot)))
+check('write to 10_learning/knowledge-proposals.yaml denied',
+  !!h.guardReason(exec('write', { file_path: '10_learning/knowledge-proposals.yaml', content: 'x' }, osRoot)))
+check('write to 10_learning/knowledge-proposals/KP-0001-x.md denied',
+  !!h.guardReason(exec('write', { file_path: '10_learning/knowledge-proposals/KP-0001-x.md', content: 'x' }, osRoot)))
+check('rm -rf 10_learning/knowledge-proposals denied (directory-level destruction)',
+  !!h.guardReason(exec('bash', { command: 'rm -rf 10_learning/knowledge-proposals' }, osRoot)))
+check('rm of a proposal artifact denied',
+  !!h.guardReason(exec('bash', { command: 'rm 10_learning/knowledge-proposals/KP-0001-x.md' }, osRoot)))
 check('write under 11_runtime/evidence-store/ denied',
   !!h.guardReason(exec('write', { file_path: '11_runtime/evidence-store/abc.http', content: 'x' }, osRoot)))
 check('write to 00_control/engagement.yaml denied outside BOOTSTRAP',

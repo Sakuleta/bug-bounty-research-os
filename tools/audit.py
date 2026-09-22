@@ -14,12 +14,13 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from control_plane import (CYCLE_EDGES, EVENT_TYPES, HYP_EDGES, METHOD_SELF_ATTACK_ROWS,  # noqa: E402
-                           REQUIRED_AUDIT_CLASSES, TECHNIQUE_RESULTS, ControlPlane,
-                           asset_hosts, budget_limits, engagement_assets, evidence_id_ok,
-                           host_in_scope, normalize_cycle_state, review_quote_problem,
-                           scope_check, secret_pattern_hits, sha256_file)
-from knowledge_index import index_problem, selection_cap, selection_query, top_packs  # noqa: E402
+from control_plane import (CYCLE_EDGES, EVENT_TYPES, HYP_EDGES, KNOWLEDGE_RESOLUTIONS,  # noqa: E402
+                           METHOD_SELF_ATTACK_ROWS, REQUIRED_AUDIT_CLASSES, TECHNIQUE_RESULTS,
+                           ControlPlane, asset_hosts, budget_limits, engagement_assets,
+                           evidence_id_ok, host_in_scope, never_considered_in_window,
+                           normalize_cycle_state, review_quote_problem, scope_check,
+                           secret_pattern_hits, sha256_file)
+from knowledge_index import index_problem, parse_index, selection_cap, selection_query, top_packs  # noqa: E402
 
 CLOSURE_PROOF_PATH = Path("06_audits") / "CLOSURE-PROOF.md"
 CLOSURE_PROOF_SECTIONS = (
@@ -648,6 +649,105 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
         for key in ("technique_family", "interpretation", "learning"):
             if not str(payload.get(key, "")).strip():
                 errors.append(f"technique {e.get('entity_id')} missing {key}")
+        # Citation backstop (28): a `knowledge_packs` list is a claim about the library,
+        # so it must name real packs. Versioned records are held to the rule; legacy
+        # records warn instead. An unreadable index cannot be membership-checked here —
+        # the index error above already fails modern workspaces closed.
+        packs = payload.get("knowledge_packs")
+        if packs is not None:
+            known = None if knowledge_problem else set(parse_index(root / "12_knowledge" / "INDEX.yaml"))
+            problems: list[str] = []
+            if not isinstance(packs, list):
+                problems.append("knowledge_packs is not a list of pack names")
+            else:
+                for name in packs:
+                    if not isinstance(name, str) or not name.strip():
+                        problems.append(f"knowledge_packs holds a non-string entry: {name!r}")
+                    elif known is not None and name.strip() not in known:
+                        problems.append(f"knowledge_packs names an unknown pack: {name.strip()}")
+            for problem in problems:
+                message = (f"technique {e.get('entity_id')} {problem} — cite packs listed "
+                           "in 12_knowledge/INDEX.yaml")
+                if e.get("os_version"):
+                    errors.append(message)
+                else:
+                    warnings.append(f"legacy technique record (pre-7.3, no os_version): {message}")
+
+    # Resolution backstop (28): the write path only accepts APPLIED/REJECTED, so a raw
+    # append must not read as valid. Versioned records are errors; legacy records warn.
+    # The projection coerces an unknown decision to the explicit INVALID marker either way.
+    for e in events:
+        if e.get("type") != "KNOWLEDGE_RESOLVED":
+            continue
+        decision = str((e.get("payload") or {}).get("decision") or "").strip()
+        if decision not in KNOWLEDGE_RESOLUTIONS:
+            message = (f"knowledge resolution {e.get('entity_id')} has an invalid decision "
+                       f"({decision or '<missing>'}) — must be APPLIED or REJECTED via "
+                       "researchctl knowledge resolve")
+            if e.get("os_version"):
+                errors.append(message)
+            else:
+                warnings.append(f"legacy knowledge record (pre-7.3, no os_version): {message}")
+
+    # Proposal backstop (28): the artifact is the reviewable evidence, so the event must
+    # carry its required provenance and the file on disk must match the recorded digest.
+    # Versioned records are errors; legacy records warn.
+    for e in events:
+        if e.get("type") != "KNOWLEDGE_PROPOSED":
+            continue
+        payload = e.get("payload") or {}
+        problems: list[str] = []
+        for key in ("id", "pack", "title", "proposal_path", "body_sha256"):
+            if not str(payload.get(key) or "").strip():
+                problems.append(f"missing {key}")
+        rel = str(payload.get("proposal_path") or "")
+        digest = str(payload.get("body_sha256") or "")
+        if rel and digest:
+            artifact = (root / rel).resolve()
+            try:
+                artifact.relative_to(root)
+            except ValueError:
+                problems.append(f"proposal_path escapes the workspace: {rel}")
+            else:
+                if not artifact.is_file():
+                    problems.append(f"artifact missing: {rel}")
+                elif sha256_file(artifact) != digest:
+                    problems.append(f"artifact sha256 mismatch: {rel}")
+        for problem in problems:
+            message = (f"knowledge proposal {e.get('entity_id')} {problem} — re-propose "
+                       "through researchctl knowledge propose")
+            if e.get("os_version"):
+                errors.append(message)
+            else:
+                warnings.append(f"legacy knowledge record (pre-7.3, no os_version): {message}")
+
+    # Knowledge lifecycle telemetry (28): a modern workspace whose cycles stop considering
+    # indexed packs is drifting from the library. The warning is WINDOWED to the last 10
+    # cycles — a pack used once and then silently abandoned is the failure this surfaces;
+    # the all-time view stays available via `researchctl knowledge usage --unused`. The
+    # warning stays WARNING and bounded (first 10 names); the forcing function is the
+    # RUNNING triage guard, this is visibility only.
+    cycle_ids = cp.all_cycle_ids()
+    if versioned_seen and len(cycle_ids) >= 3:
+        stale = never_considered_in_window(cp.knowledge_usage(), cycle_ids, window=10)
+        if stale:
+            warnings.append(
+                "knowledge packs not considered in the last 10 cycles: "
+                + ", ".join(stale[:10]) + (" …" if len(stale) > 10 else "")
+            )
+
+    # Reviewed promotion path (28): a PROPOSED proposal past its recheck_date is overdue.
+    try:
+        overdue = [r for r in cp.knowledge_proposals() if r.get("overdue")]
+    except (ValueError, OSError) as exc:
+        overdue = []
+        warnings.append(f"knowledge-proposals projection unreadable: {exc}")
+    for row in overdue:
+        warnings.append(
+            f"knowledge proposal {row.get('id')} (pack {row.get('pack')}) is overdue — "
+            f"recheck_date {row.get('recheck_date')} has passed; resolve it with "
+            "researchctl knowledge resolve"
+        )
 
     # Required freshness/control ledgers should exist once bootstrap has started.
     required = [

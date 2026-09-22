@@ -1,0 +1,142 @@
+# GENERATED — do not edit by hand; rebuild via tools/researchctl.py (control plane)
+totals:
+  use: 0
+  skip: 0
+  cited: 0
+packs:
+  "access-auth":
+    use: 0
+    skip: 0
+    cited: 0
+    last_used: null
+    last_cited: null
+    cycles: []
+    cited_cycles: []
+  "ai-agentic":
+    use: 0
+    skip: 0
+    cited: 0
+    last_used: null
+    last_cited: null
+    cycles: []
+    cited_cycles: []
+  "api-protocols":
+    use: 0
+    skip: 0
+    cited: 0
+    last_used: null
+    last_cited: null
+    cycles: []
+    cited_cycles: []
+  "business-logic":
+    use: 0
+    skip: 0
+    cited: 0
+    last_used: null
+    last_cited: null
+    cycles: []
+    cited_cycles: []
+  "cloud-cicd":
+    use: 0
+    skip: 0
+    cited: 0
+    last_used: null
+    last_cited: null
+    cycles: []
+    cited_cycles: []
+  "data-layer":
+    use: 0
+    skip: 0
+    cited: 0
+    last_used: null
+    last_cited: null
+    cycles: []
+    cited_cycles: []
+  "email-dns":
+    use: 0
+    skip: 0
+    cited: 0
+    last_used: null
+    last_cited: null
+    cycles: []
+    cited_cycles: []
+  "emerging":
+    use: 0
+    skip: 0
+    cited: 0
+    last_used: null
+    last_cited: null
+    cycles: []
+    cited_cycles: []
+  "file-media":
+    use: 0
+    skip: 0
+    cited: 0
+    last_used: null
+    last_cited: null
+    cycles: []
+    cited_cycles: []
+  "frameworks":
+    use: 0
+    skip: 0
+    cited: 0
+    last_used: null
+    last_cited: null
+    cycles: []
+    cited_cycles: []
+  "http-edge-cache":
+    use: 0
+    skip: 0
+    cited: 0
+    last_used: null
+    last_cited: null
+    cycles: []
+    cited_cycles: []
+  "mobile":
+    use: 0
+    skip: 0
+    cited: 0
+    last_used: null
+    last_cited: null
+    cycles: []
+    cited_cycles: []
+  "parsers-injection":
+    use: 0
+    skip: 0
+    cited: 0
+    last_used: null
+    last_cited: null
+    cycles: []
+    cited_cycles: []
+  "realtime":
+    use: 0
+    skip: 0
+    cited: 0
+    last_used: null
+    last_cited: null
+    cycles: []
+    cited_cycles: []
+  "supply-chain":
+    use: 0
+    skip: 0
+    cited: 0
+    last_used: null
+    last_cited: null
+    cycles: []
+    cited_cycles: []
+  "web-browser":
+    use: 0
+    skip: 0
+    cited: 0
+    last_used: null
+    last_cited: null
+    cycles: []
+    cited_cycles: []
+  "web3-emerging":
+    use: 0
+    skip: 0
+    cited: 0
+    last_used: null
+    last_cited: null
+    cycles: []
+    cited_cycles: []

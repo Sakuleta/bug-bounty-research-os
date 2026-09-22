@@ -515,6 +515,13 @@ human-approved raise.
   exceeds the configured cap, and warns when recorded actions exist with no `budget:`
   block (legacy workspaces stay readable).
 
+## Knowledge lifecycle (usage + reviewed promotion)
+
+- `researchctl knowledge usage [--unused]` — per-pack use/skip/cited counters derived from the ledger into `10_learning/knowledge-usage.yaml` (last_used, last_cited, cycles); `--unused` lists indexed packs never considered all-time; technique payloads may cite packs via `knowledge_packs` (validated by `researchctl technique evaluate` and re-checked by the audit); the audit warns when a modern workspace has not considered an indexed pack in the last 10 cycles (first 10, WARNING only).
+- `researchctl knowledge propose payload.json` — `{pack, title, body, technique_ref?, evidence_refs?, recheck_date?}` writes `10_learning/knowledge-proposals/<KP-id>-<slug>.md` and records `KNOWLEDGE_PROPOSED` with the pack's file digests and the artifact sha256; title/body are redacted before writing.
+- `researchctl knowledge proposals` — status projection (latest resolution wins) with an overdue flag; the audit warns on overdue PROPOSED rechecks and verifies the artifact digest.
+- `researchctl knowledge resolve <KP-id> APPLIED|REJECTED --reference <human ref> [--gate G-xxxx]` — records `KNOWLEDGE_RESOLVED`; APPLIED requires the pack file's content digest to change (a timestamp touch is refused: apply the pack edit first, then resolve); `--gate` optionally binds the resolution to a RESOLVED human gate; the free-text reference is recorded friction, not cryptographic proof. The proposals directory and both knowledge projections are write-protected.
+
 ## Executor replay + capture integrity
 
 `tools/test_replay.py` is the executor's replay-diff harness:
