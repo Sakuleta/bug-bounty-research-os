@@ -5,7 +5,7 @@
  * forbids, and asserts the plugin's actual decision (guard reason or
  * pre-execute deny). Run: `node conformance.test.mjs` from this directory.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply, canonicalDigest, dispatchHostReason, mentionsProtected, redactHeaderLine, redactSecrets, redactUrlSecrets, scopeReasonFor, selectToken, shapeFromArgs } from './index.js'
@@ -175,6 +175,24 @@ check('marker deleted but ledger present: ledger write still denied',
   !!h.guardReason(exec('write', { file_path: '11_runtime/events.jsonl', content: '{}' }, noMarker)))
 check('marker deleted but engagement binding present: protected write still denied',
   !!h.guardReason(exec('bash', { command: 'echo x >> 11_runtime/events.jsonl' }, noMarker)))
+
+// ---- W4: case-insensitive paths (default macOS APFS) + symlink resolution ----
+check('case-mismatched ledger write denied',
+  !!h.guardReason(exec('write', { file_path: join(osRoot, '11_RUNTIME', 'events.jsonl'), content: '{}' }, osRoot)))
+check('case-mismatched projection edit denied',
+  !!h.guardReason(exec('edit', { file_path: join(osRoot, '11_runtime', 'LAST-RESULT.md'), old_string: 'x', new_string: 'y' }, osRoot)))
+check('case-mismatched rm denied',
+  !!h.guardReason(exec('bash', { command: 'rm 11_RUNTIME/EVENTS.jsonl' }, osRoot)))
+check('case-mismatched redirect denied',
+  !!h.guardReason(exec('bash', { command: 'echo x > 11_runtime/Events.jsonl' }, osRoot)))
+check('case-mismatched OS_VERSION rm denied',
+  !!h.guardReason(exec('bash', { command: 'rm os_version' }, osRoot)))
+symlinkSync(join(osRoot, '11_runtime', 'events.jsonl'), join(osRoot, '11_runtime', 'ev-alias.jsonl'))
+check('write through a symlink to the ledger denied',
+  !!h.guardReason(exec('write', { file_path: join(osRoot, '11_runtime', 'ev-alias.jsonl'), content: '{}' }, osRoot)))
+check('sibling non-protected names stay allowed',
+  !h.guardReason(exec('write', { file_path: join(osRoot, '11_runtimex', 'events.jsonl'), content: '{}' }, osRoot))
+  && !h.guardReason(exec('bash', { command: 'rm 11_runtime_backup' }, osRoot)))
 
 // ---- R5: the preflight token store is control-plane-owned -------------------
 check('write to 11_runtime/action-tokens.jsonl denied',

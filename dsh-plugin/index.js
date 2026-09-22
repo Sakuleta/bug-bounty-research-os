@@ -204,6 +204,25 @@ function findOsRoot(cwd) {
   return undefined
 }
 
+/** Workspace-relative posix paths for an absolute path inside root.
+ *
+ *  The lexical resolution plus, when the target exists, the symlink-resolved one
+ *  (macOS `/var` → `/private/var`, case-insensitive variants, in-workspace
+ *  symlinks pointing at protected files): a write through any name of a protected
+ *  file is judged against the protected file. Returns [] when outside the root. */
+function relsFor(root, abs) {
+  const rels = []
+  const lex = relPosix(root, abs)
+  if (lex !== undefined) rels.push(lex)
+  try {
+    const realRoot = realpathSync(root)
+    const real = realpathSync(abs)
+    const r = relPosix(realRoot, real)
+    if (r !== undefined && !rels.includes(r)) rels.push(r)
+  } catch {}
+  return rels
+}
+
 /** Workspace-relative posix path for an absolute path inside root, else undefined. */
 function relPosix(root, abs) {
   const r = resolve(root)
@@ -216,8 +235,15 @@ function protectedReason(rel, root) {
   if (rel === OS_MARKER) {
     return 'research-os-enforcer: OS_VERSION is the workspace marker — removing or editing it disarms every rule, so direct writes are denied.'
   }
+  // Case-insensitive filesystems (default macOS APFS) resolve `11_RUNTIME/...` to
+  // the real protected file: match casefolded, but keep the as-written rel in the
+  // message text (user-visible messages unchanged).
+  const low = String(rel).toLowerCase()
+  if (low === OS_MARKER.toLowerCase()) {
+    return 'research-os-enforcer: OS_VERSION is the workspace marker — removing or editing it disarms every rule, so direct writes are denied.'
+  }
   for (const re of PROTECTED_PATTERNS) {
-    if (!re.test(rel)) continue
+    if (!re.test(low)) continue
     if (re === BOOTSTRAP_CONDITIONAL) {
       const st = root ? osStatus(root) : undefined
       if (st && st.engagement === 'BOOTSTRAP') return undefined
@@ -248,10 +274,13 @@ function ancestorProtectedReason(rel, root) {
   if (rel === '') {
     return 'research-os-enforcer: refusing to destroy the workspace root — it contains control-plane-owned material. Mutate state through tools/researchctl.py; the OS rebuilds projections on every mutation.'
   }
+  // Casefolded like protectedReason: `rm -rf 11_RUNTIME` deletes the same material.
+  const low = String(rel).toLowerCase()
   const st = root ? osStatus(root) : undefined
   for (const p of PROTECTED_TARGETS) {
-    if (rel !== p && !p.startsWith(rel + '/')) continue
-    if (rel === p && BOOTSTRAP_CONDITIONAL.test(p) && st && st.engagement === 'BOOTSTRAP') continue
+    const pl = p.toLowerCase()
+    if (low !== pl && !pl.startsWith(low + '/')) continue
+    if (low === pl && BOOTSTRAP_CONDITIONAL.test(pl) && st && st.engagement === 'BOOTSTRAP') continue
     return `research-os-enforcer: '${rel}' contains control-plane-owned material (${p}) — directory-level destruction is denied. Mutate state through tools/researchctl.py; the OS rebuilds projections on every mutation.`
   }
   return undefined
@@ -305,9 +334,11 @@ function fsWriteReason(exec) {
     if (!root) return undefined
     const abs = targetAbs(exec)
     if (!abs) return undefined
-    const rel = relPosix(root, abs)
-    if (rel === undefined) return undefined
-    return protectedReason(rel, root)
+    for (const rel of relsFor(root, abs)) {
+      const reason = protectedReason(rel, root)
+      if (reason) return reason
+    }
+    return undefined
   } catch (e) {
     log('guard-fs-error ' + e)
     if (mentionsProtected(argsText(exec))) {
@@ -364,10 +395,10 @@ function bashWriteReason(exec) {
     }
     for (const tok of targets) {
       const abs = isAbsolute(tok) ? tok : join(base, tok)
-      const rel = relPosix(root, abs)
-      if (rel === undefined) continue
-      const reason = protectedReason(rel, root) || ancestorProtectedReason(rel, root)
-      if (reason) return reason
+      for (const rel of relsFor(root, abs)) {
+        const reason = protectedReason(rel, root) || ancestorProtectedReason(rel, root)
+        if (reason) return reason
+      }
     }
     return undefined
   } catch (e) {
