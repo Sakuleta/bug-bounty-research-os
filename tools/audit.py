@@ -457,6 +457,30 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
                 "record a human-approved raise with `researchctl budget set`"
             )
 
+    # Browser scope violations are detection, not prevention: a run the runner
+    # flagged (`scope_violation: true` on the ACTION_RECORDED receipt) needs a
+    # resolved human gate on the same cycle for disposition — otherwise the audit
+    # errors (legacy warns). Counts ride along for the record.
+    for e in events:
+        if e.get("type") != "ACTION_RECORDED":
+            continue
+        payload = e.get("payload") or {}
+        if payload.get("scope_violation") is not True:
+            continue
+        cid = str(e.get("cycle_id") or "")
+        hops = payload.get("out_of_scope_hop_count")
+        gated = any(ge.get("type") == "HUMAN_GATE_RESOLVED" and str(ge.get("cycle_id") or "") == cid
+                    for ge in events)
+        if not gated:
+            message = (f"action {e.get('entity_id')} reports a browser scope_violation "
+                       f"({hops if isinstance(hops, int) else '?'} out-of-scope hops) with no "
+                       f"resolved human gate on cycle {cid or '<missing>'} — raise a human gate "
+                       "for disposition before citing this run")
+            if e.get("os_version"):
+                errors.append(message)
+            else:
+                warnings.append(f"legacy action record (pre-7.3, no os_version): {message}")
+
     # Provenance drift: the live engagement binding must equal the latest provenance
     # record. A hand edit of 00_control/engagement.yaml behind the ledger's back
     # (widened assets, flipped gate, lowered caps) mints tokens with unearned

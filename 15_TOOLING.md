@@ -338,10 +338,13 @@ JSON summary, no cookie values).
 > aborted/closed and recorded (`blocked_requests` cap 50 with masked URLs,
 > plus `blocked_count`). Redirect hops are the known limit (Playwright does
 > not route redirects): every out-of-scope hop is recorded
-> (`out_of_scope_hops`, masked) and warned in the run log, an out-of-scope
+> (`out_of_scope_hops`, masked, each with the seam's real decision reason) and
+> warned in the run log, an out-of-scope
 > main-frame landing sets `scope_violation: true` and skips the
 > screenshot/title, but a hop cannot be blocked — preflight a redirect target
-> as its own action. Downloads are disabled.
+> as its own action. The executor copies the violation onto the
+> `ACTION_RECORDED` receipt and flags it; the audit errors until a resolved
+> human gate dispositions it. Downloads are disabled.
 
 Flow: `researchctl prepare` with
 `"tool_family": "browser"` and `request_shape` `{"url": …, "principal": …}` → the

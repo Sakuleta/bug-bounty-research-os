@@ -690,6 +690,36 @@ check('a non-zero browser runner with a failed receipt still carries the warning
     && w2.text.includes('profile: lab/bua-w2'))
 }
 
+// 10h. v8.2 W12: a runner-reported scope violation rides the receipt and flags it.
+{
+  cpSync(join(OS_REPO, 'tools', 'bua', 'run.mjs'), join(root, 'tools', 'bua', 'run.mjs'))
+  writeFileSync(join(root, 'tools', 'bua', 'run.mjs'), [
+    "import { mkdirSync, writeFileSync } from 'node:fs'",
+    "import { join } from 'node:path'",
+    "const args = process.argv.slice(2)",
+    "const get = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d }",
+    "const action = get('--action', 'bua')",
+    "mkdirSync(join('08_artifacts/raw'), { recursive: true })",
+    "const summary = { url: 'https://t.example/', scope_violation: true, out_of_scope_hop_count: 2, out_of_scope_hops: [{ host: 'evil.example', reason: 'out_of_scope' }] }",
+    "writeFileSync(join('08_artifacts/raw', action + '-w12.bua.json'), JSON.stringify(summary))",
+    "console.log('ARTIFACT ' + join('08_artifacts/raw', action + '-w12.bua.json'))",
+    "console.log('bua-runner: WARNING followed redirect hop denied (out_of_scope; playwright does not route redirect hops) host=evil.example')",
+    'process.exit(0)',
+  ].join('\n') + '\n')
+  const violUrl = new URL('/w12', url).toString()
+  writeFileSync(preparePath, JSON.stringify({ ...preparePayload, target: violUrl, tool_family: 'browser', request_shape: browserShapeFromArgs({ url: violUrl, principal: 'researcher-A' }) }))
+  execFileSync('python3', [join(root, 'tools', 'researchctl.py'), root, 'prepare', preparePath], { encoding: 'utf8', timeout: 60000 })
+  const w12 = await runControlledBrowser({ root, args: { url: violUrl, principal: 'researcher-A' } })
+  const violLedger = readFileSync(join(root, '11_runtime/events.jsonl'), 'utf8')
+  const violAction = violLedger.split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    .filter((event) => event.type === 'ACTION_RECORDED').pop()
+  check('the violation rides the ACTION_RECORDED payload',
+    Boolean(violAction) && violAction.payload.scope_violation === true
+    && violAction.payload.out_of_scope_hop_count === 2)
+  check('the executor tool text surfaces the flagged receipt',
+    w12.text.includes('FLAGGED') && w12.text.includes('scope_violation'))
+}
+
 server.close()
 rmSync(root, { recursive: true, force: true })
 console.log(`\n${passed}/${passed + failures.length} passed`)

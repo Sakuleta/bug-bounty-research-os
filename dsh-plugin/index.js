@@ -2193,8 +2193,35 @@ async function readBodyCapped(resp, maxBytes) {
 
 const RECEIPT_FAILURE_WARNING = 'the request WAS executed but the receipt could not be recorded — do not rely on this action as receipted'
 
+/** Read the runner's machine summary (`ARTIFACT ...bua.json` on stdout) for scope
+ *  signals the exit code cannot carry: a followed out-of-scope redirect hop sets
+ *  `scope_violation: true` and records `out_of_scope_hops`. Returns the flags, or
+ *  {} when the runner reported none (stubs, old runners, failed starts). */
+function readBrowserSummary(root, stdout) {
+  try {
+    for (const line of String(stdout || '').split('\n')) {
+      const m = /^ARTIFACT\s+(.+?\.bua\.json)\s*$/.exec(line.trim())
+      if (!m) continue
+      const abs = join(root, m[1]);
+      if (!abs.startsWith(resolve(root) + sep) && abs !== resolve(root)) continue
+      let parsed = null
+      try { parsed = JSON.parse(readFileSync(abs, 'utf8')) } catch { continue }
+      if (!parsed || typeof parsed !== 'object') continue
+      const flags = {}
+      if (parsed.scope_violation === true) flags.scope_violation = true
+      if (Number.isInteger(parsed.out_of_scope_hop_count)) {
+        flags.out_of_scope_hop_count = parsed.out_of_scope_hop_count
+      } else if (Array.isArray(parsed.out_of_scope_hops)) {
+        flags.out_of_scope_hop_count = parsed.out_of_scope_hops.length
+      }
+      if (flags.scope_violation || flags.out_of_scope_hop_count) return flags
+    }
+  } catch { /* a summary that cannot be read carries no flags */ }
+  return {}
+}
+
 /** Register a capture as evidence and record ACTION_RECORDED through the control plane. */
-function registerCapture({ root, relPath, token, source }) {
+function registerCapture({ root, relPath, token, source, runFlags }) {
   let evidence = ''
   const python = 'python3'
   const cli = join(root, 'tools', 'researchctl.py')
@@ -2209,6 +2236,14 @@ function registerCapture({ root, relPath, token, source }) {
   try {
     const preflight = (token.preflight && typeof token.preflight === 'object') ? token.preflight : {}
     const payload = { ...preflight, id: token.action_id, token_nonce: token.nonce, ...(evidence ? { evidence_refs: [evidence] } : {}) }
+    // Browser scope signals ride the receipt: a run the runner flagged carries
+    // scope_violation + the hop count, so the audit can demand human disposition.
+    if (runFlags && (runFlags.scope_violation || runFlags.out_of_scope_hop_count)) {
+      if (runFlags.scope_violation) payload.scope_violation = true
+      if (Number.isInteger(runFlags.out_of_scope_hop_count)) {
+        payload.out_of_scope_hop_count = runFlags.out_of_scope_hop_count
+      }
+    }
     const payloadPath = join(tmpdir(), `research-os-action-${token.nonce}.json`)
     writeFileSync(payloadPath, JSON.stringify(payload))
     execFileSync(python, [cli, root, 'action', payloadPath], { encoding: 'utf8', timeout: 60000 })
@@ -2500,12 +2535,19 @@ async function runControlledBrowser({ root, args }) {
     log('executor-capture-error ' + e)
   }
   const relPath = rel.split(sep).join('/')
-  const { evidence, recorded } = registerCapture({ root, relPath, token, source: 'browser-executor' })
+  const runFlags = readBrowserSummary(root, stdout)
+  if (runFlags.scope_violation) {
+    log(`FLAG(executor browser) ${safeUrl} :: the runner reported scope_violation with ${runFlags.out_of_scope_hop_count || 0} out-of-scope hops — receipt flagged for human review`)
+  }
+  const { evidence, recorded } = registerCapture({ root, relPath, token, source: 'browser-executor', runFlags })
   const receipted = captureWritten && recorded && Boolean(evidence)
   const summary = exitCode === 0
     ? 'runner exit 0'
     : `runner ${exitCode === null ? 'not started' : 'exit ' + exitCode}${error ? ' — ' + error : ''}`
-  const base = `research_os_browser ${safeUrl} → ${summary}\n- action: ${token.action_id} (token consumed)\n- profile: ${browserProfile}${resolved.note ? ' (' + resolved.note + ')' : ''}\n- evidence: ${recorded && evidence ? evidence : (evidence || 'NOT REGISTERED')}\n- capture: ${relPath}`
+  const flagged = runFlags.scope_violation
+    ? `\n- scope: FLAGGED — scope_violation with ${runFlags.out_of_scope_hop_count || 0} out-of-scope hops (raise a human gate for disposition; the audit errors until one is resolved)`
+    : ''
+  const base = `research_os_browser ${safeUrl} → ${summary}\n- action: ${token.action_id} (token consumed)${flagged}\n- profile: ${browserProfile}${resolved.note ? ' (' + resolved.note + ')' : ''}\n- evidence: ${recorded && evidence ? evidence : (evidence || 'NOT REGISTERED')}\n- capture: ${relPath}`
   // Once the runner was started, a failed receipt must surface even on a non-zero exit.
   if (dispatched && !receipted) {
     return { ok: false, text: `${base}\n\nWARNING: ${RECEIPT_FAILURE_WARNING}` }

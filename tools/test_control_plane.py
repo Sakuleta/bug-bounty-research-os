@@ -3404,4 +3404,21 @@ check("v8.2 W2: the audit errors on an action outside the binding",
       _sub2m.returncode != 0 and "identity binding" in (_sub2m.stdout + _sub2m.stderr))
 
 
+
+# v8.2 W12: browser scope violations ride the receipt and need a human gate.
+_nr12, _nc12 = _w7_root()
+_nc12.record_action({**_w7_action(), "scope_violation": True, "out_of_scope_hop_count": 2})
+_sub12 = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nr12)],
+                        capture_output=True, text=True)
+check("v8.2 W12: an undispositioned scope_violation fails the audit",
+      _sub12.returncode != 0 and "scope_violation" in (_sub12.stdout + _sub12.stderr))
+_nc12.request_gate("G-0001", {"cycle_id": "C-0001",
+                              "what_is_needed": "Scope violation review on the browser run",
+                              "why_human_only": "Only the researcher can disposition scope drift",
+                              "resume_after": "Gate resolution"})
+_nc12.resolve_gate("G-0001", decision="APPROVED", reference="ticket-scope-1")
+_sub12g = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nr12)],
+                         capture_output=True, text=True)
+check("v8.2 W12: a gate-dispositioned violation audits clean", _sub12g.returncode == 0)
+
 print(f"\n{len(passed)} checks passed")

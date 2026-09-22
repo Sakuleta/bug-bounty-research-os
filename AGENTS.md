@@ -201,9 +201,13 @@ auto-attach — an out-of-scope worker socket the route layer missed is recorded
 as a scope violation, capture skipped, never silent. Redirect hops are the known limit: Playwright does not route
 redirects (a request and its redirects are one unit), so a followed hop reaches
 its target; the runner records every out-of-scope hop (main-frame and
-subresource, `out_of_scope_hops`, masked, with a loud run-log warning) and,
+subresource, `out_of_scope_hops`, masked, each carrying the seam's real decision
+reason, with a loud run-log warning) and,
 when the main-frame navigation ends out of scope, sets `scope_violation: true`
 and skips screenshot/title instead of capturing it as a normal artifact.
+The executor carries the violation onto the receipt (`scope_violation` +
+`out_of_scope_hop_count` on `ACTION_RECORDED`), flags it in the tool text, and
+`tools/audit.py` errors until a resolved human gate on the cycle dispositions it.
 Redirect targets must be preflighted as their own action. Downloads are
 disabled (`acceptDownloads: false`); the runner's own actions are read-only,
 while page-initiated requests to in-scope hosts are in scope by definition.
