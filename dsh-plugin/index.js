@@ -87,7 +87,7 @@
  */
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
 import { homedir, tmpdir } from 'node:os'
 import { isAbsolute, join, resolve, sep } from 'node:path'
@@ -348,33 +348,158 @@ function fsWriteReason(exec) {
   }
 }
 
+/** Strip one layer of surrounding single/double quotes from an extracted target. */
+function stripQuotes(token) {
+  const t = String(token)
+  if (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))) {
+    return t.slice(1, -1)
+  }
+  return t
+}
+
+/** Expand one `{a,b,...}` group (recursively, for multiple groups). A group without
+ *  a comma is not an expansion (`{a}` stays literal, like bash). */
+function braceExpand(token) {
+  const open = token.indexOf('{')
+  if (open < 0) return [token]
+  const close = token.indexOf('}', open)
+  if (close < 0) return [token]
+  const inner = token.slice(open + 1, close)
+  if (!inner.includes(',')) return [token]
+  return inner.split(',').flatMap((part) => braceExpand(token.slice(0, open) + part + token.slice(close + 1)))
+}
+
+/** Translate a shell glob to a RegExp over one path level (`*` never crosses `/`). */
+function globToRegExp(pattern) {
+  let out = ''
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i]
+    if (c === '*') out += '[^/]*'
+    else if (c === '?') out += '[^/]'
+    else if (c === '[') {
+      const close = pattern.indexOf(']', i + 1)
+      out += close < 0 ? '\\[' : pattern.slice(i, close + 1)
+      if (close >= 0) i = close
+    } else if ('\\.+^${}()|'.includes(c)) out += '\\' + c
+    else out += c
+  }
+  return new RegExp('^' + out + '$')
+}
+
+/** Expand a glob token against the filesystem. Returns the matching absolute paths,
+ *  or null when the parent directory cannot be read (unresolvable — callers fail
+ *  closed on the static prefix instead). */
+function expandGlob(base, token) {
+  const absPattern = isAbsolute(token) ? token : join(base, token)
+  const wildAt = absPattern.search(/[*?\[]/)
+  const slash = absPattern.slice(0, wildAt).lastIndexOf(sep)
+  const dir = slash < 0 ? base : absPattern.slice(0, slash)
+  let names
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return null
+  }
+  const re = globToRegExp(absPattern)
+  return names.map((name) => join(dir, name)).filter((p) => re.test(p))
+}
+
+/** Fail-closed static-prefix rule for unresolvable globs: deny when the literal
+ *  prefix before the first wildcard can reach protected material — i.e. it equals,
+ *  contains, or string-prefixes a protected path (so `11_runtim*` cannot slip past
+ *  `11_runtime/`). A bare leading wildcard denies (it can reach anything). */
+function prefixReachesProtected(root, base, token) {
+  const wildAt = token.search(/[*?\[]/)
+  if (wildAt <= 0) return true
+  const abs = isAbsolute(token.slice(0, wildAt)) ? token.slice(0, wildAt) : join(base, token.slice(0, wildAt))
+  for (const rel of relsFor(root, abs)) {
+    const low = rel.toLowerCase()
+    for (const p of PROTECTED_TARGETS) {
+      const pl = p.toLowerCase()
+      if (pl.startsWith(low) || low.startsWith(pl)) return true
+    }
+  }
+  return false
+}
+
+/** Judge one extracted target token (quotes stripped, braces expanded, globs
+ *  resolved) against every applicable base. Returns the denial reason or undefined. */
+function targetReason(root, bases, token) {
+  for (const variant of braceExpand(stripQuotes(token))) {
+    if (/[*?\[]/.test(variant)) {
+      let matches = null
+      for (const base of bases) {
+        const expanded = expandGlob(base, variant)
+        if (expanded === null) continue
+        matches = (matches || []).concat(expanded)
+      }
+      if (matches !== null && matches.length > 0) {
+        for (const abs of matches) {
+          for (const rel of relsFor(root, abs)) {
+            const reason = protectedReason(rel, root) || ancestorProtectedReason(rel, root)
+            if (reason) return reason
+          }
+        }
+        continue
+      }
+      for (const base of bases) {
+        if (prefixReachesProtected(root, base, variant)) {
+          return `research-os-enforcer: '${variant}' is an unresolvable glob whose static prefix can reach control-plane-owned material — refusing (failing closed). Mutate state through tools/researchctl.py; the OS rebuilds projections on every mutation.`
+        }
+      }
+      continue
+    }
+    for (const base of bases) {
+      const abs = isAbsolute(variant) ? variant : join(base, variant)
+      for (const rel of relsFor(root, abs)) {
+        const reason = protectedReason(rel, root) || ancestorProtectedReason(rel, root)
+        if (reason) return reason
+      }
+    }
+  }
+  return undefined
+}
 /** R1/R2 — the same protection for shell write shapes, judging the WRITE TARGET.
  *
  *  `2>&1` / `>&2` are descriptor duplications, not file writes: only a real
  *  redirect target (or the path arguments of an explicitly writing tool) counts,
  *  so reading a protected file through bash stays allowed (live-verified fix).
  *  Destructive shapes (rm/rmdir/unlink/mv/cp/dd/find -delete/ln -sf/perl -i/sed -i)
- *  resolve their targets too — bare names, `dd of=` operands and globs (the static
- *  prefix before the first wildcard) — and are denied when the resolved path equals
- *  or is an ancestor of control-plane-owned material. `cd <dir> && …` rebases the
- *  relative targets, so `cd 11_runtime && rm events.jsonl` cannot slip through.
+ *  resolve their targets too — bare names, `dd of=` operands, brace expansions and
+ *  globs (expanded against the filesystem when readable, else the static prefix
+ *  before the first wildcard fails closed) — and are denied when the resolved path
+ *  equals or is an ancestor of control-plane-owned material. Surrounding quotes are
+ *  stripped and `$IFS`/`${IFS}` normalized before tokenization. `cd <dir> && …`
+ *  adds the rebased directory as another base, and an untrusted `workdir` never
+ *  moves the root (session cwd) but its targets are judged too — so
+ *  `cd 11_runtime && rm events.jsonl` cannot slip through.
  */
 function bashWriteReason(exec) {
   try {
     if (!exec || exec.name !== 'bash') return undefined
     const args = exec.arguments || {}
     if (typeof args.command !== 'string') return undefined
-    const cwd = (typeof args.workdir === 'string' && args.workdir) ? args.workdir : sessionCwd(exec)
+    // The root is discovered from the session cwd only — never from an untrusted
+    // `workdir`, which could otherwise move the command outside the workspace.
+    const cwd = sessionCwd(exec)
     const root = findOsRoot(cwd)
     if (!root) return undefined
-    const cmd = args.command
+    // `$IFS`/`${IFS}` split words at the shell: normalize to whitespace before
+    // tokenization so `rm${IFS}11_runtime/events.jsonl` cannot hide the target.
+    const cmd = args.command.replace(/\$\{IFS\}|\$IFS/g, ' ')
     const targets = []
     const redirected = /(^|[^>&])>>?\s*(?!&)([^\s;&|()<>]+)/g
     for (const m of cmd.matchAll(redirected)) targets.push(m[2])
-    let base = cwd || root
+    const bases = [cwd || root]
     for (const m of cmd.matchAll(/(?:^|[;&|]\s*)cd\s+([^\s;&|()<>]+)/g)) {
       const abs = isAbsolute(m[1]) ? m[1] : join(cwd || root, m[1])
-      if (relPosix(root, abs) !== undefined) base = abs
+      if (relPosix(root, abs) !== undefined) bases.push(abs)
+    }
+    // Relative targets are canonicalized from the session cwd — and also through
+    // any provided workdir, so a protected hit computed through it still denies.
+    if (typeof args.workdir === 'string' && args.workdir) {
+      const wd = isAbsolute(args.workdir) ? args.workdir : join(cwd || root, args.workdir)
+      if (!bases.includes(wd)) bases.push(wd)
     }
     const DESTRUCTIVE = /\b(tee|truncate|shred|rm|rmdir|unlink|mv|cp|dd|install)\b|sed\s+-i|perl\s+-i|-delete\b|\bln\s+-s/
     if (DESTRUCTIVE.test(cmd)) {
@@ -383,9 +508,6 @@ function bashWriteReason(exec) {
         let tok = t
         if (tok.startsWith('of=')) tok = tok.slice(3)
         else if (tok.includes('=')) continue
-        const globAt = tok.search(/[*?\[]/)
-        if (globAt === 0) { targets.push('.'); continue }
-        if (globAt > 0) tok = tok.slice(0, globAt)
         targets.push(tok)
       }
     }
@@ -394,11 +516,8 @@ function bashWriteReason(exec) {
       for (const t of cmd.split(/[\s"'`|&;()<>]+/)) if (t.includes('/')) targets.push(t)
     }
     for (const tok of targets) {
-      const abs = isAbsolute(tok) ? tok : join(base, tok)
-      for (const rel of relsFor(root, abs)) {
-        const reason = protectedReason(rel, root) || ancestorProtectedReason(rel, root)
-        if (reason) return reason
-      }
+      const reason = targetReason(root, bases, tok)
+      if (reason) return reason
     }
     return undefined
   } catch (e) {

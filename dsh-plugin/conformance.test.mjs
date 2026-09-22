@@ -194,6 +194,28 @@ check('sibling non-protected names stay allowed',
   !h.guardReason(exec('write', { file_path: join(osRoot, '11_runtimex', 'events.jsonl'), content: '{}' }, osRoot))
   && !h.guardReason(exec('bash', { command: 'rm 11_runtime_backup' }, osRoot)))
 
+// ---- W5: shell write-target parsing (quotes, globs, braces, $IFS, workdir) ----
+check('double-quoted redirect target denied',
+  !!h.guardReason(exec('bash', { command: 'echo x > "11_runtime/events.jsonl"' }, osRoot)))
+check('single-quoted redirect target denied',
+  !!h.guardReason(exec('bash', { command: "echo x > '11_runtime/events.jsonl'" }, osRoot)))
+check('glob to a protected file denied',
+  !!h.guardReason(exec('bash', { command: 'rm -rf 11_runtime/*' }, osRoot)))
+check('glob prefix reaching protected material denied (fail closed)',
+  !!h.guardReason(exec('bash', { command: 'rm -rf 11_runtim*' }, osRoot)))
+check('brace expansion to a protected file denied',
+  !!h.guardReason(exec('bash', { command: 'rm -rf 11_runtime/{events.jsonl,run-status.yaml}' }, osRoot)))
+check('$IFS separator denied',
+  !!h.guardReason(exec('bash', { command: 'rm -rf 11_runtime$IFS' }, osRoot)))
+check('${IFS} separator denied',
+  !!h.guardReason(exec('bash', { command: 'rm${IFS}-rf${IFS}11_runtime/events.jsonl' }, osRoot)))
+check('a workdir outside the workspace does not move the root',
+  !!h.guardReason(exec('bash', { command: 'rm -rf 11_runtime/events.jsonl', workdir: plain }, osRoot)))
+check('benign tmp glob allowed',
+  !h.guardReason(exec('bash', { command: 'rm tmp/*' }, osRoot)))
+check('benign quoted tmp rm allowed',
+  !h.guardReason(exec('bash', { command: 'rm "tmp/file"' }, osRoot)))
+
 // ---- R5: the preflight token store is control-plane-owned -------------------
 check('write to 11_runtime/action-tokens.jsonl denied',
   !!h.guardReason(exec('write', { file_path: '11_runtime/action-tokens.jsonl', content: '{}' }, osRoot)))
