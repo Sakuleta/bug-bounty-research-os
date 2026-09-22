@@ -3515,11 +3515,10 @@ check("v8.2 W2: the audit errors on an action outside the binding",
 
 
 # v8.2 W12: browser scope violations ride the receipt and need a human gate.
-# The receipt field is the spec-named `out_of_scope_hops` (hop records, as the
-# runner reports them); a legacy integer `out_of_scope_hop_count` still counts.
+# The receipt field is the spec-named `out_of_scope_hops` count; a legacy
+# `out_of_scope_hop_count` still counts.
 _nr12, _nc12 = _w7_root()
-_viol12 = _nc12.record_action({**_w7_action(), "scope_violation": True, "out_of_scope_hops": [
-    {"host": "evil.example", "reason": "out_of_scope"}]})
+_viol12 = _nc12.record_action({**_w7_action(), "scope_violation": True, "out_of_scope_hops": 2})
 _sub12 = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nr12)],
                         capture_output=True, text=True)
 check("v8.2 W12: an undispositioned scope_violation fails the audit",
@@ -3546,8 +3545,7 @@ _nc12p.request_gate("G-0001", {"cycle_id": "C-0001",
                                "why_human_only": "Only the researcher can disposition scope drift",
                                "resume_after": "Gate resolution"})
 _nc12p.resolve_gate("G-0001", decision="APPROVED", reference="ticket-scope-0")
-_viol12p = _nc12p.record_action({**_w7_action(), "scope_violation": True, "out_of_scope_hops": [
-    {"host": "evil.example", "reason": "out_of_scope"}]})
+_viol12p = _nc12p.record_action({**_w7_action(), "scope_violation": True, "out_of_scope_hops": 2})
 _aid12p = _viol12p["entity_id"]
 _sub12p = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nr12p)],
                          capture_output=True, text=True)

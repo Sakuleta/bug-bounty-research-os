@@ -489,13 +489,10 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
             continue
         cid = str(e.get("cycle_id") or "")
         aid = str(e.get("entity_id") or "")
-        hops = payload.get("out_of_scope_hops")
-        if isinstance(hops, list):
-            hop_count: int | str = len(hops)
-        else:
-            # Legacy receipts carried the integer `out_of_scope_hop_count`.
-            legacy = payload.get("out_of_scope_hop_count")
-            hop_count = legacy if isinstance(legacy, int) else "?"
+        # The spec-named receipt field is `out_of_scope_hops` (a count);
+        # legacy receipts carried `out_of_scope_hop_count`.
+        hops = payload.get("out_of_scope_hops", payload.get("out_of_scope_hop_count"))
+        hop_count: int | str = hops if type(hops) is int else "?"
         later = [ge for ge in events[idx + 1:]
                  if ge.get("type") == "HUMAN_GATE_RESOLVED"
                  and str(ge.get("cycle_id") or "") == cid]

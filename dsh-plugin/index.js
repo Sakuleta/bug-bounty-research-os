@@ -2209,12 +2209,14 @@ function readBrowserSummary(root, stdout) {
       if (!parsed || typeof parsed !== 'object') continue
       const flags = {}
       if (parsed.scope_violation === true) flags.scope_violation = true
-      // The receipt carries the spec-named `out_of_scope_hops` hop records, as
-      // the runner reports them (capped at the runner's own cap).
-      if (Array.isArray(parsed.out_of_scope_hops)) {
-        flags.out_of_scope_hops = parsed.out_of_scope_hops.slice(0, 50)
+      // The receipt carries the spec-named `out_of_scope_hops` count, as the
+      // runner reports it (integer preferred, hop-record length as fallback).
+      if (Number.isInteger(parsed.out_of_scope_hop_count)) {
+        flags.out_of_scope_hops = parsed.out_of_scope_hop_count
+      } else if (Array.isArray(parsed.out_of_scope_hops)) {
+        flags.out_of_scope_hops = parsed.out_of_scope_hops.length
       }
-      if (flags.scope_violation || (flags.out_of_scope_hops && flags.out_of_scope_hops.length)) return flags
+      if (flags.scope_violation || flags.out_of_scope_hops) return flags
     }
   } catch { /* a summary that cannot be read carries no flags */ }
   return {}
@@ -2242,12 +2244,12 @@ function registerCapture({ root, relPath, token, source, runFlags, browserProfil
       payload.browser_profile = browserProfile
     }
     // Browser scope signals ride the receipt: a run the runner flagged carries
-    // scope_violation + the spec-named `out_of_scope_hops` hop records, so the
-    // audit can demand human disposition.
+    // scope_violation + the spec-named `out_of_scope_hops` count, so the audit
+    // can demand human disposition.
     if (runFlags && (runFlags.scope_violation || runFlags.out_of_scope_hops)) {
       if (runFlags.scope_violation) payload.scope_violation = true
-      if (Array.isArray(runFlags.out_of_scope_hops)) {
-        payload.out_of_scope_hops = runFlags.out_of_scope_hops.slice(0, 50)
+      if (Number.isInteger(runFlags.out_of_scope_hops)) {
+        payload.out_of_scope_hops = runFlags.out_of_scope_hops
       }
     }
     const payloadPath = join(tmpdir(), `research-os-action-${token.nonce}.json`)
@@ -2542,7 +2544,7 @@ async function runControlledBrowser({ root, args }) {
   }
   const relPath = rel.split(sep).join('/')
   const runFlags = readBrowserSummary(root, stdout)
-  const hopCount = Array.isArray(runFlags.out_of_scope_hops) ? runFlags.out_of_scope_hops.length : 0
+  const hopCount = Number.isInteger(runFlags.out_of_scope_hops) ? runFlags.out_of_scope_hops : 0
   if (runFlags.scope_violation) {
     log(`FLAG(executor browser) ${safeUrl} :: the runner reported scope_violation with ${hopCount} out-of-scope hops — receipt flagged for human review`)
   }
