@@ -110,6 +110,20 @@ check("the question carries the cycle outputs and the pack guide",
 honest = check_knowledge_use(ALLOWED, "C-0001", client=honesty_client(0.9))
 check("a high use score produces no warning", honest["warnings"] == []
       and honest["checked"][0]["pack"] == "fixture")
+egress: dict = {}
+
+
+def redaction_client(state, questions):
+    egress.update(state)
+    return honesty_client(0.9)(state, questions)
+
+
+check_knowledge_use(ALLOWED, "C-0001", client=redaction_client,
+                    cycle_outputs="the token glpat-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 "
+                                  "appeared in the response header",
+                    packs=["fixture"], guides={"fixture": "cache semantics"})
+check("cycle outputs are redacted before egress",
+      "[REDACTED]" in egress["cycle_outputs"] and "glpat-" not in egress["cycle_outputs"])
 
 # 3. Never a fail: the audit's exit code and error count are unchanged by the check.
 def audit_run() -> tuple[int, int]:

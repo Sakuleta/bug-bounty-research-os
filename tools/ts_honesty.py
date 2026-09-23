@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from control_plane import ControlPlane, external_judgment_allowed  # noqa: E402
+from control_plane import ControlPlane, external_judgment_allowed, redact  # noqa: E402
 from ts_cost import record_seam_cost  # noqa: E402
 from ts_http import model_name, post_json  # noqa: E402
 from ts_label import cycle_transcript  # noqa: E402
@@ -103,9 +103,9 @@ def check_knowledge_use(root: Path, cycle_id: str, *, client=None, live: bool = 
         }
         for name in names
     }
-    state = {"cycle_id": cycle_id, "cycle_outputs": outputs,
+    state = {"cycle_id": cycle_id, "cycle_outputs": redact(outputs),
              **{f"pack_{name}": name for name in names},
-             **{f"pack_guide_{name}": ((guides or {}).get(name) or pack_guide(root, name))
+             **{f"pack_guide_{name}": redact((guides or {}).get(name) or pack_guide(root, name))
                 for name in names}}
     call = client or (lambda s, q: post_json(
         {"state": s, "model": model_name(), "questions": q},

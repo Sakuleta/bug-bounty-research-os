@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from control_plane import ControlPlane, external_judgment_allowed  # noqa: E402
+from control_plane import ControlPlane, external_judgment_allowed, redact  # noqa: E402
 from ts_cost import record_seam_cost  # noqa: E402
 from ts_http import model_name, post_json  # noqa: E402
 
@@ -103,7 +103,7 @@ def rank_hypotheses(root: Path, *, client=None, live: bool = True, timeout: int 
     if resolved_question is None and cycle_id:
         resolved_question = str((cycle.cycle_data(cycle_id) or {}).get("objective") or "")
     state = {"question": resolved_question or "the current cycle question",
-             "hypotheses": {f"hypothesis_{i}": {"id": e["id"], "text": e["text"]}
+             "hypotheses": {f"hypothesis_{i}": {"id": e["id"], "text": redact(str(e["text"]))}
                             for i, e in enumerate(entries, 1)}}
     questions = {
         f"info_{i}": {

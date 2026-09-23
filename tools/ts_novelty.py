@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from control_plane import ControlPlane, external_judgment_allowed  # noqa: E402
+from control_plane import ControlPlane, external_judgment_allowed, redact  # noqa: E402
 from ts_cost import record_seam_cost  # noqa: E402
 from ts_http import model_name, post_json, validate_choice  # noqa: E402
 
@@ -152,8 +152,9 @@ def check_novelty(root: Path, candidate: dict[str, Any], pool: list[dict[str, An
     model = None
     usage_total: dict[str, int] = {}
     for entry in blocked:
-        state = {"candidate": {"id": candidate.get("id"), "text": candidate.get("text")},
-                 "archived": {"id": entry["id"], "text": entry["text"]}}
+        state = {"candidate": {"id": candidate.get("id"),
+                               "text": redact(str(candidate.get("text") or ""))},
+                 "archived": {"id": entry["id"], "text": redact(entry["text"])}}
         resp = call(state, questions)
         model = resp.get("model") or model
         usage = resp.get("usage")

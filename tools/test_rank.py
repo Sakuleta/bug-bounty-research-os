@@ -139,6 +139,14 @@ override = rank_hypotheses(ALLOWED, client=rank_client({"info_1": 0.9}),
                            question="a caller-supplied question")
 check("a caller-supplied hypothesis list and question are honored",
       override["pick"] == "H-9000" and calls[-1][0]["question"] == "a caller-supplied question")
+secret = rank_hypotheses(ALLOWED, client=rank_client({"info_1": 0.9}),
+                         hypotheses=[{"id": "H-9001",
+                                      "text": "Does the token glpat-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 "
+                                              "reach the client?"}],
+                         question="q")
+check("hypothesis text is redacted before egress",
+      "[REDACTED]" in calls[-1][0]["hypotheses"]["hypothesis_1"]["text"]
+      and "glpat-" not in calls[-1][0]["hypotheses"]["hypothesis_1"]["text"])
 
 # 5. Invalid scores fail closed: they cannot win the pick.
 def invalid_client(state, questions):

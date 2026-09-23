@@ -123,6 +123,21 @@ check("the aid writes no control-plane events (advisory only)",
       cp._read_events() == [] and cp.evidence_index() == {})
 check("the aid ledgers its usage as an estimated cost row",
       any(r["decision"] == "novelty" and r["estimated"] for r in cost_rows(ALLOWED)))
+egress: dict = {}
+
+
+def redaction_client(state, questions):
+    egress.update(state)
+    return pair_client("different", 0.9)(state, questions)
+
+
+check_novelty(ALLOWED, {"id": "H-0098",
+                        "text": "The token glpat-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 "
+                                "leaked in the export endpoint response."},
+              pool=[{"id": "H-0097", "text": "A token leaked from the export endpoint."}],
+              client=redaction_client)
+check("the candidate and archived texts are redacted before egress",
+      "[REDACTED]" in egress["candidate"]["text"] and "glpat-" not in egress["candidate"]["text"])
 
 # 6. The pool comes from the ledger's hypotheses when none is given.
 pool_root = workspace()
