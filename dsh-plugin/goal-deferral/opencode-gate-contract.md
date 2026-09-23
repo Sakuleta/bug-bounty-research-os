@@ -28,9 +28,11 @@ the normative text that change must implement, plus the executable block/allow m
    format and verdict rules owned by `tools/leases.py`; the dependency-free reader is
    `dsh-plugin/goal-deferral/index.js:readLeaseVerdict`). It **blocks** on:
    `active`, `awaiting-reconciliation`, `unknown-recovery-required`, an expired `active`
-   lease, a missing or unreadable registry, a corrupt line, and an unverifiable version
-   chain. It **allows** on: `released` (reconciled, commit recorded) and `no-lease`
-   (a readable registry with no record for this run).
+   lease, a missing or unreadable registry, a corrupt line (an undecodable byte, or a
+   raw U+0085/U+2028/U+2029 — the shared writer escapes those), an unverifiable version
+   chain, and a `released` record whose commit does not exist as a commit in the run's
+   git work tree. It **allows** on: `released` (reconciled, commit recorded **and
+   verified to exist**) and `no-lease` (a readable registry with no record for this run).
 
 3. **No Task-success shortcut.** A terminal Task — even one the parent assistant message
    reconciled — is not process exit, not output reconciliation and not a commit

@@ -464,30 +464,50 @@ is the goal-deferral amendment (`SPRINT-DSH-SPEC.md` D0, amending the frozen
   `version`, owner pid/session lineage, process-group id, raw exit code and commit.
   `python3 tools/lease_run.py --root R --run ID [--interval S] -- <cmd>` acquires the
   lease before spawning, heartbeats while the process group lives and records the raw
-  exit code as `awaiting-reconciliation` — process exit is never success. A wrapper
-  killed with SIGKILL leaves the lease `active`; expiry (3x the interval, strictly
-  greater than 2x, so a lease can never self-expire between heartbeats) turns a missed
-  heartbeat into `unknown-recovery-required`.
+  exit code as `awaiting-reconciliation` — process exit is never success. Every writer
+  is bound to the lease generation (`lease_id` from `acquire`; a stale wrapper cannot
+  mutate the next generation) and `heartbeat`/`mark_awaiting` additionally require the
+  caller to be the recorded owner pid. `acquire` refuses an expired lease instead of
+  taking it over: recovery is explicit (`release` with a reason, or reconcile). A
+  wrapper killed with SIGKILL leaves the lease `active`; expiry (3x the interval,
+  strictly greater than 2x, so a lease can never self-expire between heartbeats) turns
+  a missed heartbeat into `unknown-recovery-required`. Both readers share one encoding
+  contract: bytes decoded strictly as UTF-8, lines split on `\n` only, and the writer
+  escapes U+0085/U+2028/U+2029 — a raw separator or an undecodable byte is a corrupt
+  line that blocks.
 - **Completion predicate.** `researchctl <root> lease-reconcile <run>` returns clear
-  ONLY when the loop exited (exit recorded) AND zero matching children are alive (the
-  recorded process group has no live members) AND every planned cell has a manifest
-  (`runs/<cell>/manifest.json` for each cell in `runs/<run>/plan.json`) AND reports were
-  regenerated (`reports/` non-empty and no older than the newest manifest) AND the
-  results commit exists (`runs/<run>/results-commit`, verified with
-  `git cat-file -e <sha>^{commit}`). Anything missing or unverifiable blocks (exit 3,
-  the lease stays held). On clear the lease is released with the commit recorded;
-  already-released is an idempotent clear. Stale/expired/missing input reads
-  `unknown-recovery-required` and gets exactly one bounded reconciliation attempt per
-  invocation — never a success report.
+  ONLY when the loop exited (exit recorded) AND zero matching children are alive AND
+  every planned cell has a manifest (`runs/<cell>/manifest.json` for each cell in
+  `runs/<run>/plan.json`) AND reports were regenerated (`reports/` non-empty and no
+  older than the newest manifest) AND the results commit exists
+  (`runs/<run>/results-commit`, verified with `git cat-file -e <sha>^{commit}`).
+  "Zero children" is the recorded process group (`killpg`) **plus a process-table
+  sweep** (`pgrep -g`/`pgrep -f` over the recorded command): a descendant that left
+  the group via setsid/double-fork still blocks; pgrep absent or failing fails closed.
+  Residual proof bound: a stray that both leaves the group and re-execs a different
+  argv can still evade the sweep (no cgroup/job-object containment on this platform).
+  Anything missing or unverifiable blocks (exit 3, the lease stays held). On clear the
+  lease is released with the commit recorded — under the same registry lock pass that
+  evaluated the predicate, so a transition landing in between (the wrapper's SIGTERM
+  `mark_unknown`) can never be auto-released; a `released` record whose commit does not
+  exist in the work tree reads `unknown-recovery-required` (a forged release is never a
+  release; a release citing a real-but-unrelated commit still passes — commit-to-run
+  binding is follow-up work). Already-released is an idempotent clear. Stale/expired
+  input reads `unknown-recovery-required` and gets exactly one bounded reconciliation
+  attempt per invocation — never a success report; the DSH adapter wakes one bounded
+  `lease-reconcile` dispatch per stable unknown state.
 - **Single emitter.** Continuation authority for a run belongs to ONE layer: the
   OpenCode goal plugin is the sole emitter (gate contract:
   `dsh-plugin/goal-deferral/opencode-gate-contract.md`); the DSH adapter
   (`dsh-plugin/goal-deferral/`) is **veto-only** — it blocks goal mutation while a lease
   is held and never emits a competing continuation. Neither layer pauses or resumes the
   other's durable goal state.
-- **Fail closed.** A missing or unreadable registry, a corrupt line, an unverifiable
-  version chain and an expired lease all block; stale is never success, and no lease is
-  deleted silently. Readers never mistake missing/unreadable state for clear.
+- **Fail closed.** A missing or unreadable registry (including an unreadable
+  directory — enumeration failure is never "clear"), a corrupt line (an undecodable
+  byte or a raw U+0085/U+2028/U+2029), an unverifiable version chain, a `released`
+  record whose commit does not exist in the work tree, and an expired lease all block;
+  stale is never success, and no lease is deleted silently. Readers never mistake
+  missing/unreadable state for clear.
 - **Fork pointer.** Applying the OpenCode-side gate belongs in the upstream MIT repo
   (`prevalentWare/opencode-goal-plugin`, V2 `taskBlockStatus`/`runAutoContinue`); this
   repo ships the contract plus matrix tests and never patches `~/.npm` or the package

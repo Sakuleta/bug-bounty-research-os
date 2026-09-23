@@ -76,21 +76,33 @@ never emits a continuation. The single continuation emitter for a run is the
 OpenCode goal plugin (gate contract: `goal-deferral/opencode-gate-contract.md`).
 
 - Observation: the registry file (same verdict rules as `tools/leases.py`,
-  parity-tested) plus owner-scoped job lifecycle (`ctx.jobs.onJobsChanged` /
-  `onJobDone`) and continuable-child edges (`subagent/start` / `subagent/end`);
-  every edge re-reads the registry (subscribe-then-reread — no lost wake-up).
+  parity-tested — including the strict byte/line encoding contract and the
+  released-commit verification) plus owner-scoped job lifecycle
+  (`ctx.jobs.onJobsChanged` / `onJobDone`) and continuable-child edges
+  (`subagent/start` / `subagent/end`); every edge re-reads the registry
+  (subscribe-then-reread — no lost wake-up).
 - Activation: an explicit `root` / `RESEARCH_OS_LEASE_ROOT` (plus optional
   `RESEARCH_OS_LEASE_RUN`; without a run id the whole workspace is watched), or
   per-call discovery of an ancestor directory containing `.leases/`. A workspace
   that never used leases is not deferred.
-- Fail closed: a missing/unreadable registry, a corrupt line, an unverifiable
-  version chain and an expired `active` lease all block; a stale lease is never
-  success. Internal `apply()` errors fail open like the rest of the plugin.
+- Fail closed: a missing/unreadable registry, a corrupt line (an undecodable
+  byte, or a raw U+0085/U+2028/U+2029 — the shared writer escapes those), an
+  unverifiable version chain, a `released` record whose commit does not exist in
+  the run's git work tree, and an expired `active` lease all block; a stale lease
+  is never success. Internal `apply()` errors fail open like the rest of the
+  plugin.
+- Bounded reconciliation: a stable `unknown-recovery-required` state wakes at
+  most one dispatch of the run workspace's `tools/researchctl.py <root>
+  lease-reconcile <run>` (async `execFile`, injectable through
+  `options.reconcile`); re-entering the unknown state re-arms exactly one more;
+  a failed or unavailable CLI is logged and the lease stays blocking.
 - Wiring: the module is part of the installed body (`install.sh` copies it into
-  every profile) and installs through the enforcer's `tools.guard` seam. The real
-  continuation veto belongs in the DSH `goal-round-driver` readiness gate
-  (upstream/overlay, out of this repo's scope) — the adapter owns the predicate,
-  the subscription and the integration coverage.
+  every profile) **and the enforcer's `apply()` dynamic-imports it**, so the veto
+  installs through the same `tools.guard` seam as R1 — a lease-held workspace
+  denies `create_goal`/`update_goal` even though the host only loads `index.js`.
+  The real continuation veto belongs in the DSH `goal-round-driver` readiness
+  gate (upstream/overlay, out of this repo's scope) — the adapter owns the
+  predicate, the subscription and the integration coverage.
 
 ## Tests
 
