@@ -17,7 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from control_plane import (CYCLE_EDGES, EVENT_TYPES, HYP_EDGES, KNOWLEDGE_RESOLUTIONS,  # noqa: E402
                            METHOD_SELF_ATTACK_ROWS, REQUIRED_AUDIT_CLASSES, TECHNIQUE_RESULTS,
                            ControlPlane, asset_hosts, broker_consumed_nonces, budget_limits,
-                           engagement_assets, evidence_id_ok, host_in_scope, identity_binding,
+                           engagement_assets, evidence_id_ok, gate_decision_authorizes,
+                           host_in_scope, identity_binding,
                            never_considered_in_window, normalize_cycle_state, pack_change_problem,
                            review_packet_digest, review_quote_problem, scope_check,
                            secret_pattern_hits, sha256_file, snapshot_demands)
@@ -478,7 +479,9 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
         hop_count: int | str = hops if type(hops) is int else "?"
         later = [ge for ge in events[idx + 1:]
                  if ge.get("type") == "HUMAN_GATE_RESOLVED"
-                 and str(ge.get("cycle_id") or "") == cid]
+                 and str(ge.get("cycle_id") or "") == cid
+                 and gate_decision_authorizes(
+                     (cp.gate(str(ge.get("entity_id") or "")) or {}).get("decision"))]
         bound = any(aid and aid in str((cp.gate(str(ge.get("entity_id") or "")) or {}).get(
             "what_is_needed") or "") for ge in later)
         if bound:

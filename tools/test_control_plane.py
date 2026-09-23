@@ -3570,6 +3570,20 @@ _sub12r = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nr12p)],
 check("backlog B8: a later gate naming the offending action dispositions it",
       _sub12r.returncode == 0)
 
+# Sprint BUA M1 (security): the audit's disposition twin must honor the decision — a
+# later DENIED gate naming the offending action is a refusal, not a disposition.
+_nr12d, _nc12d = _w7_root()
+_viol12d = _nc12d.record_action({**_w7_action(), "scope_violation": True, "out_of_scope_hops": 2})
+_nc12d.request_gate("G-0004", {"cycle_id": "C-0001",
+                               "what_is_needed": f"Scope violation review for {_viol12d['entity_id']} on the browser run",
+                               "why_human_only": "Only the researcher can disposition scope drift",
+                               "resume_after": "Gate resolution"})
+_nc12d.resolve_gate("G-0004", decision="DENIED", reference="ticket-scope-deny")
+_sub12d = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nr12d)],
+                         capture_output=True, text=True)
+check("BUA M1 audit: a later DENIED gate naming the violation dispositions nothing",
+      _sub12d.returncode != 0 and "scope_violation" in (_sub12d.stdout + _sub12d.stderr))
+
 
 # v8.2 fix M1: a flow-style (inline-map) identity binding is a garbled contract,
 # not an absent one — it fails closed at prepare and errors the audit instead of
@@ -3839,22 +3853,27 @@ check("B3 consume: the genuine receipt on the consumed token records",
           for e in _nc3b._read_events()))
 
 # ---- the consequential-action gate --------------------------------------------------
+# The clock is explicit here: a gate authorizes only when it was RAISED after the token
+# it names was minted, so the fixture advances `now` between mint and gate events.
 _nr3g, _nc3g = _w7_root()
-_tok3g = _nc3g.prepare_action(_b3_action())
+with mock.patch.object(_control_plane, "now", return_value="2026-09-01T00:00:01Z"):
+    _tok3g = _nc3g.prepare_action(_b3_action())
 check("B3 gate: a consequential action without a gate resolves nothing",
       _nc3g.gate_for_action(_tok3g["action_id"])["resolved"] is False)
-_nc3g.request_gate("G-0003", {"cycle_id": "C-0001",
-                              "what_is_needed": "Scope review of the upcoming browser run",
-                              "why_human_only": "Only the researcher can approve a submission",
-                              "resume_after": "Gate resolution"})
-_nc3g.resolve_gate("G-0003", decision="APPROVED", reference="ticket-1")
+with mock.patch.object(_control_plane, "now", return_value="2026-09-01T00:00:02Z"):
+    _nc3g.request_gate("G-0003", {"cycle_id": "C-0001",
+                                  "what_is_needed": "Scope review of the upcoming browser run",
+                                  "why_human_only": "Only the researcher can approve a submission",
+                                  "resume_after": "Gate resolution"})
+    _nc3g.resolve_gate("G-0003", decision="APPROVED", reference="ticket-1")
 check("B3 gate: a resolved gate that never names the action dispositions nothing",
       _nc3g.gate_for_action(_tok3g["action_id"])["resolved"] is False)
-_nc3g.request_gate("G-0004", {"cycle_id": "C-0001",
-                              "what_is_needed": f"Approve the submit action {_tok3g['action_id']}",
-                              "why_human_only": "Only the researcher can approve a submission",
-                              "resume_after": "Gate resolution"})
-_nc3g.resolve_gate("G-0004", decision="APPROVED", reference="ticket-2")
+with mock.patch.object(_control_plane, "now", return_value="2026-09-01T00:00:03Z"):
+    _nc3g.request_gate("G-0004", {"cycle_id": "C-0001",
+                                  "what_is_needed": f"Approve the submit action {_tok3g['action_id']}",
+                                  "why_human_only": "Only the researcher can approve a submission",
+                                  "resume_after": "Gate resolution"})
+    _nc3g.resolve_gate("G-0004", decision="APPROVED", reference="ticket-2")
 _gate3 = _nc3g.gate_for_action(_tok3g["action_id"])
 check("B3 gate: a resolved gate naming the action resolves it",
       _gate3["resolved"] is True and _gate3["gate"] == "G-0004")
@@ -3863,6 +3882,54 @@ try:
     check("B3 gate: an unknown action id is refused", False)
 except ValueError as exc:
     check("B3 gate: an unknown action id is refused", "no prepared preflight token" in str(exc))
+
+# Sprint BUA M1 (security): a human REFUSAL never authorizes a consequential dispatch.
+# The gate names the action and was raised after the token, so the decision is the only
+# possible reason for the refusal.
+_nr3dn, _nc3dn = _w7_root()
+with mock.patch.object(_control_plane, "now", return_value="2026-09-01T00:00:01Z"):
+    _tok3dn = _nc3dn.prepare_action(_b3_action())
+with mock.patch.object(_control_plane, "now", return_value="2026-09-01T00:00:02Z"):
+    _nc3dn.request_gate("G-0005", {"cycle_id": "C-0001",
+                                   "what_is_needed": f"Approve the submit action {_tok3dn['action_id']}",
+                                   "why_human_only": "Only the researcher can approve a submission",
+                                   "resume_after": "Gate resolution"})
+    _nc3dn.resolve_gate("G-0005", decision="DENIED", reference="ticket-deny")
+_dn3 = _nc3dn.gate_for_action(_tok3dn["action_id"])
+check("BUA M1: a DENIED gate naming the action resolves nothing",
+      _dn3["resolved"] is False and _dn3["gate"] is None)
+_nr3cn, _nc3cn = _w7_root()
+with mock.patch.object(_control_plane, "now", return_value="2026-09-01T00:00:01Z"):
+    _tok3cn = _nc3cn.prepare_action(_b3_action())
+with mock.patch.object(_control_plane, "now", return_value="2026-09-01T00:00:02Z"):
+    _nc3cn.request_gate("G-0006", {"cycle_id": "C-0001",
+                                   "what_is_needed": f"Approve the submit action {_tok3cn['action_id']}",
+                                   "why_human_only": "Only the researcher can approve a submission",
+                                   "resume_after": "Gate resolution"})
+    _nc3cn.resolve_gate("G-0006", decision="CANCELLED", reference="ticket-cancel")
+_cn3 = _nc3cn.gate_for_action(_tok3cn["action_id"])
+check("BUA M1: a CANCELLED gate naming the action resolves nothing",
+      _cn3["resolved"] is False and _cn3["gate"] is None)
+
+# Sprint BUA M4 (security): sequential ids are predictable — a gate resolved BEFORE the
+# token exists (naming the predicted next id) must never pre-authorize it.
+_nr3pr, _nc3pr = _w7_root()
+with mock.patch.object(_control_plane, "now", return_value="2026-09-01T00:00:10Z"):
+    _tok3pr = _nc3pr.prepare_action(_b3_action())
+_predicted = f"A-{int(_tok3pr['action_id'].split('-')[1]) + 1:06d}"
+with mock.patch.object(_control_plane, "now", return_value="2026-09-01T00:00:01Z"):
+    _nc3pr.request_gate("G-0007", {"cycle_id": "C-0001",
+                                   "what_is_needed": f"Approve the submit action {_predicted}",
+                                   "why_human_only": "Only the researcher can approve a submission",
+                                   "resume_after": "Gate resolution"})
+    _nc3pr.resolve_gate("G-0007", decision="APPROVED", reference="ticket-pre")
+with mock.patch.object(_control_plane, "now", return_value="2026-09-01T00:00:20Z"):
+    _tok3pr2 = _nc3pr.prepare_action(_b3_action())
+check("BUA M4: the predicted id minted after a pre-named gate exists",
+      _tok3pr2["action_id"] == _predicted)
+_pr3 = _nc3pr.gate_for_action(_tok3pr2["action_id"])
+check("BUA M4: a gate resolved before the token existed pre-authorizes nothing",
+      _pr3["resolved"] is False and _pr3["gate"] is None)
 
 # ---- the CLI seam the interactive arm calls ----------------------------------------
 (_nr3s / "shape.json").write_text(json.dumps({"url": "https://example.test/other",

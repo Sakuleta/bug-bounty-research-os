@@ -86,6 +86,10 @@ export const PREFLIGHT_FIELDS = [
   'cycle_id', 'target', 'account', 'object_owner', 'purpose', 'hypothesis',
   'expected_secure', 'expected_vulnerable', 'side_effect', 'stop_condition',
 ]
+/** The JS mirror of `control_plane.GATE_AUTHORIZING_DECISIONS`: a human gate authorizes
+ *  only when the human said GO. `DENIED`/`CANCELLED` are refusals, and the runner
+ *  refuses fail-closed when the seam does not name an authorizing decision at all. */
+export const GATE_AUTHORIZING_DECISIONS = new Set(['RESUME', 'PROVIDED', 'APPROVED'])
 
 // A target whose own executor-read metadata says "this changes the world" is
 // consequential: the model never gets to argue about the classification, and the class
@@ -1289,9 +1293,14 @@ export async function runInteractive({ root, args, chromium, ctl = makeCtl(root)
   }
   const realGate = async ({ actionId }) => {
     const checked = ctl(['gate-check', actionId])
-    if (!checked || checked.resolved !== true) {
-      return { ok: false, reason: `consequential action ${actionId} has no RESOLVED human gate naming it — ` +
-        'raise `researchctl gate request` with the action id in what_is_needed and resolve it before dispatch' }
+    // Fail closed twice over: `resolved` must be true AND the decision must be an
+    // approval. A DENIED/CANCELLED gate is the human saying no, and a seam that names
+    // no authorizing decision at all is not an approval.
+    if (!checked || checked.resolved !== true
+        || !GATE_AUTHORIZING_DECISIONS.has(String(checked.decision || '').toUpperCase())) {
+      return { ok: false, reason: `consequential action ${actionId} has no resolved human gate ` +
+        'APPROVING it (a DENIED/CANCELLED gate is a refusal) — raise `researchctl gate request` ' +
+        'with the action id in what_is_needed and resolve it APPROVED/RESUME/PROVIDED before dispatch' }
     }
     return { ok: true, gate: checked.gate }
   }

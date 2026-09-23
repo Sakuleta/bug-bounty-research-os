@@ -673,6 +673,62 @@ function runCli(root, extraArgs = []) {
 }
 
 {
+  // Sprint BUA M1: the real gate seam honors the DECISION — a human refusal never
+  // authorizes a consequential dispatch, even when the seam says `resolved: true`.
+  const dispatched = []
+  const gateCalls = []
+  const page = {
+    on() {}, mainFrame: () => ({}), url: () => 'https://t.example/app',
+    title: async () => 'stub', screenshot: async () => {},
+    viewportSize: () => viewport, locator: () => ({ all: async () => [] }),
+    goto: async () => ({ status: () => 200 }),
+  }
+  const context = {
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    async route() {}, async routeWebSocket() {}, async addInitScript() {},
+    async newCDPSession() { return { send: async () => ({}), on() {} } },
+  }
+  const root = tempWorkspace()
+  try {
+    const summary = await runInteractive({
+      root,
+      args: {
+        url: 'https://t.example/app', principal: 'researcher-A', action: 'A-000001',
+        profile: 'lab/bua-profile', preflight: 'preflight.json', 'out-dir': 'artifacts', steps: '2',
+      },
+      chromium: { launchPersistentContext: async () => context },
+      ctl: (args) => {
+        if (args[0] === 'prepare') return { action_id: 'A-000002' }
+        if (args[0] === 'token-consume') return { action_id: 'A-000002', nonce: 'n2' }
+        if (args[0] === 'gate-check') {
+          gateCalls.push(args[1])
+          return { resolved: true, decision: 'DENIED', gate: 'G-0005' }
+        }
+        return { binding_present: false }
+      },
+      scopeVerdict: () => ({ in_scope: true, gate: 'assets', host: 't.example' }),
+      token: { action_id: 'A-000001', nonce: 'n1', tool_family: 'browser',
+               preflight: { account: 'researcher-A' } },
+      snapshot: async () => ({ generation: 1,
+                               entries: [entry('e1', { type: 'submit', text: 'Submit payment' })],
+                               locators: new Map([['e1', fakeLocator()]]),
+                               url: 'https://t.example/app', title: 'stub' }),
+      plan: async () => ({ ok: true, source: 'typesafe', operation: { op: 'CLICK', handle: 'e1' } }),
+      scopeRecheck: async () => ({ ok: true }),
+      dispatch: async (ctx) => { dispatched.push(ctx); return { ok: true } },
+      log: () => {},
+    })
+    check('BUA M1 wiring: a DENIED gate is consulted but never authorizes a dispatch',
+      gateCalls.length === GUARD_RETRY_CAP && dispatched.length === 0
+      && summary.status === 'blocked' && summary.events.some((e) => e.guard === 'human_gate'))
+    check('BUA M1 wiring: the refusal names the gate guard and the approval requirement',
+      summary.events.some((e) => e.guard === 'human_gate' && e.reason.includes('APPROVING')))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+{
   const root = tempWorkspace()
   try {
     const refused = runCli(root)
@@ -1084,7 +1140,7 @@ print(json.dumps(tok))
       ctl: (args) => {
         if (args[0] === 'prepare') return { action_id: 'A-000002' }
         if (args[0] === 'token-consume') return { action_id: 'A-000002', nonce: 'n2' }
-        if (args[0] === 'gate-check') return { resolved: true, gate: 'G-0009' }
+        if (args[0] === 'gate-check') return { resolved: true, decision: 'APPROVED', gate: 'G-0009' }
         if (args[0] === 'evidence') { evidence += 1; return { entity_id: `E-00000${evidence}` } }
         if (args[0] === 'action') return { entity_id: 'A-000002' }
         return { binding_present: false }
@@ -1149,7 +1205,9 @@ print(json.dumps(tok))
         profile: 'lab/bua-profile', preflight: 'preflight.json', 'out-dir': 'artifacts', steps: '2',
       },
       chromium: { launchPersistentContext: async () => context },
-      ctl: (args) => (args[0] === 'gate-check' ? { resolved: true, gate: 'G-0009' } : { binding_present: false }),
+      ctl: (args) => (args[0] === 'gate-check'
+        ? { resolved: true, decision: 'APPROVED', gate: 'G-0009' }
+        : { binding_present: false }),
       scopeVerdict: () => ({ in_scope: true, gate: 'assets', host: 't.example' }),
       token: { action_id: 'A-000001', nonce: 'n1', tool_family: 'browser',
                preflight: { account: 'researcher-A' } },
