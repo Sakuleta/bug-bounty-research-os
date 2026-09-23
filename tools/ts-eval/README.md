@@ -77,10 +77,14 @@ Nine labeled finding-shaped pairs (three same, four different, two unclear). Bas
 keyword overlap (the seam's blocking threshold) means `same`, else `different` — a
 deterministic similarity heuristic that cannot express uncertainty. Seam:
 `ts_novelty.check_novelty` (blocking first, then one pairwise Choice per blocked
-candidate; `unclear` to the human lane; an empty proposal list means `different`).
-Measured: baseline 6/9, seam 8/9 — the seam ships. The one miss is an `unclear`-labeled
-pair the model called `different` at 0.88 confidence (recorded in the rows; the human
-lane only fires when the model is uncertain or below the confidence threshold).
+candidate; every below-threshold verdict degrades to `unclear` and routes to the human
+lane; an empty proposal list means `different`). Measured: baseline 6/9, seam 7/9 — the
+seam ships. The one clearly wrong row is a pair the model called `different` at 0.88
+confidence (above the threshold, so it is not human-laned — recorded in the rows). One
+row (`diff-two-tenant-leaks`, 0.46) was re-derived from `different` to `unclear` +
+human lane when the below-threshold rule was widened to every verdict; the committed
+model outputs are unchanged and the re-derivation is recorded under
+`threshold_rule_rederived` in the payload (no new model calls).
 
 ### 6. Hypothesis ranking — `rank_eval_set.json` + `rank_eval.py` + `rank_results.json` (v8.3)
 

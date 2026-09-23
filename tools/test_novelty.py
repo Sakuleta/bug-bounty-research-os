@@ -111,6 +111,13 @@ low = check_novelty(ALLOWED, CANDIDATE, pool=[SAME],
 check("a below-threshold same verdict degrades to unclear in the human lane",
       low["proposals"][0]["verdict"] == "unclear" and low["human_lane"] == ["H-0007"]
       and "threshold" in low["proposals"][0]["note"])
+low_diff = check_novelty(ALLOWED, CANDIDATE, pool=[SAME],
+                         client=pair_client("different", CONFIDENCE_THRESHOLD - 0.1))
+check("a below-threshold different verdict also degrades to unclear in the human lane",
+      low_diff["proposals"][0]["verdict"] == "unclear"
+      and low_diff["proposals"][0]["auto"] is False
+      and low_diff["human_lane"] == ["H-0007"]
+      and "threshold" in low_diff["proposals"][0]["note"])
 bad = check_novelty(ALLOWED, CANDIDATE, pool=[SAME],
                     client=lambda s, q: {"model": "stub", "answers": {"pair": {
                         "type": "choice", "choice": "probably", "confidence": 0.99}},
@@ -213,6 +220,19 @@ denied_root = workspace('external_judgment: "DENIED"\n')
 check_novelty(denied_root, CANDIDATE, pool=[SAME], client=pair_client("same", 0.92))
 check("a DENIED seam writes no judgment record (nothing was judged)",
       read_judgments(denied_root, seam="novelty") == [])
+
+# 9. The committed paired-eval artifact agrees with the shipped threshold rule: every
+#    below-threshold verdict is `unclear` + human lane, and the win claim re-derives
+#    offline from the recorded rows (no network).
+eval_data = json.loads((TOOLS / "ts-eval/novelty_results.json").read_text())
+stale = [r["id"] for r in eval_data["rows"]
+         if r["seam_confidence"] is not None and r["seam_confidence"] < CONFIDENCE_THRESHOLD
+         and r["seam_verdict"] != "unclear"]
+rederived_correct = sum(1 for r in eval_data["rows"] if r["seam_verdict"] == r["truth"])
+check("the committed novelty eval matches the shipped below-threshold rule",
+      stale == [] and rederived_correct == eval_data["seam_correct"]
+      and eval_data["ship"] is True and "threshold_rule_rederived" in eval_data
+      and eval_data["seam_correct"] == 7 and eval_data["baseline_correct"] == 6)
 
 # 7. CLI wiring: `researchctl novelty candidate.json`.
 import contextlib  # noqa: E402

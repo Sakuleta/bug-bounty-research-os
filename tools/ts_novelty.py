@@ -168,8 +168,11 @@ def _pair_decision(answer: Any, threshold: float) -> dict[str, Any]:
     note = None
     if problem is not None:
         note = f"answer rejected ({problem}) — routed to the human lane"
-    elif verdict == "same" and confidence < threshold:
-        note = (f"same verdict below threshold {threshold} (confidence {confidence:.2f}) "
+    elif verdict in ("same", "different") and confidence < threshold:
+        # Every below-threshold verdict degrades, not only `same`: a possible duplicate
+        # (or a possible non-duplicate) dismissed without confidence must reach a human,
+        # which is what the docs promise.
+        note = (f"{verdict} verdict below threshold {threshold} (confidence {confidence:.2f}) "
                 "— routed to the human lane as unclear")
         verdict = "unclear"
     auto = verdict in ("same", "different") and confidence >= threshold
@@ -183,9 +186,10 @@ def check_novelty(root: Path, candidate: dict[str, Any], pool: list[dict[str, An
                   cycle_id: str | None = None) -> dict[str, Any]:
     """Judge blocked candidate pairs; returns advisory proposals + the human lane.
 
-    `candidate` is `{id, text}`; `pool` defaults to the ledger's hypotheses. A `same`
-    verdict below the threshold degrades to `unclear` (never an auto-`same`), and any
-    `unclear` (model or threshold) lands in `human_lane`.
+    `candidate` is `{id, text}`; `pool` defaults to the ledger's hypotheses. Every
+    verdict below the confidence threshold — `same` or `different` — degrades to
+    `unclear` (never an auto verdict on a low-confidence answer), and any `unclear`
+    (model, rejection or threshold) lands in `human_lane`.
     """
     root = Path(root)
     if not live:
