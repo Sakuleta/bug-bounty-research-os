@@ -258,75 +258,86 @@ def _effective_state(latest: dict[str, Any], now: float) -> str:
     return str(latest.get("state"))
 
 
-def _write_transition(root: Path, run_id: str, *, state: str, event: str,
-                      now: float, reason: str = "", exit_code: int | None = None,
-                      commit: str | None = None, pgid: int | None = None,
-                      lease_id: str | None = None,
-                      require: tuple[str, ...] | None = None,
-                      require_reason_for: tuple[str, ...] = (),
-                      require_owner: bool = False) -> dict[str, Any]:
+def _write_transition(root: Path, run_id: str, **kwargs: Any) -> dict[str, Any]:
+    """Take the registry lock and write one transition (see `_write_transition_locked`)."""
     with _lock(root):
-        latest, _error, _corrupt, path = _latest_or_error(root, run_id)
-        if lease_id is None:
+        return _write_transition_locked(root, run_id, **kwargs)
+
+
+def _write_transition_locked(root: Path, run_id: str, *, state: str, event: str,
+                             now: float, reason: str = "", exit_code: int | None = None,
+                             commit: str | None = None, pgid: int | None = None,
+                             lease_id: str | None = None,
+                             require: tuple[str, ...] | None = None,
+                             require_reason_for: tuple[str, ...] = (),
+                             require_owner: bool = False) -> dict[str, Any]:
+    """One read-modify-write transition; the caller holds the registry lock.
+
+    Every check reads the CURRENT record under that lock, so a state change landing
+    just before the write is seen (fail closed) and nothing can interleave between
+    a caller's own read and this write.
+    """
+    latest, _error, _corrupt, path = _latest_or_error(root, run_id)
+    if lease_id is None:
+        raise LeaseError(
+            f"refusing {event} for run {run_id}: the lease generation is required — pass the "
+            "lease_id from acquire()/verdict(); unbound writers are refused (fail closed)")
+    if lease_id != latest.get("lease_id"):
+        raise LeaseError(
+            f"refusing {event} for run {run_id}: lease generation mismatch (caller holds "
+            f"{lease_id!r}, the current record is {latest.get('lease_id')!r}) — a stale writer "
+            "must not mutate the current lease (fail closed)")
+    if require_owner:
+        owner = latest.get("owner") or {}
+        owner_pid = owner.get("pid")
+        if not isinstance(owner_pid, int) or isinstance(owner_pid, bool) \
+                or owner_pid != os.getpid():
             raise LeaseError(
-                f"refusing {event} for run {run_id}: the lease generation is required — pass the "
-                "lease_id from acquire()/verdict(); unbound writers are refused (fail closed)")
-        if lease_id != latest.get("lease_id"):
+                f"refusing {event} for run {run_id}: caller pid {os.getpid()} is not the "
+                f"recorded owner (pid {owner_pid!r}) — only the owner process may record this "
+                "transition (fail closed)")
+    effective = _effective_state(latest, now)
+    if require is not None and effective not in require:
+        detail = ""
+        if effective != latest["state"]:
+            detail = (f" (expired at {latest.get('expires_at')} — now reads "
+                      "unknown-recovery-required)")
+        raise LeaseError(
+            f"refusing {event} for run {run_id}: lease state is {latest['state']!r}{detail}, "
+            f"expected one of {list(require)}")
+    if effective in require_reason_for and not reason.strip():
+        raise LeaseError(
+            f"refusing {event} for run {run_id}: state {effective!r} is the explicit "
+            "recovery path and requires a reason")
+    interval = float(latest.get("interval_seconds") or DEFAULT_HEARTBEAT_SECONDS)
+    record = {
+        "seq": int(latest["seq"]) + 1,
+        "version": int(latest["version"]) + 1,
+        "time": now,
+        "run_id": run_id,
+        "lease_id": latest["lease_id"],
+        "event": event,
+        "state": state,
+        "owner": latest.get("owner") or {},
+        "command": latest.get("command") or "",
+        "pgid": latest.get("pgid") if pgid is None else int(pgid),
+        "heartbeat_at": latest.get("heartbeat_at"),
+        "expires_at": latest.get("expires_at"),
+        "interval_seconds": interval,
+        "exit_code": latest.get("exit_code") if exit_code is None else int(exit_code),
+        "commit": latest.get("commit") if commit is None else commit,
+        "reason": reason,
+    }
+    if state == "active":
+        record["heartbeat_at"] = now
+        record["expires_at"] = now + _expiry_seconds(interval)
+    if state == "released":
+        commit_ok, commit_reason = _commit_exists(root, record["commit"])
+        if not commit_ok:
             raise LeaseError(
-                f"refusing {event} for run {run_id}: lease generation mismatch (caller holds "
-                f"{lease_id!r}, the current record is {latest.get('lease_id')!r}) — a stale writer "
-                "must not mutate the current lease (fail closed)")
-        if require_owner:
-            owner = latest.get("owner") or {}
-            owner_pid = owner.get("pid")
-            if not isinstance(owner_pid, int) or isinstance(owner_pid, bool) \
-                    or owner_pid != os.getpid():
-                raise LeaseError(
-                    f"refusing {event} for run {run_id}: caller pid {os.getpid()} is not the "
-                    f"recorded owner (pid {owner_pid!r}) — only the owner process may record this "
-                    "transition (fail closed)")
-        effective = _effective_state(latest, now)
-        if require is not None and effective not in require:
-            detail = ""
-            if effective != latest["state"]:
-                detail = (f" (expired at {latest.get('expires_at')} — now reads "
-                          "unknown-recovery-required)")
-            raise LeaseError(
-                f"refusing {event} for run {run_id}: lease state is {latest['state']!r}{detail}, "
-                f"expected one of {list(require)}")
-        if effective in require_reason_for and not reason.strip():
-            raise LeaseError(
-                f"refusing {event} for run {run_id}: state {effective!r} is the explicit "
-                "recovery path and requires a reason")
-        interval = float(latest.get("interval_seconds") or DEFAULT_HEARTBEAT_SECONDS)
-        record = {
-            "seq": int(latest["seq"]) + 1,
-            "version": int(latest["version"]) + 1,
-            "time": now,
-            "run_id": run_id,
-            "lease_id": latest["lease_id"],
-            "event": event,
-            "state": state,
-            "owner": latest.get("owner") or {},
-            "command": latest.get("command") or "",
-            "pgid": latest.get("pgid") if pgid is None else int(pgid),
-            "heartbeat_at": latest.get("heartbeat_at"),
-            "expires_at": latest.get("expires_at"),
-            "interval_seconds": interval,
-            "exit_code": latest.get("exit_code") if exit_code is None else int(exit_code),
-            "commit": latest.get("commit") if commit is None else commit,
-            "reason": reason,
-        }
-        if state == "active":
-            record["heartbeat_at"] = now
-            record["expires_at"] = now + _expiry_seconds(interval)
-        if state == "released":
-            commit_ok, commit_reason = _commit_exists(root, record["commit"])
-            if not commit_ok:
-                raise LeaseError(
-                    f"refusing {event} for run {run_id}: {commit_reason} — a release must cite a "
-                    "commit that exists (fail closed)")
-        return _append(root, run_id, record, path)
+                f"refusing {event} for run {run_id}: {commit_reason} — a release must cite a "
+                "commit that exists (fail closed)")
+    return _append(root, run_id, record, path)
 
 
 def acquire(root: str | os.PathLike[str], run_id: str, *, owner_label: str = "",
@@ -650,7 +661,11 @@ def completion_predicate(root: str | os.PathLike[str], run_id: str, *,
     `unknown-recovery-required`, never success.
     """
     root = Path(root)
-    current = verdict(root, run_id, now=now)
+    return _predicate_from_verdict(root, run_id, verdict(root, run_id, now=now))
+
+
+def _predicate_from_verdict(root: Path, run_id: str, current: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate the conjuncts for an already-read verdict (see `completion_predicate`)."""
     conjuncts: dict[str, dict[str, Any]] = {}
 
     if current["state"] == "released":
@@ -696,18 +711,40 @@ def completion_predicate(root: str | os.PathLike[str], run_id: str, *,
 def reconcile(root: str | os.PathLike[str], run_id: str, *, now: float | None = None) -> dict[str, Any]:
     """One bounded reconciliation attempt; releases the lease only when clear.
 
-    Stale/expired/unknown input leaves the state untouched (never a success report)
-    and reports `recovery_required`. Exactly one attempt per invocation — the bound
-    is the caller's, and this function never loops.
+    The predicate and the release run under ONE registry-lock pass with a fresh
+    state check, so a transition landing in between (e.g. the wrapper's SIGTERM
+    `mark_unknown`) can never be auto-released: the automated path releases only
+    from `awaiting-reconciliation` — never from `unknown-recovery-required`, which
+    is the explicit manual-recovery lane. Stale/expired/unknown input leaves the
+    state untouched (never a success report) and reports `recovery_required`.
+    Exactly one attempt per invocation — the bound is the caller's, and this
+    function never loops.
     """
     root = Path(root)
-    result = completion_predicate(root, run_id, now=now)
-    if result["clear"] and not result["already_released"]:
-        record = release(root, run_id, commit=result["commit"],
-                         lease_id=result["verdict"].get("lease_id"),
-                         reason="completion predicate clear", now=now)
-        result["released"] = True
-        result["release"] = record
-    result["recovery_required"] = result["verdict"]["state"] == "unknown-recovery-required"
-    result["attempts"] = 1
-    return result
+    timestamp = _now(now)
+    if not registry_dir(root).is_dir():
+        # No registry to lock (and no state to release): report the missing input.
+        result = completion_predicate(root, run_id, now=timestamp)
+        result["recovery_required"] = result["verdict"]["state"] == "unknown-recovery-required"
+        result["attempts"] = 1
+        return result
+    with _lock(root):
+        current = verdict(root, run_id, now=timestamp)
+        result = _predicate_from_verdict(root, run_id, current)
+        if result["clear"] and not result["already_released"]:
+            try:
+                record = _write_transition_locked(
+                    root, run_id, state="released", event="release", now=timestamp,
+                    commit=result["commit"], reason="completion predicate clear",
+                    lease_id=current.get("lease_id"), require=("awaiting-reconciliation",))
+                result["released"] = True
+                result["release"] = record
+            except LeaseError:
+                # The state changed under the lock (e.g. a wrapper SIGTERM mark_unknown):
+                # re-read and report the blocked result — the automated path must never
+                # fall back to the reason-required manual-release lane.
+                current = verdict(root, run_id, now=timestamp)
+                result = _predicate_from_verdict(root, run_id, current)
+        result["recovery_required"] = result["verdict"]["state"] == "unknown-recovery-required"
+        result["attempts"] = 1
+        return result

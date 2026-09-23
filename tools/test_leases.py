@@ -560,6 +560,56 @@ check("reconciling an already released run is an idempotent clear",
       again["clear"] is True and again["already_released"] is True and again["released"] is False
       and leases.verdict(r16, "sweep-1")["record_count"] == records_before)
 
+# 21b. Atomic reconcile: the predicate and the release happen under ONE lock pass, and
+# the automated path releases only from awaiting-reconciliation. Deterministic
+# reproduction of the old window: a lock-bypassing raw record (a concurrent writer's
+# transition landing between the reads) during the predicate's git check must leave
+# the lease blocked, never auto-released through the canned reason.
+r_race = make_run(root())
+race_last = json.loads(leases.lease_path(r_race, "sweep-1").read_text().splitlines()[-1])
+race_id = race_last["lease_id"]
+shim_dir = root("shim-")
+shim_marker = shim_dir / "fired"
+shim = shim_dir / "git"
+shim.write_text(
+    "#!/usr/bin/env python3\n"
+    "import json, os, sys\n"
+    f"LEASE = {str(leases.lease_path(r_race, 'sweep-1'))!r}\n"
+    f"MARKER = {str(shim_marker)!r}\n"
+    "if '-C' in sys.argv and 'cat-file' in sys.argv and not os.path.exists(MARKER):\n"
+    "    open(MARKER, 'w').close()\n"
+    "    record = {'seq': " + str(race_last["seq"] + 1) + ", 'version': "
+    + str(race_last["version"] + 1) + ", 'state': 'unknown-recovery-required', "
+    "'event': 'unknown', 'run_id': 'sweep-1', 'lease_id': " + repr(race_id)
+    + ", 'reason': 'wrapper SIGTERM'}\n"
+    "    with open(LEASE, 'a', encoding='utf-8') as handle:\n"
+    "        handle.write(json.dumps(record, sort_keys=True) + '\\n')\n"
+    "os.execv('/usr/bin/git', ['/usr/bin/git'] + sys.argv[1:])\n")
+shim.chmod(0o755)
+race_env = {**os.environ, "PATH": f"{shim_dir}:{os.environ.get('PATH', '')}"}
+raced = subprocess.run([sys.executable, str(RESEARCHCTL), str(r_race), "lease-reconcile", "sweep-1"],
+                       capture_output=True, text=True, timeout=60, env=race_env)
+raced_payload = json.loads(raced.stdout)
+check("the race fired (a raw unknown record landed during the predicate)",
+      shim_marker.exists())
+check("reconcile never auto-releases a state that changed under the lock (exit 3)",
+      raced.returncode == 3 and raced_payload["clear"] is False
+      and raced_payload["released"] is False)
+check("the run stays unknown-recovery-required after the refused race",
+      leases.verdict(r_race, "sweep-1")["state"] == "unknown-recovery-required")
+
+# 21c. The same contract at the API level: a mark_unknown before reconcile refuses.
+r_race2 = make_run(root())
+race2_id = leases.verdict(r_race2, "sweep-1")["lease_id"]
+predicate = leases.completion_predicate(r_race2, "sweep-1")
+check("the predicate clears before the state change", predicate["clear"] is True)
+leases.mark_unknown(r_race2, "sweep-1", reason="wrapper SIGTERM", lease_id=race2_id)
+outcome_race = leases.reconcile(r_race2, "sweep-1")
+check("a mark_unknown before reconcile refuses (the manual lane is the only way out)",
+      outcome_race["clear"] is False and outcome_race["released"] is False
+      and outcome_race["state"] == "unknown-recovery-required"
+      and outcome_race["recovery_required"] is True)
+
 # 22. The CLI seam: exit 3 while blocked, exit 0 on clear, no 11_runtime side effect.
 r17 = make_run(root(), cells=("cell-a", "cell-missing"), manifests_for=("cell-a",))
 blocked = subprocess.run([sys.executable, str(RESEARCHCTL), str(r17), "lease-reconcile", "sweep-1"],
