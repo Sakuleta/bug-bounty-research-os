@@ -151,7 +151,7 @@ const ALLOWED_KEYS = {
   TYPE: ['op', 'handle', 'text'],
   SELECT: ['op', 'handle', 'option'],
   NAVIGATE: ['op', 'url'],
-  UPLOAD: ['op', 'file'],
+  UPLOAD: ['op', 'handle', 'file'],
   LOGIN: ['op', 'flow'],
   DONE: ['op'],
   BLOCKED: ['op', 'reason'],
@@ -274,6 +274,12 @@ export function parseOperation(raw, boundary) {
       return checked.ok ? { ok: true, op: { op: 'NAVIGATE', url: checked.url } } : checked
     }
     case 'UPLOAD': {
+      const h = handleOp()
+      if (!h.ok) return h
+      if (!Array.isArray(h.entry.ops) || !h.entry.ops.includes('UPLOAD')) {
+        return { ok: false, kind: 'boundary',
+                 reason: `handle ${raw.handle} is not a file input — UPLOAD(handle, workspace-file) needs a target the executor offered for upload` }
+      }
       const file = raw.file
       if (typeof file !== 'string' || !file) {
         return { ok: false, kind: 'boundary', reason: 'UPLOAD requires a workspace file path' }
@@ -283,7 +289,7 @@ export function parseOperation(raw, boundary) {
         return { ok: false, kind: 'boundary',
                  reason: `upload file ${JSON.stringify(file)} is not one of the executor-offered workspace files` }
       }
-      return { ok: true, op: { op: 'UPLOAD', file } }
+      return { ok: true, op: { op: 'UPLOAD', handle: raw.handle, file } }
     }
     case 'LOGIN': {
       const flow = raw.flow
@@ -485,13 +491,15 @@ export async function guardDispatch(op, ctx) {
 export function planContext({ boundary, snapshot, entryUrl, step, history = [], cycleId = null,
                               actionKey = null }) {
   const entries = snapshot && Array.isArray(snapshot.entries) ? snapshot.entries : []
-  const targets = { CLICK: new Map(), TYPE: new Map(), SELECT: new Map(), NAVIGATE: new Map() }
+  const targets = { CLICK: new Map(), TYPE: new Map(), SELECT: new Map(), NAVIGATE: new Map(),
+                    UPLOAD: new Map() }
   if (entryUrl) targets.NAVIGATE.set('u0', { url: entryUrl })
   for (const e of entries) {
     if (!e || typeof e.handle !== 'string' || !HANDLE_RE.test(e.handle)) continue
     const ops = Array.isArray(e.ops) ? e.ops : []
     if (ops.includes('CLICK')) targets.CLICK.set(e.handle, { handle: e.handle })
     if (ops.includes('TYPE')) targets.TYPE.set(e.handle, { handle: e.handle })
+    if (ops.includes('UPLOAD')) targets.UPLOAD.set(e.handle, { handle: e.handle })
     if (ops.includes('SELECT')) {
       for (const option of (Array.isArray(e.options) ? e.options : [])) {
         targets.SELECT.set(`${e.handle}=${option}`, { handle: e.handle, option })
@@ -507,7 +515,7 @@ export function planContext({ boundary, snapshot, entryUrl, step, history = [], 
   if (targets.TYPE.size && boundary.texts.size) opChoices.push('TYPE')
   if (targets.SELECT.size) opChoices.push('SELECT')
   if (targets.NAVIGATE.size) opChoices.push('NAVIGATE')
-  if (boundary.uploads.size) opChoices.push('UPLOAD')
+  if (boundary.uploads.size && targets.UPLOAD.size) opChoices.push('UPLOAD')
   if (boundary.flows.size) opChoices.push('LOGIN')
   questions.bua_operation = {
     choices: opChoices,
@@ -522,6 +530,7 @@ export function planContext({ boundary, snapshot, entryUrl, step, history = [], 
   add('bua_target:TYPE', targets.TYPE, 'Which field should receive text?')
   add('bua_target:SELECT', targets.SELECT, 'Which select element and option value?')
   add('bua_target:NAVIGATE', targets.NAVIGATE, 'Which URL should be navigated to (read path)?')
+  add('bua_target:UPLOAD', targets.UPLOAD, 'Which file input should receive the upload?')
   add('bua_text', boundary.texts, 'Which configured text value should be typed?')
   add('bua_file', boundary.uploads, 'Which workspace file should be uploaded?')
   add('bua_flow', boundary.flows, 'Which configured login flow should run?')
@@ -595,8 +604,10 @@ export function resolveOperation(operation, ctx) {
       return t.ok ? { ok: true, op: { op: 'NAVIGATE', url: t.value.url } } : t
     }
     case 'UPLOAD': {
+      const t = take(ctx.targets.UPLOAD, labels.target, 'upload target')
+      if (!t.ok) return t
       const f = take(ctx.files, labels.file, 'upload file')
-      return f.ok ? { ok: true, op: { op: 'UPLOAD', file: f.value } } : f
+      return f.ok ? { ok: true, op: { op: 'UPLOAD', handle: t.value.handle, file: f.value } } : f
     }
     case 'LOGIN': {
       const f = take(ctx.flows, labels.flow, 'login flow')
@@ -794,6 +805,7 @@ export async function snapshotPage(page, generation) {
     if ((tag === 'input' && ['text', 'search', 'email', 'url', 'tel', 'number'].includes(type))
         || tag === 'textarea') ops.push('TYPE')
     if (tag === 'input' && type === 'password') ops.push('LOGIN')
+    if (tag === 'input' && type === 'file') ops.push('UPLOAD')
     if (tag === 'select') ops.push('SELECT')
     if (!ops.length) return
     entries.push({

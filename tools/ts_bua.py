@@ -40,10 +40,11 @@ DEFAULT_MAX_CALLS_PER_ACTION = 3
 DEFAULT_MAX_CALLS_PER_CYCLE = 48
 OPERATIONS = ("CLICK", "TYPE", "SELECT", "NAVIGATE", "UPLOAD", "LOGIN", "DONE", "BLOCKED")
 TARGET_QUESTION = {"CLICK": "bua_target:CLICK", "TYPE": "bua_target:TYPE",
-                   "SELECT": "bua_target:SELECT", "NAVIGATE": "bua_target:NAVIGATE"}
+                   "SELECT": "bua_target:SELECT", "NAVIGATE": "bua_target:NAVIGATE",
+                   "UPLOAD": "bua_target:UPLOAD"}
 REQUIRED_LABELS = {"CLICK": ("target",), "TYPE": ("target", "text"),
                    "SELECT": ("target",), "NAVIGATE": ("target",),
-                   "UPLOAD": ("file",), "LOGIN": ("flow",), "BLOCKED": ("reason",),
+                   "UPLOAD": ("target", "file"), "LOGIN": ("flow",), "BLOCKED": ("reason",),
                    "DONE": ()}
 ROLE_QUESTION = {"text": "bua_text", "file": "bua_file", "flow": "bua_flow",
                  "reason": "bua_block"}

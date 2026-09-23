@@ -289,4 +289,39 @@ out = json.loads(sub.stdout)
 check("B5 CLI: bua-plan answers JSON and denies without a policy (exit 0, no dispatch)",
       sub.returncode == 0 and out["source"] == "denied" and out["operation"] is None)
 
+# ---- UPLOAD binds a target handle as well as a file (sprint BUA M9/MF-3) ----------
+upload_questions = {
+    "bua_operation": {"choices": ["UPLOAD", "DONE"], "instructions": "Which operation?"},
+    "bua_target:UPLOAD": {"choices": ["e9"], "instructions": "Which file input?"},
+    "bua_file": {"choices": ["f1"], "instructions": "Which file?"},
+}
+upload_request = {
+    "step": 1, "action_id": "A-000001", "cycle_id": "C-0001",
+    "state": {"url": "https://example.test/app", "title": "App", "step": 1, "history": [], "elements": []},
+    "questions": upload_questions,
+}
+upload_answers = {
+    "bua_operation": choice("bua_operation", "UPLOAD", probabilities=simplex(["UPLOAD", "DONE"], "UPLOAD")),
+    "bua_target:UPLOAD": choice("bua_target:UPLOAD", "e9", probabilities={"e9": 1.0}),
+    "bua_file": choice("bua_file", "f1", probabilities={"f1": 1.0}),
+}
+root = plan_root()
+client = stub_client(upload_answers)
+with mock.patch.dict(os.environ, {"TYPESAFE_API_KEY": "test-key"}):
+    upload_plan = plan_actions(root, upload_request, client=client)
+check("BUA M9 plan: UPLOAD resolves the target handle and the file together",
+      upload_plan["ok"] is True
+      and upload_plan["operation"] == {"op": "UPLOAD", "labels": {"target": "e9", "file": "f1"}})
+
+root = plan_root()
+client = stub_client({key: value for key, value in upload_answers.items()
+                      if key != "bua_target:UPLOAD"})
+with mock.patch.dict(os.environ, {"TYPESAFE_API_KEY": "test-key"}):
+    no_target = plan_actions(root, {**upload_request, "questions": {
+        key: value for key, value in upload_questions.items() if key != "bua_target:UPLOAD"
+    }}, client=client)
+check("BUA M9 plan: UPLOAD without the executor's target question never dispatches",
+      no_target["ok"] is False and no_target["source"] == "invalid_choice"
+      and "bua_target:UPLOAD" in no_target["reason"])
+
 print(f"\n{len(passed)} checks passed")

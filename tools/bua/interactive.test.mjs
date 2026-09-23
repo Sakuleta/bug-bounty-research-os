@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url'
 import {
   DEFAULT_MAX_STEPS, GUARD_RETRY_CAP, REPLAN_CAP, TYPE_TEXT_MAX, buildActionShape, buildBoundary,
   classifyAction, guardDispatch, isSubmitControl, parseOperation, planContext, resolveLoginTargets,
-  resolveOperation, resolveUploadPath,
+  resolveOperation, resolveUploadPath, snapshotPage,
   runInteractive, runLoop,
 } from './interactive.mjs'
 
@@ -363,6 +363,7 @@ function runCli(root, extraArgs = []) {
     entry('e2', { tag: 'input', type: 'text', ops: ['CLICK', 'TYPE'] }),
     entry('e5', { tag: 'input', type: 'password', ops: ['LOGIN'] }),
     entry('e6', { tag: 'select', ops: ['SELECT'], options: ['a', 'b'] }),
+    entry('e9', { tag: 'input', type: 'file', ops: ['UPLOAD'] }),
   ]
   const boundary = buildBoundary({ root: '/tmp/bua-boundary', entries,
                                    textValues: ['admin'], uploadFiles: [], loginFlows: ['primary'] })
@@ -407,7 +408,7 @@ function runCli(root, extraArgs = []) {
   refused('B2 boundary: a SELECT option the target never offered is refused',
     { op: 'SELECT', handle: 'e6', option: 'not-offered' }, 'not offered')
   refused('B2 boundary: an upload file the executor never offered is refused',
-    { op: 'UPLOAD', file: '/etc/passwd' }, 'not one of the executor-offered')
+    { op: 'UPLOAD', handle: 'e9', file: '/etc/passwd' }, 'not one of the executor-offered')
   refused('B2 boundary: a login flow that is not configured is refused',
     { op: 'LOGIN', flow: 'evil' }, 'not configured')
   const good = parseOperation({ op: 'TYPE', handle: 'e2', text: 'admin' }, boundary)
@@ -1550,6 +1551,138 @@ print(json.dumps(tok))
   }
 }
 
+// ---- the executor snapshot: the effective-submit flag and the file input ----------
+{
+  const fakeElement = ({ tag, attrs = {}, text = '' }) => ({
+    boundingBox: async () => ({ x: 10, y: 10, width: 100, height: 30 }),
+    getAttribute: async (name) => (name in attrs ? attrs[name] : null),
+    innerText: async () => text,
+    locator: () => ({ all: async () => [] }),
+  })
+  const fakePage = (buckets) => ({
+    locator: (sel) => ({ all: async () => (buckets[sel] || []) }),
+    url: () => 'https://t.example/app',
+    title: async () => 'App',
+  })
+  const snap = await snapshotPage(fakePage({
+    button: [fakeElement({ tag: 'button', attrs: { type: '' }, text: 'OK' })],
+    input: [fakeElement({ tag: 'input', attrs: { type: 'file', name: 'attachment' } })],
+  }), 3)
+  const button = snap.entries.find((e) => e.tag === 'button')
+  const file = snap.entries.find((e) => e.tag === 'input')
+  check('BUA M5 snapshot: an implicit-submit button carries the effective-submit flag',
+    button && button.submit === true && button.ops.includes('CLICK'))
+  check('BUA M5 snapshot: a plain button carries no effective-submit flag',
+    button && classifyAction({ op: 'CLICK' }, button) === 'consequential')
+  check('BUA M9 snapshot: a file input offers UPLOAD and carries no submit flag',
+    file && file.ops.includes('UPLOAD') && file.submit === false)
+}
+
+// ---- UPLOAD(handle, workspace-file): the target is part of the typed operation ----
+{
+  const root = mkdtempSync(join(tmpdir(), 'bua-upload-op-'))
+  try {
+    mkdirSync(join(root, 'lab'), { recursive: true })
+    writeFileSync(join(root, 'lab', 'payload.txt'), 'probe\n')
+    const entries = [entry('e9', { tag: 'input', type: 'file', ops: ['UPLOAD'] }),
+                     entry('e1')]
+    const boundary = buildBoundary({ root, entries, uploadFiles: ['lab/payload.txt'] })
+    const payload = realpathSync(join(root, 'lab', 'payload.txt'))
+    const good = parseOperation({ op: 'UPLOAD', handle: 'e9', file: payload }, boundary)
+    check('BUA M9 boundary: UPLOAD(handle, file) parses as a typed operation',
+      good.ok === true && good.op.handle === 'e9' && good.op.file === payload)
+    check('BUA M9 boundary: UPLOAD without a target handle is refused',
+      parseOperation({ op: 'UPLOAD', file: payload }, boundary).ok === false)
+    check('BUA M9 boundary: UPLOAD into a handle that is not a file input is refused',
+      parseOperation({ op: 'UPLOAD', handle: 'e1', file: payload }, boundary).ok === false)
+    const ctx = planContext({ boundary, entryUrl: 'https://t.example/app', step: 1,
+                              cycleId: 'C-0001',
+                              snapshot: { url: 'https://t.example/app', title: 'App', entries },
+                              actionKey: 'A-000001-s1' })
+    check('BUA M9 planContext: the upload-target question offers the file input handle',
+      ctx.request.questions['bua_target:UPLOAD'] !== undefined
+      && JSON.stringify(ctx.request.questions['bua_target:UPLOAD'].choices) === JSON.stringify(['e9']))
+    const resolved = resolveOperation({ op: 'UPLOAD', labels: { target: 'e9', file: 'f1' } }, ctx)
+    check('BUA M9 labels: the upload resolves handle + file together',
+      resolved.ok === true && resolved.op.handle === 'e9' && resolved.op.file === payload)
+    check('BUA M9 labels: an upload target the executor did not offer is refused',
+      resolveOperation({ op: 'UPLOAD', labels: { target: 'e1', file: 'f1' } }, ctx).ok === false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+{
+  // Sprint BUA M9 end to end: the loop resolves the upload target, the guard hands back
+  // the checked locator and the dispatch reaches locator.setInputFiles with the file.
+  const uploads = []
+  const fileLocator = {
+    boundingBox: async () => ({ x: 10, y: 10, width: 100, height: 30 }),
+    click: async (options = {}) => { if (options && options.trial) return },
+    setInputFiles: async (file) => { uploads.push(file) },
+  }
+  const page = {
+    on() {}, mainFrame: () => ({}), url: () => 'https://t.example/app',
+    title: async () => 'stub', screenshot: async () => {},
+    viewportSize: () => viewport, locator: () => ({ all: async () => [] }),
+    goto: async () => ({ status: () => 200 }),
+  }
+  const context = {
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    async route() {}, async routeWebSocket() {}, async addInitScript() {},
+    async newCDPSession() { return { send: async () => ({}), on() {} } },
+  }
+  const root = tempWorkspace({ preflightExtra: { upload_files: ['lab/payload.txt'] } })
+  try {
+    mkdirSync(join(root, 'lab'), { recursive: true })
+    writeFileSync(join(root, 'lab', 'payload.txt'), 'probe\n')
+    const payload = realpathSync(join(root, 'lab', 'payload.txt'))
+    const summary = await runInteractive({
+      root,
+      args: {
+        url: 'https://t.example/app', principal: 'researcher-A', action: 'A-000001',
+        profile: 'lab/bua-profile', preflight: 'preflight.json', 'out-dir': 'artifacts', steps: '1',
+      },
+      chromium: { launchPersistentContext: async () => context },
+      ctl: (args) => {
+        if (args[0] === 'prepare') return { action_id: 'A-000002' }
+        if (args[0] === 'token-consume') return { action_id: 'A-000002', nonce: 'n2' }
+        if (args[0] === 'evidence') return { entity_id: 'E-000001' }
+        if (args[0] === 'action') return { entity_id: 'A-000002' }
+        return { binding_present: false }
+      },
+      scopeVerdict: () => ({ in_scope: true, gate: 'assets', host: 't.example' }),
+      token: { action_id: 'A-000001', nonce: 'n1', tool_family: 'browser',
+               preflight: { account: 'researcher-A' } },
+      snapshot: async () => ({ generation: 1,
+                               entries: [entry('e9', { tag: 'input', type: 'file', ops: ['UPLOAD'] })],
+                               locators: new Map([['e9', fileLocator]]),
+                               url: 'https://t.example/app', title: 'stub' }),
+      plan: async ({ snapshot: snapAt, step, history }) => {
+        const boundary = buildBoundary({
+          root, entries: snapAt.entries,
+          textValues: ['probe-text'], uploadFiles: ['lab/payload.txt'],
+        })
+        const ctx = planContext({ boundary, snapshot: snapAt, entryUrl: 'https://t.example/app',
+                                  step, history, cycleId: 'C-0001', actionKey: 'A-000001-s1' })
+        const resolved = resolveOperation({ op: 'UPLOAD', labels: { target: 'e9', file: 'f1' } }, ctx)
+        return resolved.ok
+          ? { ok: true, source: 'typesafe', operation: resolved.op, boundary }
+          : { ok: false, source: 'boundary', reason: resolved.reason }
+      },
+      scopeRecheck: async () => ({ ok: true }),
+      log: () => {},
+    })
+    check('BUA M9 loop: the upload dispatch reaches setInputFiles with the resolved file',
+      uploads.length === 1 && uploads[0] === payload)
+    check('BUA M9 loop: the upload is recorded as its own action',
+      summary.history.length === 1 && summary.history[0].op === 'UPLOAD'
+      && summary.history[0].status === 'recorded')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
 // ===================================================================================
 // 9. Uploads, login flows and JS-driven observation (B6)
 // ===================================================================================
@@ -1598,11 +1731,11 @@ print(json.dumps(tok))
     const boundary = buildBoundary({ root, entries: [entry('e9', { tag: 'input', type: 'file', ops: ['UPLOAD'] })],
                                      uploadFiles: ['lab/payload.txt'] })
     const payload = realpathSync(join(root, 'lab', 'payload.txt'))
-    const uploadOp = parseOperation({ op: 'UPLOAD', file: payload }, boundary)
+    const uploadOp = parseOperation({ op: 'UPLOAD', handle: 'e9', file: payload }, boundary)
     check('B6 upload: the resolved workspace file parses as a typed UPLOAD',
-      uploadOp.ok === true && uploadOp.op.file === payload)
+      uploadOp.ok === true && uploadOp.op.file === payload && uploadOp.op.handle === 'e9')
     check('B6 upload: a file outside the offered set is refused at the boundary',
-      parseOperation({ op: 'UPLOAD', file: '/etc/passwd' }, boundary).ok === false)
+      parseOperation({ op: 'UPLOAD', handle: 'e9', file: '/etc/passwd' }, boundary).ok === false)
   } finally {
     rmSync(root, { recursive: true, force: true })
     rmSync(outside, { recursive: true, force: true })
