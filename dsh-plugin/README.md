@@ -99,6 +99,7 @@ node conformance.test.mjs          # guard + egress + token-selection cases (moc
 node executor.integration.test.mjs # full R4 chain against a local lab server (real researchctl)
 node goal-deferral/conformance.test.mjs           # veto matrix (mocked DSH seams + registry fixtures)
 node goal-deferral/deferral.integration.test.mjs  # real lease registry + launch wrapper + fake driver
+node goal-deferral/gate.matrix.test.mjs           # OpenCode pre-continuation gate contract matrix
 ```
 
 ## Install / update

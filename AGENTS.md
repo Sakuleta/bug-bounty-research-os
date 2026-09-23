@@ -272,7 +272,8 @@ node suites (`node tools/bua/run.test.mjs`, the guarded
 `node tools/bua/run.e2e.test.mjs` which SKIPs without a provisioned browser,
 `node dsh-plugin/conformance.test.mjs`, `node dsh-plugin/executor.integration.test.mjs`,
 `node dsh-plugin/broker.integration.test.mjs`, `node dsh-plugin/goal-deferral/conformance.test.mjs`,
-`node dsh-plugin/goal-deferral/deferral.integration.test.mjs`).
+`node dsh-plugin/goal-deferral/deferral.integration.test.mjs`,
+`node dsh-plugin/goal-deferral/gate.matrix.test.mjs`).
 `tools/test_replay.py` replays a fixture set of canonical shapes through the JS executor
 core twice against a local canned server and diffs HTTP status, the post-redaction
 header set and the body hash per capture; with a workspace argument it re-scans every
