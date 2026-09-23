@@ -2627,7 +2627,7 @@ async function registerExecutor(ctx, tools) {
   }))
 }
 
-function apply(ctx) {
+async function apply(ctx) {
   try {
     const tools = ctx.get('tools')
     if (tools === undefined) {
@@ -2657,8 +2657,24 @@ function apply(ctx) {
       return next()
     })
     registerExecutor(ctx, tools).catch((e) => log('executor-register-error ' + e))
+    // Goal-deferral veto (D4): the adapter is part of the installed body; load it and
+    // let it register its own monotonic guard (create_goal/update_goal blocked while a
+    // run's lease is held). A load failure is logged loudly and does not take the
+    // enforcer down — apply-level errors fail open by the enforcer contract, while the
+    // veto itself fails closed whenever it does install.
+    try {
+      const deferral = await import('./goal-deferral/index.js')
+      const gate = deferral.apply(ctx)
+      log(gate
+        ? 'goal-deferral: veto guard installed (goal mutation blocked while a lease is held)'
+        : 'goal-deferral: no veto installed (see its log line)')
+    } catch (e) {
+      log('goal-deferral-load-error ' + e)
+      console.error('research-os-enforcer: goal-deferral adapter failed to load: ' + e)
+    }
     log('APPLY ok')
-    console.error('research-os-enforcer: active (projection guard + egress/browser gates + controlled executors)')
+    console.error('research-os-enforcer: active (projection guard + egress/browser gates + '
+      + 'controlled executors + goal-deferral veto)')
   } catch (e) {
     log('apply-error ' + e)
     console.error('research-os-enforcer: apply failed: ' + e)
