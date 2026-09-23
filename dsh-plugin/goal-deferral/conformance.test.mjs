@@ -9,7 +9,7 @@
  * state and never emits a continuation.
  */
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as adapter from './index.js'
@@ -270,6 +270,18 @@ const h16 = harness({ apply: { root: forgedRoot, runId: 'run-1', now: () => NOW 
 check('a forged released record citing a non-existent commit blocks (fail closed)',
   typeof h16.guardReason(exec('update_goal', forgedRoot)) === 'string'
   && /commit/.test(h16.guardReason(exec('update_goal', forgedRoot))))
+
+// ---- R10: an unreadable registry blocks (enumeration failure is never clear) --
+const unreadableRoot = workspace('unreadable', { 'run-1': [leaseRecord('active')] })
+try {
+  chmodSync(join(unreadableRoot, '.leases'), 0o000)
+  const h17 = harness({ apply: { root: unreadableRoot, runId: 'run-1', now: () => NOW } })
+  check('an unreadable registry blocks goal mutation (never clear)',
+    typeof h17.guardReason(exec('update_goal', unreadableRoot)) === 'string'
+    && /unreadable|missing/.test(h17.guardReason(exec('update_goal', unreadableRoot))))
+} finally {
+  chmodSync(join(unreadableRoot, '.leases'), 0o700)
+}
 
 rmSync(sandbox, { recursive: true, force: true })
 console.log(failures.length ? `\nFAIL: ${failures.length} check(s): ${failures.join('; ')}` : '')

@@ -550,11 +550,14 @@ def verdict_all(root: str | os.PathLike[str], *, now: float | None = None) -> di
                 "reason": f"lease registry missing: {directory} (missing is never clear)",
                 "runs": [], "corrupt_lines": 0}
     try:
-        entries = sorted(directory.glob("*.jsonl"))
+        # `os.listdir` establishes that enumeration succeeded: `Path.glob` suppresses
+        # the permission error and would report an unreadable registry as empty (clear).
+        entries = sorted(directory / name for name in os.listdir(directory)
+                         if name.endswith(".jsonl"))
     except OSError as exc:
         return {"state": "unknown-recovery-required", "blocked": True,
-                "reason": f"lease registry unreadable: {directory} ({exc})", "runs": [],
-                "corrupt_lines": 0}
+                "reason": f"lease registry unreadable: {directory} ({exc}) — missing or "
+                          "unreadable is never clear", "runs": [], "corrupt_lines": 0}
     runs: list[dict[str, Any]] = []
     corrupt_total = 0
     for path in entries:

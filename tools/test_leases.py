@@ -353,6 +353,21 @@ check("workspace-wide verdict blocks on a corrupt file anywhere",
 check("a missing registry blocks the workspace-wide verdict",
       leases.verdict_all(root(), now=1.0)["blocked"] is True)
 
+# 12b. An unreadable registry directory blocks the workspace-wide verdict: a failed
+# enumeration must never read as "zero held leases" (clear).
+r_unread = root()
+leases.acquire(r_unread, "run-a", interval_seconds=1000.0, now=1.0)
+unreadable_dir = leases.registry_dir(r_unread)
+try:
+    os.chmod(unreadable_dir, 0o000)
+    wide_unread = leases.verdict_all(r_unread, now=2.0)
+    check("an unreadable registry directory blocks the workspace-wide verdict",
+          wide_unread["blocked"] is True
+          and wide_unread["state"] == "unknown-recovery-required"
+          and "unreadable" in wide_unread["reason"])
+finally:
+    os.chmod(unreadable_dir, 0o700)
+
 # ---------------- D2: launch wrapper ----------------
 
 WRAPPER = TOOLS / "lease_run.py"
