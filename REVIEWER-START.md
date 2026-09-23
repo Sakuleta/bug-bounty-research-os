@@ -30,10 +30,10 @@ are in the request you received.
 | `ARCHITECTURE.md` | 102 | The claimed shape: event log → projections → guards |
 | `START.md` | 153 | The engagement entry contract: loop, gates, closure |
 | `AGENTS.md` | 305 | The operational flow an agent must follow |
-| `tools/control_plane.py` | 3953 | **The single policy seam**: event schema (incl. `os_version` stamping), state machine, projections (incl. `knowledge-usage`/`knowledge-proposals`), guards, audit/freshness/evidence/technique/budget records, `KNOWLEDGE_PROPOSED`/`KNOWLEDGE_RESOLVED`, and the broker integration (`set_scope` policy push, `prepare` minting signed single-use tokens through `tools/broker/`, `scope_check` delegation) |
-| `tools/audit.py` | 1432 | What the machine audit actually checks (and what it does not): reviewed-cycle binding, audit content, budget caps, closure-proof parsing, `--emit-proof` |
+| `tools/control_plane.py` | 3998 | **The single policy seam**: event schema (incl. `os_version` stamping), state machine, projections (incl. `knowledge-usage`/`knowledge-proposals`), guards, audit/freshness/evidence/technique/budget records, `KNOWLEDGE_PROPOSED`/`KNOWLEDGE_RESOLVED`, and the broker integration (`set_scope` policy push, `prepare` minting signed single-use tokens through `tools/broker/`, `scope_check` delegation) |
+| `tools/audit.py` | 1435 | What the machine audit actually checks (and what it does not): reviewed-cycle binding, audit content, budget caps, closure-proof parsing, `--emit-proof` |
 | `dsh-plugin/index.js` | 2673 | Enforcement R1–R7: write protection, raw-egress gate, single-use preflight tokens, executor-side scope, browser-launch gate, capture redaction, broker-minted token consumption (R7) |
-| `tools/test_control_plane.py` | 3899 | Executable spec for the seam |
+| `tools/test_control_plane.py` | 3966 | Executable spec for the seam |
 | `tools/test_scope_parity.py` | 131 | Cross-language scope parity: Python `scope_check` vs the enforcer `scopeReasonFor` (SKIPs when node is unavailable) |
 | `tools/test_replay.py` | 368 | Executor replay diff (two identical runs over a canned local server) + capture integrity (secret scan, masker idempotence) in one harness |
 | `tools/test_broker.py` | 1308 | Executable spec for the policy broker (real daemon on a temp home, real Unix socket: protocol, policy, mint/consume, fail-closed paths, control-plane integration) |
@@ -44,10 +44,11 @@ are in the request you received.
 | `dsh-plugin/broker.integration.test.mjs` | 317 | Broker R7 end to end against the real Python broker: signed mint, consume-through-broker before dispatch, tamper/replay/narrowed-policy refusals |
 | `tools/bua/run.test.mjs` | 551 | Executable spec for the browser runner: per-request scope routes (`route`/`routeWebSocket`), blocked-request and redirect-hop records |
 | `tools/bua/run.e2e.test.mjs` | 354 | Guarded end-to-end browser suite — SKIPs without a provisioned browser |
-| `tools/bua/interactive.mjs` | 1426 | The write-capable arm: typed operations over executor handles, node-identity guards (freshness/occlusion/geometry), per-dispatch preflight consumption, human gate for consequential actions, per-action evidence — controller-driven, never wired into the executor |
-| `tools/bua/interactive.test.mjs` | 1252 | Executable guard suite for the interactive arm (adversarial probes first: stale handle, overlay, moved node, out-of-scope write, gate-less consequential action, traversal upload); `run.test.mjs` runs it before interaction APIs are allowed to exist |
-| `tools/ts_bua.py` | 263 | The interactive-plan seam: one Jev fan-out per step, every answer through `validate_choice`, per-action/per-cycle model-call caps, cost rows |
-| `tools/test_bua.py` | 292 | Executable spec for the plan seam (policy gate, fan-out validation, caps, cost) |
+| `tools/bua/interactive.mjs` | 1660 | The write-capable arm: typed operations over executor handles, node-identity guards (freshness/occlusion/geometry via the click-trial actionability probe), per-dispatch preflight consumption bound to op+target+scope, a fresh login per run, a human gate that honors the decision (DENIED/CANCELLED never authorize) and postdates the token, per-action evidence registration (capture JSON + PNG, state snapshot) — controller-driven, never wired into the executor |
+| `tools/bua/interactive-helpers.mjs` | 403 | The interactive arm's own copy of the shared mask/scope/worker-guard helpers (duplication over coupling: the read-only `run.mjs` stays untouched as the default arm); realpath-based `--profile` containment under `lab/` |
+| `tools/bua/interactive.test.mjs` | 2279 | Executable guard suite for the interactive arm (adversarial probes first: stale handle, overlay, moved node, out-of-scope write, gate-less consequential action, refused gate, entry-token reuse, hop taint, traversal upload, symlink profile escape); `run.test.mjs` runs it before interaction APIs are allowed to exist |
+| `tools/ts_bua.py` | 279 | The interactive-plan seam: one Jev fan-out per step, every answer through `validate_choice` with a strict simplex, per-action/per-cycle model-call caps, cost rows |
+| `tools/test_bua.py` | 350 | Executable spec for the plan seam (policy gate, fan-out validation, caps, cost) |
 
 ## Tier 2 — worked run (judge coherence vs ceremony)
 

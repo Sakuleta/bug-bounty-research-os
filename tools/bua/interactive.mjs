@@ -19,11 +19,12 @@
  * The loop (model proposes, executor disposes):
  *   executor snapshot (indexed opaque handles) -> ONE Jev fan-out call
  *   (`researchctl bua-plan`: operation Choice + per-operation target Choice, every answer
- *   through `validate_choice`) -> typed operation over executor-issued handles ->
- *   per-dispatch re-checks (scope, single-use preflight token, human gate for
- *   consequential actions, node identity: freshness/occlusion/geometry) -> dispatch ->
- *   per-action evidence capture registered via `researchctl evidence register` ->
- *   ACTION_RECORDED carrying the consumed token's nonce.
+ *   through `validate_choice` with a strict simplex) -> typed operation over
+ *   executor-issued handles -> per-dispatch re-checks (scope, fresh login, single-use
+ *   preflight token bound to op+target+scope, human gate for consequential actions,
+ *   node identity: freshness/occlusion/geometry) -> dispatch -> per-action evidence
+ *   capture registered via `researchctl evidence register` -> ACTION_RECORDED carrying
+ *   the consumed token's nonce.
  *
  *   - DONE is never independent evidence: the state is re-read by a fresh observation and
  *     the capture is registered before the run reports `confirmed`;
@@ -35,6 +36,14 @@
  *   - redirect hops are recorded AND block writes: after a followed out-of-scope hop the
  *     session is tainted (`scope_violation`) and no further write dispatches (the read
  *     path keeps the documented §5 behavior — hops recorded, capture skipped);
+ *   - a consequential action dispatches only behind a human gate that is RESOLVED with an
+ *     approving decision and raised after its token was minted — DENIED/CANCELLED are
+ *     refusals, and a gate resolved before the run never pre-authorizes;
+ *   - fresh login per run: the reused profile's cookies and web storage are cleared
+ *     before the run, and a flow-configured engagement writes nothing before its LOGIN;
+ *   - per-action evidence is registered: the capture JSON (with a redacted state
+ *     snapshot) always, the screenshot PNG for non-consequential actions (the credential
+ *     surface records its skip instead);
  *   - no downloads (`acceptDownloads: false`), no `page.evaluate`, no model-supplied
  *     selectors/coordinates/shell/JavaScript (rejected at the typed-operation boundary),
  *     uploads only from workspace-contained files, login secrets env-only and masked.
