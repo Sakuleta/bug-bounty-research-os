@@ -837,8 +837,9 @@ export async function verifyDone({ freshSnapshot, capture }) {
 
 /** One typed dispatch. Playwright performs its own actionability checks (including the
  *  hit-target check) and this file never passes `force`, so an occluded node fails here
- *  too; the guard's trial check is the explicit pre-dispatch half. */
-async function dispatchOp({ page, op, locator, entry, summary, collectHops, login, snapshot }) {
+ *  too; the guard's click-trial probe is the explicit pre-dispatch half. */
+async function dispatchOp({ page, op, locator, entry, summary, collectHops, login, snapshot,
+                            lastNavRequest }) {
   try {
     switch (op.op) {
       case 'CLICK':
@@ -859,7 +860,10 @@ async function dispatchOp({ page, op, locator, entry, summary, collectHops, logi
         try {
           resp = await page.goto(op.url, { waitUntil: 'domcontentloaded', timeout: 30000 })
         } catch (e) { error = maskText(String(e.message || e)) }
-        const hops = await collectHops(resp)
+        // A failed navigation returns no response: the request chain it died on is the
+        // witness of its hops (same taint rule as the response listener).
+        const chainSource = resp || (typeof lastNavRequest === 'function' ? lastNavRequest() : null)
+        const hops = await collectHops(chainSource)
         if (hops.length) {
           summary.scope_violation = true
           summary.screenshot = null
@@ -1200,12 +1204,40 @@ export async function runInteractive({ root, args, chromium, ctl = makeCtl(root)
     await fatal('worker websocket observation could not be installed — refusing to browse unscoped. (' +
       maskText(String(e.message || e)) + ')')
   }
+  // A followed out-of-scope redirect hop taints the session: playwright does not route
+  // redirect hops, so a pre-dispatch preflight of a followed hop is impossible — the
+  // runner records the hop with its own reason and refuses every further write instead
+  // of pretending the hop was authorized. Two witnesses feed the same rule: the
+  // 'response' event (every hop that produced a response, subresource or navigation)
+  // and the 'requestfailed' event (a navigation that died after following hops, so no
+  // response exists). Checks run async; the tasks are settled before the summary lands.
+  const taintOnHops = (hops) => {
+    if (hops && hops.length) {
+      summary.scope_violation = true
+      summary.screenshot = null
+      log(`bua-interactive: scope violation — ${hops.length} followed out-of-scope redirect ` +
+        'hop(s) taint this session; no further write dispatches (the hops are recorded with ' +
+        'their own reasons — preflight a redirect target as its own action before relying on it)')
+    }
+    return hops
+  }
   const collectHops = makeHopCollector(summary, scopeCache, log)
-  context.on('response', (response) => {
-    tasks.hop.push(collectHops(response).catch((e) => {
-      log('bua-interactive: WARNING redirect-hop scope check failed: ' + maskText(String(e.message || e)))
-    }))
+  const hopTask = (source) => collectHops(source).then(taintOnHops).catch((e) => {
+    log('bua-interactive: WARNING redirect-hop scope check failed: ' + maskText(String(e.message || e)))
   })
+  context.on('response', (response) => { tasks.hop.push(hopTask(response)) })
+  context.on('requestfailed', (request) => { tasks.hop.push(hopTask(request)) })
+
+  // The last main-frame navigation request: a failed navigation returns no response, so
+  // this is the only witness of the hop chain it died on (the NAVIGATE dispatch reads it).
+  let lastNavRequest = null
+  try {
+    page.on('request', (req) => {
+      try {
+        if (req.isNavigationRequest() && req.frame() === page.mainFrame()) lastNavRequest = req
+      } catch { /* request shape unavailable */ }
+    })
+  } catch { /* request watching unavailable */ }
 
   // ---- the loop's real deps -------------------------------------------------------
   let generation = 0
@@ -1396,7 +1428,8 @@ export async function runInteractive({ root, args, chromium, ctl = makeCtl(root)
       freshSnapshot: () => snap({ step: summary.steps, history: summary.history, fresh: true }),
       capture: (ctx) => realCapture({ ...ctx, step: summary.steps }),
     })),
-    dispatch: dispatch || ((ctx) => dispatchOp({ page, ...ctx, summary, collectHops, login })),
+    dispatch: dispatch || ((ctx) => dispatchOp({ page, ...ctx, summary, collectHops, login,
+                                                  lastNavRequest: () => lastNavRequest })),
     capture: capture || ((ctx) => realCapture(ctx)),
     record: record || ((ctx) => realRecord(ctx)),
     authorize: authorize || ((ctx) => realAuthorize(ctx)),

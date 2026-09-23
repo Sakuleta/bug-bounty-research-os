@@ -904,6 +904,137 @@ function runCli(root, extraArgs = []) {
 }
 
 {
+  // Sprint BUA M4: a CLICK-driven out-of-scope redirect hop reaches the response
+  // listener (the route layer never sees redirect hops) and must taint the session —
+  // the hop is recorded with its own reason and the NEXT write is refused.
+  const handlers = {}
+  const fakeResponse = {
+    url: () => 'https://evil.example/landing',
+    redirectedFrom: () => null,
+    request: () => ({ url: () => 'https://t.example/app' }),
+  }
+  const dispatched = []
+  const page = {
+    on() {}, mainFrame: () => ({}), url: () => 'https://t.example/app',
+    title: async () => 'stub', screenshot: async () => {},
+    viewportSize: () => viewport, locator: () => ({ all: async () => [] }),
+    goto: async () => ({ status: () => 200 }),
+  }
+  const context = {
+    on(event, handler) { handlers[event] = handler },
+    pages: () => [page], newPage: async () => page, close: async () => {},
+    async route() {}, async routeWebSocket() {}, async addInitScript() {},
+    async newCDPSession() { return { send: async () => ({}), on() {} } },
+  }
+  const root = tempWorkspace()
+  try {
+    const summary = await runInteractive({
+      root,
+      args: {
+        url: 'https://t.example/app', principal: 'researcher-A', action: 'A-000001',
+        profile: 'lab/bua-profile', preflight: 'preflight.json', 'out-dir': 'artifacts', steps: '2',
+      },
+      chromium: { launchPersistentContext: async () => context },
+      ctl: (args) => {
+        if (args[0] === 'prepare') return { action_id: 'A-000002' }
+        if (args[0] === 'token-consume') return { action_id: 'A-000002', nonce: 'n2' }
+        if (args[0] === 'evidence') return { entity_id: 'E-000001' }
+        if (args[0] === 'action') return { entity_id: 'A-000002' }
+        return { binding_present: false }
+      },
+      scopeVerdict: () => ({ in_scope: true, gate: 'assets', host: 't.example' }),
+      token: { action_id: 'A-000001', nonce: 'n1', tool_family: 'browser',
+               preflight: { account: 'researcher-A' } },
+      snapshot: async () => ({ generation: 1, entries: [entry('e1')],
+                               locators: new Map([['e1', fakeLocator()]]),
+                               url: 'https://t.example/app', title: 'stub' }),
+      plan: async () => ({ ok: true, source: 'typesafe', operation: { op: 'CLICK', handle: 'e1' } }),
+      dispatch: async (ctx) => {
+        dispatched.push(ctx)
+        if (dispatched.length === 1) {
+          handlers.response(fakeResponse)
+          await new Promise((resolve) => setTimeout(resolve, 20))
+        }
+        return { ok: true }
+      },
+      log: () => {},
+    })
+    check('BUA M4: a CLICK-driven out-of-scope hop taints the session via the response listener',
+      summary.scope_violation === true && summary.out_of_scope_hop_count === 1)
+    check('BUA M4: the followed hop is recorded with its own host and reason',
+      summary.out_of_scope_hops.length === 1 && summary.out_of_scope_hops[0].host === 'evil.example'
+      && summary.out_of_scope_hops[0].reason === 'out_of_scope')
+    check('BUA M4: once tainted the next write is refused (no second dispatch)',
+      dispatched.length === 1 && summary.events.some((e) => e.guard === 'scope'
+        && String(e.reason).includes('tainted')))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+{
+  // Sprint BUA M4: a navigation that FAILED after following hops produces no response —
+  // the failed request's own chain is the witness, and it taints the same way.
+  const handlers = {}
+  const fakeFailedRequest = {
+    url: () => 'https://evil.example/landing',
+    redirectedFrom: () => ({ url: () => 'https://evil.example/hop', redirectedFrom: () => null }),
+  }
+  const dispatched = []
+  const page = {
+    on() {}, mainFrame: () => ({}), url: () => 'https://t.example/app',
+    title: async () => 'stub', screenshot: async () => {},
+    viewportSize: () => viewport, locator: () => ({ all: async () => [] }),
+    goto: async () => ({ status: () => 200 }),
+  }
+  const context = {
+    on(event, handler) { handlers[event] = handler },
+    pages: () => [page], newPage: async () => page, close: async () => {},
+    async route() {}, async routeWebSocket() {}, async addInitScript() {},
+    async newCDPSession() { return { send: async () => ({}), on() {} } },
+  }
+  const root = tempWorkspace()
+  try {
+    const summary = await runInteractive({
+      root,
+      args: {
+        url: 'https://t.example/app', principal: 'researcher-A', action: 'A-000001',
+        profile: 'lab/bua-profile', preflight: 'preflight.json', 'out-dir': 'artifacts', steps: '1',
+      },
+      chromium: { launchPersistentContext: async () => context },
+      ctl: (args) => {
+        if (args[0] === 'prepare') return { action_id: 'A-000002' }
+        if (args[0] === 'token-consume') return { action_id: 'A-000002', nonce: 'n2' }
+        if (args[0] === 'evidence') return { entity_id: 'E-000001' }
+        if (args[0] === 'action') return { entity_id: 'A-000002' }
+        return { binding_present: false }
+      },
+      scopeVerdict: () => ({ in_scope: true, gate: 'assets', host: 't.example' }),
+      token: { action_id: 'A-000001', nonce: 'n1', tool_family: 'browser',
+               preflight: { account: 'researcher-A' } },
+      snapshot: async () => ({ generation: 1, entries: [entry('e1')],
+                               locators: new Map([['e1', fakeLocator()]]),
+                               url: 'https://t.example/app', title: 'stub' }),
+      plan: async () => ({ ok: true, source: 'typesafe', operation: { op: 'CLICK', handle: 'e1' } }),
+      scopeRecheck: async () => ({ ok: true }),
+      dispatch: async (ctx) => {
+        dispatched.push(ctx)
+        handlers.requestfailed(fakeFailedRequest)
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        return { ok: true }
+      },
+      log: () => {},
+    })
+    check('BUA M4: a failed navigation chain with an out-of-scope hop taints the session',
+      summary.scope_violation === true && summary.out_of_scope_hop_count === 2)
+    check('BUA M4: the failed-request hop is recorded too',
+      summary.out_of_scope_hops.some((h) => h.url_masked === 'https://evil.example/landing'))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+{
   const root = tempWorkspace()
   try {
     const refused = runCli(root)
