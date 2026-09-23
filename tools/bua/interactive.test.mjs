@@ -1231,6 +1231,7 @@ function runCli(root, extraArgs = []) {
     boundary, entryUrl: 'https://t.example/app', step: 2, cycleId: 'C-0001',
     history: [{ step: 1, op: 'NAVIGATE', status: 'recorded' }],
     snapshot: { url: 'https://t.example/app', title: 'App', entries },
+    actionKey: 'A-000001-s2',
   })
   const q = ctx.request.questions
   check('B5 planContext: the operation question offers the executor vocabulary',
@@ -1253,6 +1254,61 @@ function runCli(root, extraArgs = []) {
     ctx.targets.CLICK.get('e1').handle === 'e1'
     && ctx.targets.NAVIGATE.get('u1').url === 'https://t.example/next'
     && ctx.targets.SELECT.get('e6=b').option === 'b')
+  check('BUA M6 planContext: the request carries the per-action model-call key',
+    ctx.request.action_id === 'A-000001-s2')
+}
+
+// ---- the per-action model-call cap binds on the request the arm really builds ------
+{
+  const seen = []
+  const page = {
+    on() {}, mainFrame: () => ({}), url: () => 'https://t.example/app',
+    title: async () => 'stub', screenshot: async () => {},
+    viewportSize: () => viewport, locator: () => ({ all: async () => [] }),
+    goto: async () => ({ status: () => 200 }),
+  }
+  const context = {
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    async route() {}, async routeWebSocket() {}, async addInitScript() {},
+    async newCDPSession() { return { send: async () => ({}), on() {} } },
+  }
+  const root = tempWorkspace()
+  try {
+    const summary = await runInteractive({
+      root,
+      args: {
+        url: 'https://t.example/app', principal: 'researcher-A', action: 'A-000001',
+        profile: 'lab/bua-profile', preflight: 'preflight.json', 'out-dir': 'artifacts', steps: '1',
+      },
+      chromium: { launchPersistentContext: async () => context },
+      ctl: (args) => {
+        if (args[0] === 'bua-plan') {
+          // The same contract ts_bua enforces: a request without the per-action key can
+          // never hit the per-action cap, so the seam refuses to plan.
+          const request = JSON.parse(readFileSync(join(root, args[1]), 'utf8'))
+          seen.push(request.action_id)
+          return request.action_id
+            ? { ok: true, source: 'typesafe', operation: { op: 'DONE' } }
+            : { ok: false, source: 'cap_reached', reason: 'the plan request carried no per-action key' }
+        }
+        if (args[0] === 'identity-binding') return { binding_present: false }
+        return {}
+      },
+      scopeVerdict: () => ({ in_scope: true, gate: 'assets', host: 't.example' }),
+      token: { action_id: 'A-000001', nonce: 'n1', tool_family: 'browser',
+               preflight: { account: 'researcher-A' } },
+      snapshot: async () => ({ generation: 1, entries: [], locators: new Map(),
+                               url: 'https://t.example/app', title: 'stub' }),
+      verify: async () => ({ ok: true, evidence: 'E-000009', capture: 'shot.png' }),
+      log: () => {},
+    })
+    check('BUA M6 wiring: the real plan request carries the per-action key (entry action + step)',
+      seen.length === 1 && seen[0] === 'A-000001-s1')
+    check('BUA M6 wiring: the run plans instead of being refused for a missing key',
+      summary.status === 'confirmed')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 }
 
 // ---- the real plan seam, end to end (real researchctl, denied policy) --------------

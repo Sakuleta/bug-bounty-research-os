@@ -460,7 +460,8 @@ export async function guardDispatch(op, ctx) {
 /** The executor-owned Choice space for one step: the model picks labels, never handles,
  *  URLs, selectors or text. `u0` is always the entry URL; `u1..un` are the links the
  *  executor extracted from the snapshot. */
-export function planContext({ boundary, snapshot, entryUrl, step, history = [], cycleId = null }) {
+export function planContext({ boundary, snapshot, entryUrl, step, history = [], cycleId = null,
+                              actionKey = null }) {
   const entries = snapshot && Array.isArray(snapshot.entries) ? snapshot.entries : []
   const targets = { CLICK: new Map(), TYPE: new Map(), SELECT: new Map(), NAVIGATE: new Map() }
   if (entryUrl) targets.NAVIGATE.set('u0', { url: entryUrl })
@@ -514,6 +515,9 @@ export function planContext({ boundary, snapshot, entryUrl, step, history = [], 
     reasons: boundary.blockReasons,
     request: {
       step, cycle_id: cycleId,
+      // The per-action model-call key ts_bua counts (entry action id + step): without it
+      // the per-action cap can never bind on the only production caller.
+      action_id: actionKey ? String(actionKey) : null,
       state: {
         url: maskUrlSecrets(String((snapshot && snapshot.url) || '')),
         title: maskText(String((snapshot && snapshot.title) || '')).slice(0, 200),
@@ -1437,7 +1441,8 @@ export async function runInteractive({ root, args, chromium, ctl = makeCtl(root)
     snapshot: snap,
     plan: plan || (async ({ step, snapshot: snapAt, history }) => {
       const boundary = boundaryFor({ snapshot: snapAt })
-      const ctx = planContext({ boundary, snapshot: snapAt, entryUrl: args.url, step, history, cycleId })
+      const ctx = planContext({ boundary, snapshot: snapAt, entryUrl: args.url, step, history, cycleId,
+                                actionKey: `${label}-s${step}` })
       const planRel = join(outDirRel, `${label}-plan-s${step}.json`)
       writeFileSync(join(root, planRel), JSON.stringify(ctx.request, null, 2) + '\n')
       const planned = ctl(['bua-plan', planRel])
