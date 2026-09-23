@@ -163,6 +163,20 @@ check("the current generation's writer is accepted",
       leases.mark_awaiting(r, "s1-demo", exit_code=0,
                            lease_id=stale["lease_id"], now=2102.0)["lease_id"] == stale["lease_id"])
 
+# 6c. Ownership binding: only the recorded owner process may heartbeat or record exit.
+r_own = root()
+rec_own = leases.acquire(r_own, "owned", interval_seconds=1000.0, now=0.0, pid=424242)
+raise_check("a stranger heartbeat refuses (owner pid binding)",
+            lambda: leases.heartbeat(r_own, "owned", lease_id=rec_own["lease_id"], now=1.0),
+            leases.LeaseError)
+raise_check("a stranger mark_awaiting refuses",
+            lambda: leases.mark_awaiting(r_own, "owned", exit_code=0,
+                                         lease_id=rec_own["lease_id"], now=1.0), leases.LeaseError)
+check("the operator lane keeps mark_unknown callable",
+      leases.mark_unknown(r_own, "owned", reason="operator recovery",
+                          lease_id=rec_own["lease_id"], now=2.0)["state"]
+      == "unknown-recovery-required")
+
 # 7. Release from unknown requires an explicit reason (manual recovery path).
 r2 = root()
 rec_stale = leases.acquire(r2, "stale-run", interval_seconds=10.0, now=0.0)

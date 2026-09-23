@@ -218,7 +218,8 @@ def _write_transition(root: Path, run_id: str, *, state: str, event: str,
                       commit: str | None = None, pgid: int | None = None,
                       lease_id: str | None = None,
                       require: tuple[str, ...] | None = None,
-                      require_reason_for: tuple[str, ...] = ()) -> dict[str, Any]:
+                      require_reason_for: tuple[str, ...] = (),
+                      require_owner: bool = False) -> dict[str, Any]:
     with _lock(root):
         latest, _error, _corrupt, path = _latest_or_error(root, run_id)
         if lease_id is None:
@@ -230,6 +231,15 @@ def _write_transition(root: Path, run_id: str, *, state: str, event: str,
                 f"refusing {event} for run {run_id}: lease generation mismatch (caller holds "
                 f"{lease_id!r}, the current record is {latest.get('lease_id')!r}) — a stale writer "
                 "must not mutate the current lease (fail closed)")
+        if require_owner:
+            owner = latest.get("owner") or {}
+            owner_pid = owner.get("pid")
+            if not isinstance(owner_pid, int) or isinstance(owner_pid, bool) \
+                    or owner_pid != os.getpid():
+                raise LeaseError(
+                    f"refusing {event} for run {run_id}: caller pid {os.getpid()} is not the "
+                    f"recorded owner (pid {owner_pid!r}) — only the owner process may record this "
+                    "transition (fail closed)")
         effective = _effective_state(latest, now)
         if require is not None and effective not in require:
             detail = ""
@@ -328,21 +338,26 @@ def heartbeat(root: str | os.PathLike[str], run_id: str, *, lease_id: str,
 
     A late heartbeat must not silently revive an expired lease: expiry is a
     recorded fact (`unknown-recovery-required`) and recovery is explicit. The
-    caller must name the lease generation (`lease_id`), so a stale wrapper cannot
-    heartbeat the next generation.
+    caller must name the lease generation (`lease_id`) and be the recorded owner
+    process, so a stale or foreign wrapper cannot heartbeat the current generation.
     """
     return _write_transition(Path(root), run_id, state="active", event="heartbeat",
-                             now=_now(now), pgid=pgid, lease_id=lease_id, require=("active",))
+                             now=_now(now), pgid=pgid, lease_id=lease_id, require=("active",),
+                             require_owner=True)
 
 
 def mark_awaiting(root: str | os.PathLike[str], run_id: str, *, exit_code: int,
                   lease_id: str, reason: str = "process exited",
                   now: float | None = None) -> dict[str, Any]:
-    """Record process exit; the lease stays held until reconciliation."""
+    """Record process exit; the lease stays held until reconciliation.
+
+    Owner-bound like `heartbeat`: only the process that acquired the lease (the
+    launch wrapper) may record its tree's exit.
+    """
     return _write_transition(Path(root), run_id, state="awaiting-reconciliation",
                              event="awaiting-reconciliation", now=_now(now),
                              exit_code=exit_code, reason=reason, lease_id=lease_id,
-                             require=("active", "awaiting-reconciliation"))
+                             require=("active", "awaiting-reconciliation"), require_owner=True)
 
 
 def mark_unknown(root: str | os.PathLike[str], run_id: str, *, reason: str, lease_id: str,
