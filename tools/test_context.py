@@ -1063,4 +1063,69 @@ check('replay reproduces an invalid_choice guard decision deterministically',
       _replay_inv['replayed'] == 1 and _replay_inv['matched'] == 1
       and _replay_inv['mismatched'] == 0)
 
+# 9. v8.3 V7: already-covered proof — the v8.2 W14 verify-clause + replay are green
+#    end to end through the CLI seam too (claims-check runs the verify judge, records
+#    the judgment ledger, and the stored records replay deterministically).
+_v7root = Path(tempfile.mkdtemp())
+for d in ['00_control', '02_surface', '03_hypotheses/active', '03_hypotheses/archive', '04_cycles',
+          '10_learning', '11_runtime']:
+    (_v7root / d).mkdir(parents=True, exist_ok=True)
+(_v7root / '00_control/engagement.yaml').write_text('external_judgment: "ALLOWED"\n')
+(_v7root / '02_surface/endpoints.yaml').write_text('endpoints: []\n')
+(_v7root / '11_runtime/events.jsonl').write_text('')
+(_v7root / '11_runtime/run-status.yaml').write_text('engagement_status: "BOOTSTRAP"\n')
+(_v7root / '11_runtime/tool-registry.yaml').write_text('tools: []\n')
+(_v7root / '11_runtime/lab-status.yaml').write_text('status: UNKNOWN\n')
+(_v7root / '10_learning/freshness.yaml').write_text('components: []\n')
+(_v7root / '10_learning/unknowns.yaml').write_text('unknowns: []\n')
+(_v7root / '10_learning/assumptions.yaml').write_text('assumptions: []\n')
+(_v7root / 'proof.txt').write_text('HTTP 200 observed with title Example Domain\n')
+ControlPlane(_v7root).register_evidence('proof.txt', kind='raw', source='test')
+_v7packet = _v7root / 'packet.json'
+_v7packet.write_text(json.dumps({'claims': [{'id': 'v7', 'claim': 'HTTP 200 was observed',
+                                             'evidence_ref': 'E-000001'}]}))
+_v7_calls: list = []
+
+
+def _v7_post(payload, **kwargs):
+    _v7_calls.append(sorted(payload['questions']))
+    if 'verify' in payload['questions']:
+        return {'model': 'jev-v7', 'answers': {'verify': {'choice': 'supported', 'confidence': 0.9}},
+                'usage': {'input_tokens': 3, 'output_tokens': 1}}
+    return {'model': 'jev-v7', 'answers': {'relation': {'choice': 'supports', 'confidence': 0.92,
+              'probabilities': {'supports': 0.92, 'contradicts': 0.04, 'says_nothing': 0.04}}},
+            'usage': {'input_tokens': 4, 'output_tokens': 1}}
+
+
+with mock.patch('ts_claims.post_json', _v7_post), \
+        mock.patch.dict(os.environ, {'TYPESAFE_API_KEY': 'k'}):
+    _v7buf = io.StringIO()
+    with contextlib.redirect_stdout(_v7buf):
+        _v7rc = run_cli([str(TOOLS / 'researchctl.py'), str(_v7root), 'claims-check',
+                         str(_v7packet)])
+_v7out = json.loads(_v7buf.getvalue())
+check('v8.3 V7: claims-check CLI runs the verify judge and records the judgments',
+      _v7rc == 0 and _v7_calls == [['relation'], ['verify']]
+      and _v7out['results'][0]['verify']['supported'] is True
+      and _v7out['results'][0]['auto'] is True
+      and (_v7root / '11_runtime/jev-judgments.jsonl').is_file())
+def _v7_client(state, questions):
+    """Client-shaped mock (state, questions) for the offline replay path."""
+    if 'verify' in questions:
+        return {'model': 'jev-v7', 'answers': {'verify': {'choice': 'supported', 'confidence': 0.9}},
+                'usage': {}}
+    return {'model': 'jev-v7', 'answers': {'relation': {'choice': 'supports', 'confidence': 0.92}},
+            'usage': {}}
+
+
+check('v8.3 V7: the stored judgment replays deterministically with a mocked provider',
+      _w14_replay(_v7root, client=_v7_client)['matched'] == 1
+      and _w14_replay(_v7root, client=_v7_client)['mismatched'] == 0)
+with mock.patch.dict(os.environ, {'TYPESAFE_API_KEY': 'k'}), \
+        mock.patch('ts_claims.post_json', _v7_post):
+    _v7deny = check_claims(POLICY_DENY, {'claims': [{'id': 'v7d', 'claim': 'x',
+                                                     'evidence_ref': 'E-000001'}]}, verify=True)
+check('v8.3 V7: the DENIED-default gate still short-circuits claims-check before any call',
+      _v7deny['source'] == 'unavailable' and _v7deny['results'] == [])
+
 print(f'\n{len(passed)}/{len(passed)} passed')
