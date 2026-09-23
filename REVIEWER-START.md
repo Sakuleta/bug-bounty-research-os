@@ -77,7 +77,7 @@ check whether the audit's PASS is earned.
   `review-issue` review vouchers, `identity-binding` readout,
   `broker serve`/`status`), `cycle.py` (159), `build_context.py` (164),
   `knowledge_index.py` (165), `ts_triage.py` (141),
-  `ts_claims.py` (664, incl. the verify-clause judge, judgment ledger and offline
+  `ts_claims.py` (668, incl. the verify-clause judge, judgment ledger and offline
   replay), `bua/run.mjs` (774), browser runner, `provision.py` (50),
   `validate_workspace.py` (117, OS-checkout vs engagement-snapshot contract),
   `secret-patterns.json` + `generate_secret_patterns.py` (92, the single
@@ -85,8 +85,8 @@ check whether the audit's PASS is earned.
   `new_cycle.py` (16),
   `harness_check.py` (146) — per-profile presence/drift + restart-pending check for the
   installed enforcer plugin — and the v8.3 verification organs: `ts_cost.py` (181),
-  `ts_screen.py` (402), `ts_ground.py` (593), `ts_novelty.py` (296),
-  `ts_rank.py` (285), `ts_label.py` (268), `ts_honesty.py` (227) — each backed by a
+  `ts_screen.py` (402), `ts_ground.py` (593), `ts_novelty.py` (300),
+  `ts_rank.py` (353), `ts_label.py` (268), `ts_honesty.py` (227) — each backed by a
   paired eval under `tools/ts-eval/` — and the other `test_*.py` suites, incl.
   `test_harness_check.py` (136) and `test_replay.py` (368, also the capture-integrity
   harness for a workspace argument). Out-of-workspace layers: `broker/broker.py` (781,

@@ -1134,6 +1134,15 @@ _replay_fo = _w14_replay(_foroot, client=_failopen_client)
 check('replay reproduces the fail-closed verify decision deterministically',
       _replay_fo['replayed'] == 1 and _replay_fo['matched'] == 1
       and _replay_fo['mismatched'] == 0)
+# New V2/V6 seams share 11_runtime/jev-judgments.jsonl (their records carry `seam`);
+# claims replay must ignore them instead of counting them as drifted.
+_w14_shared = _foroot / '11_runtime/jev-judgments.jsonl'
+_w14_shared.write_text(_w14_shared.read_text() + json.dumps(
+    {'seam': 'novelty', 'input_digest': 'x', 'input': {'candidate': {}}, 'verdict': 'same'}) + '\n')
+_replay_shared = _w14_replay(_foroot, client=_failopen_client)
+check('claims replay ignores other seams in the shared judgment ledger',
+      _replay_shared['replayed'] == 1 and _replay_shared['drifted'] == 0
+      and _replay_shared['matched'] == 1)
 
 # 9. v8.3 V7: already-covered proof — the v8.2 W14 verify-clause + replay are green
 #    end to end through the CLI seam too (claims-check runs the verify judge, records

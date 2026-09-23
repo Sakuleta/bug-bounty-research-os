@@ -369,6 +369,10 @@ def replay_judgments(root: Path, *, client, path: str | Path | None = None) -> d
                 continue
             if not isinstance(record, dict):
                 continue
+            # The ledger is shared with the V2/V6 seams (their records carry a `seam`
+            # key): claims replay only reads claim judgments, never a foreign seam's.
+            if record.get("seam") not in (None, "claims"):
+                continue
             replayed += 1
             ref = str(record.get("evidence_ref") or "")
             try:
