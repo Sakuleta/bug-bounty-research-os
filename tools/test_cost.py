@@ -51,6 +51,13 @@ def cost_root() -> Path:
 root = cost_root()
 ControlPlane(root).register_evidence("proof.txt", kind="raw", source="test")
 
+from ts_screen import screen_evidence  # noqa: E402  (screening is a claims precondition)
+
+screen_evidence(root, "E-000001", client=lambda s, q: {
+    "model": "stub-screen",
+    "answers": {name: {"type": "noul", "noul": 0.01} for name in q},
+    "usage": {}})
+
 # 1. Estimation: tokens x the documented rate; env-overridable; garbage never raises.
 with mock.patch.dict(os.environ, {"TYPESAFE_USD_PER_MTOK": "42"}):
     check("estimate_usd prices input+output tokens at the documented rate",

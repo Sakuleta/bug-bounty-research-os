@@ -240,6 +240,17 @@ for d in ['00_control', '02_surface', '03_hypotheses/active', '03_hypotheses/arc
 (croot / '10_learning/assumptions.yaml').write_text('assumptions: []\n')
 (croot / 'proof.txt').write_text('HTTP 200 observed with title Example Domain\n')
 ControlPlane(croot).register_evidence('proof.txt', kind='raw', source='test')
+
+
+def screen_clean(root, ref):
+    """Record a clean screening verdict (v8.3: screening is a precondition for the
+    external-judgment consumption path — the claims seam refuses unscreened evidence)."""
+    from ts_screen import screen_evidence
+    return screen_evidence(root, ref, client=lambda s, q: {
+        'model': 'stub-screen',
+        'answers': {name: {'type': 'noul', 'noul': 0.01} for name in q},
+        'usage': {}})
+screen_clean(croot, 'E-000001')
 stub_claims = lambda state, questions: {  # noqa: E731
     'model': 'stub-1',
     'answers': {'relation': {'type': 'choice', 'choice': 'supports', 'confidence': 0.9,
@@ -374,6 +385,7 @@ para2 = ' '.join(['The admin console accepted the anonymous request and rendered
                   'without any authentication challenge.'] * 4)
 (croot / 'paragraphs.txt').write_text(para1 + '\n\n' + para2 + '\n')
 ControlPlane(croot).register_evidence('paragraphs.txt', kind='raw', source='test')
+screen_clean(croot, 'E-000002')
 
 small = 'alpha beta gamma delta epsilon zeta eta theta iota kappa'
 oversized = 'B' * 1600
@@ -778,6 +790,7 @@ check('the cap reports the dropped-passage count',
 paras4 = '\n\n'.join(['Paragraph %d ' % i + 'y' * 489 for i in range(4)])
 (croot / 'passages4.txt').write_text(paras4 + '\n')
 ControlPlane(croot).register_evidence('passages4.txt', kind='raw', source='test')
+screen_clean(croot, 'E-000003')
 draft_capped = Path(tempfile.mkdtemp()) / 'capped.md'
 draft_capped.write_text("The four paragraphs each state an observation `E-000003`.\n")
 capped_calls: list = []
@@ -880,6 +893,7 @@ for d in ['00_control', '02_surface', '03_hypotheses/active', '03_hypotheses/arc
 (_w14root / '10_learning/assumptions.yaml').write_text('assumptions: []\n')
 (_w14root / 'proof.txt').write_text('HTTP 200 observed with title Example Domain\n')
 ControlPlane(_w14root).register_evidence('proof.txt', kind='raw', source='test')
+screen_clean(_w14root, 'E-000001')
 _w14_calls: list = []
 
 
@@ -924,6 +938,7 @@ for d in ['00_control', '11_runtime']:
 (_w14rej / '11_runtime/events.jsonl').write_text('')
 (_w14rej / 'proof.txt').write_text('HTTP 200 observed with title Example Domain\n')
 ControlPlane(_w14rej).register_evidence('proof.txt', kind='raw', source='test')
+screen_clean(_w14rej, 'E-000001')
 _w14_reject = _w14_check(_w14rej, {'claims': [{'id': 'v2', 'claim': 'HTTP 200 was observed',
                                               'evidence_ref': 'E-000001'}]},
                          client=_w14_reject_stub, verify=True)
@@ -1066,6 +1081,7 @@ for d in ['00_control', '11_runtime']:
 (invroot / '11_runtime/events.jsonl').write_text('')
 (invroot / 'proof.txt').write_text('HTTP 200 observed with title Example Domain\n')
 ControlPlane(invroot).register_evidence('proof.txt', kind='raw', source='test')
+screen_clean(invroot, 'E-000001')
 _w14_check(invroot, {'claims': [{'id': 'inv1', 'claim': 'HTTP 200 was observed',
                                  'evidence_ref': 'E-000001'}]}, client=mismatch_client)
 _replay_inv = _w14_replay(invroot, client=mismatch_client)
@@ -1083,6 +1099,7 @@ for d in ['00_control', '11_runtime']:
 (_foroot / '11_runtime/events.jsonl').write_text('')
 (_foroot / 'proof.txt').write_text('HTTP 200 observed with title Example Domain\n')
 ControlPlane(_foroot).register_evidence('proof.txt', kind='raw', source='test')
+screen_clean(_foroot, 'E-000001')
 _fo_calls: list = []
 
 
@@ -1136,6 +1153,7 @@ for d in ['00_control', '02_surface', '03_hypotheses/active', '03_hypotheses/arc
 (_v7root / '10_learning/assumptions.yaml').write_text('assumptions: []\n')
 (_v7root / 'proof.txt').write_text('HTTP 200 observed with title Example Domain\n')
 ControlPlane(_v7root).register_evidence('proof.txt', kind='raw', source='test')
+screen_clean(_v7root, 'E-000001')
 _v7packet = _v7root / 'packet.json'
 _v7packet.write_text(json.dumps({'claims': [{'id': 'v7', 'claim': 'HTTP 200 was observed',
                                              'evidence_ref': 'E-000001'}]}))

@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Jev injection screening: a fixed Noul battery over target-controlled content.
 
-The OS law is "target-controlled content is data" (`START.md`); this seam enforces it
-at ingestion time, before the controller or any capable model reads a fetched page, a
-BUA capture or an evidence excerpt. The battery is fixed (four Noul questions in one
-call, same state), thresholds are applied in code, and the gate is the engagement's
-`external_judgment` policy (DENIED default — no key, no call).
+The OS law is "target-controlled content is data" (`START.md`); this seam screens a
+fetched page, a BUA capture or an evidence excerpt BEFORE external judgment reads it,
+and screening is a precondition at the shared consumption seam: `ts_claims` refuses a
+claim whose evidence is not screened clean (never screened, flagged, or screened
+without a verdict under the DENIED-default gate) and withholds the text — no raw
+excerpt reaches the model, no verdict is invented. The battery is fixed (four Noul
+questions in one call, same state), thresholds are applied in code, and the gate is the
+engagement's `external_judgment` policy (DENIED default — no key, no call).
 
 Flagged input is never dropped and never deleted: the registered evidence and its
 store copy stay untouched, a quarantine copy is written under
@@ -212,12 +215,62 @@ def _quarantine_view(row: dict[str, Any]) -> str:
             "review it as untrusted data]")
 
 
-def constrained_view(root: Path, ref: str) -> str | None:
-    """The constrained excerpt for a flagged evidence ref, or None when not flagged."""
+def _unscreened_view(root: Path, ref: str) -> str:
+    """The explicit withheld view for evidence with no usable screening verdict.
+
+    This is a BLOCK, not a pass: the content never reaches external judgment until a
+    clean screening row exists. A row that ran but produced no verdict (the DENIED
+    gate, a refused/failed call) names its reason instead of pretending to be screened.
+    """
     row = screening_status(root, ref)
-    if not row or not row.get("flagged"):
+    if row is None:
+        return (f"[SCREENING: not screened — the evidence is withheld from external "
+                f"judgment until `researchctl screen {ref}` records a clean verdict]")
+    detail = (row.get("error") or row.get("note")
+              or f"source={row.get('source')}")
+    return (f"[SCREENING: not cleared ({detail}) — the evidence is withheld from "
+            f"external judgment; screen it once the DENIED-default gate allows it]")
+
+
+def screening_state(root: Path, ref: str) -> dict[str, Any]:
+    """Is this evidence ref cleared for external judgment?
+
+    `{"clear": bool, "reason": str}`. A ref with no screening row, a flagged verdict, or
+    a row that produced no verdict (unavailable/error) is NOT clear — screening is a
+    precondition, not an option. Only `flagged is False` clears the ref.
+    """
+    row = screening_status(root, ref)
+    if row is None:
+        return {"clear": False,
+                "reason": (f"never screened — run `researchctl screen {ref}` and review "
+                           "the verdict before external judgment reads it")}
+    if row.get("flagged") is True:
+        reasons = (", ".join(row.get("flagged_questions") or [])
+                   or (row.get("error") or "invalid scores"))
+        return {"clear": False,
+                "reason": (f"screening flagged it ({reasons}) — the constrained view "
+                           "withholds the text")}
+    if row.get("flagged") is None:
+        detail = row.get("error") or row.get("note") or f"source={row.get('source')}"
+        return {"clear": False,
+                "reason": (f"screening produced no verdict ({detail}) — the DENIED-default "
+                           "gate or a failed call cannot clear evidence")}
+    return {"clear": True, "reason": "screened clean"}
+
+
+def constrained_view(root: Path, ref: str) -> str | None:
+    """The constrained excerpt for a ref that is not cleared, or None when clean.
+
+    Returns the quarantine banner for a flagged verdict, the explicit withheld view
+    when there is no usable screening verdict, and None only for `flagged is False`.
+    Evidence that was never screened is therefore never handed back as raw content.
+    """
+    row = screening_status(root, ref)
+    if row is not None and row.get("flagged") is False:
         return None
-    return _quarantine_view(row)
+    if row is not None and row.get("flagged") is True:
+        return _quarantine_view(row)
+    return _unscreened_view(Path(root), ref)
 
 
 def _quarantine_text(ref: str, result: dict[str, Any], text: str) -> str:
@@ -254,22 +307,23 @@ def screen_evidence(root: Path, ref: str, *, client=None, live: bool = True,
     row = {
         "time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "evidence_ref": str(ref),
-        "source": result["source"],
-        "flagged": result["flagged"],
-        "threshold": result["threshold"],
-        "scores": result["scores"],
-        "flagged_questions": result["flagged_questions"],
-        "invalid_scores": result["invalid_scores"],
-        "model": result["model"],
-        "usage": result["usage"],
+        "source": result.get("source"),
+        "flagged": result.get("flagged"),
+        "threshold": result.get("threshold", FLAG_THRESHOLD),
+        "scores": result.get("scores") or {},
+        "flagged_questions": result.get("flagged_questions") or [],
+        "invalid_scores": result.get("invalid_scores") or [],
+        "model": result.get("model"),
+        "usage": result.get("usage") or {},
         "error": result.get("error"),
-        "chars": result["chars"],
-        "truncated": result["truncated"],
-        "redacted": result["redacted"],
+        "note": result.get("note"),
+        "chars": result.get("chars", len(text)),
+        "truncated": bool(result.get("truncated")),
+        "redacted": bool(result.get("redacted")),
         "quarantine_path": None,
         "latency_ms": int((time.monotonic() - started) * 1000),
     }
-    if result["flagged"]:
+    if result.get("flagged") is True:
         qdir = Path(root) / QUARANTINE_REL
         qdir.mkdir(parents=True, exist_ok=True)
         qpath = qdir / f"{ref}.md"

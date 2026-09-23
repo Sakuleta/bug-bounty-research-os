@@ -185,7 +185,7 @@ check("screening ledgers its usage as an estimated cost row",
       any(r["decision"] == "screen" and r["estimated"] for r in cost_rows(eroot)))
 
 # 6. The constrained consumption path: ts_claims reads the quarantined view, not the raw text.
-from ts_claims import evidence_excerpt  # noqa: E402
+from ts_claims import check_claims, evidence_excerpt  # noqa: E402
 
 excerpt = evidence_excerpt(eroot, "E-000001")
 check("the excerpt of flagged evidence is the constrained quarantine view",
@@ -199,6 +199,52 @@ clean_row = screen_evidence(eroot, "E-000002", client=noul_stub(LOW))
 check("a benign screening records the row with no quarantine",
       clean_row["flagged"] is False and clean_row["quarantine_path"] is None
       and evidence_excerpt(eroot, "E-000002").startswith("The endpoint returned HTTP 200"))
+
+# 7b. Fix (Spec MF-1): screening is a precondition for external-judgment consumption —
+#     an unscreened artifact is never returned raw and the claims seam blocks the claim
+#     without a model call, keeping it visible with the reason.
+u_root = policy_root("ALLOWED")
+(u_root / "unscreened.txt").write_text(INJECTION + "\n")
+ControlPlane(u_root).register_evidence("unscreened.txt", kind="bua-capture", source="bua")
+u_view = evidence_excerpt(u_root, "E-000001")
+check("an unscreened excerpt is never the raw store copy (explicit withheld view)",
+      u_view.startswith("[SCREENING: not screened") and "Ignore all previous instructions" not in u_view)
+u_calls: list = []
+u_out = check_claims(u_root, {"claims": [{"id": "u1", "claim": "the capture showed a login form",
+                                          "evidence_ref": "E-000001"}]},
+                     client=lambda s, q: u_calls.append(s) or {"model": "stub", "answers": {},
+                                                               "usage": {}})
+check("an unscreened claim is blocked without a model call and stays visible",
+      u_out["source"] == "typesafe" and u_calls == []
+      and u_out["results"][0]["verdict"] is None and u_out["results"][0]["auto"] is False
+      and "screen" in u_out["results"][0]["note"] and u_out["summary"]["unscreened"] == 1
+      and u_out["summary"]["checked"] == 1)
+check("an unscreened claim writes no judgment record",
+      not (u_root / "11_runtime/jev-judgments.jsonl").is_file())
+# A gate that prevents screening is the same explicit block, naming the reason.
+d_root = policy_root("DENIED")
+(d_root / "capture.txt").write_text(INJECTION + "\n")
+ControlPlane(d_root).register_evidence("capture.txt", kind="bua-capture", source="bua")
+d_row = screen_evidence(d_root, "E-000001")
+d_view = evidence_excerpt(d_root, "E-000001")
+check("a denied gate cannot clear evidence: the excerpt stays withheld and non-silent",
+      d_row["source"] == "unavailable" and d_row["flagged"] is None
+      and ("not screened" in d_view or "not cleared" in d_view)
+      and "Ignore all previous instructions" not in d_view)
+# A flagged artifact is blocked at the claims seam too (the constrained view is for the
+# controller, not for external egress).
+f_root = policy_root("ALLOWED")
+(f_root / "flagged.txt").write_text(INJECTION + "\n")
+ControlPlane(f_root).register_evidence("flagged.txt", kind="bua-capture", source="bua")
+screen_evidence(f_root, "E-000001", client=noul_stub(HIGH))
+f_calls: list = []
+f_out = check_claims(f_root, {"claims": [{"id": "f1", "claim": "the capture showed a login form",
+                                          "evidence_ref": "E-000001"}]},
+                     client=lambda s, q: f_calls.append(s) or {"model": "stub", "answers": {},
+                                                               "usage": {}})
+check("a flagged claim is blocked without egress, with the flag visible",
+      f_calls == [] and f_out["results"][0]["verdict"] is None
+      and "flagged" in f_out["results"][0]["note"])
 
 # 8. CLI wiring: `researchctl screen E-…` runs the battery and prints the row.
 import contextlib  # noqa: E402

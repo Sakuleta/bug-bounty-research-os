@@ -62,9 +62,11 @@ def evidence_excerpt(root: Path, ref: str, cap: int = EXCERPT_CAP, *,
     be what the seam reasons over. A legacy record without a store_path falls back to
     its readable living path, never a guessed filename.
 
-    With `constrained=True` (the default) a screening verdict that flagged this ref
-    short-circuits to the constrained view (the flag + the quarantine pointer, text
-    withheld) — flagged content never flows into external judgment as-is. Screening
+    With `constrained=True` (the default) screening is a precondition: a flagged ref
+    reads back as the constrained quarantine view (flag + quarantine pointer, text
+    withheld) and an unscreened — or screened-without-verdict — ref reads back as the
+    explicit withheld banner. Only a clean screening row returns the store copy, so
+    target-controlled content never reaches external judgment unscreened. Screening
     itself reads with `constrained=False` so the store copy is what gets screened.
     """
     index = ControlPlane(root).evidence_index()
@@ -348,13 +350,18 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
     then judged supportable-or-not against the cited evidence by a second Choice
     question; an `unsupported` verdict — and any verify answer `validate_choice`
     rejected (fail closed) — retries the relation once (bounded), and a verdict that
-    never verifies is kept but flagged (`auto` False with a verify-clause note). Live
-    judgments are appended to 11_runtime/jev-judgments.jsonl (input digest, model,
-    verdict, confidence, timestamp) for offline replay.
+    never verifies is kept but flagged (`auto` False with a verify-clause note).
+    Screening is a precondition: a claim whose evidence is not screened clean (never
+    screened, flagged, or screened without a verdict under the DENIED-default gate) is
+    recorded with `verdict: None` and the reason under `note` — no model call, no raw
+    excerpt, counted under `summary.unscreened`. Live judgments are appended to
+    11_runtime/jev-judgments.jsonl (input digest, model, verdict, confidence,
+    timestamp) for offline replay.
     """
     claims = packet.get("claims") or []
     if not isinstance(claims, list) or not claims:
         raise ValueError("claims packet needs a non-empty 'claims' list")
+    from ts_screen import screening_state  # lazy: ts_screen imports this module
     key = os.environ.get("TYPESAFE_API_KEY", "")
     if not live:
         return _unavailable(NO_KEY_NOTE, auto_accept)
@@ -367,12 +374,24 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
     judgments: list[dict] = []
     usage_in = usage_out = 0
     resp = None
+    unscreened = 0
     for i, item in enumerate(claims, 1):
         cid = str(item.get("id") or f"C-{i}")
         claim = str(item.get("claim", "")).strip()
         ref = str(item.get("evidence_ref", "")).strip()
         if not claim or not ref:
             raise ValueError(f"claim {cid} needs both 'claim' and 'evidence_ref'")
+        gate = screening_state(root, ref)
+        if not gate["clear"]:
+            # Fail closed at the consumption seam: the text never egresses and no
+            # verdict is invented; the claim stays visible with the blocking reason.
+            unscreened += 1
+            results.append({
+                "id": cid, "claim": claim, "evidence_ref": ref,
+                "verdict": None, "confidence": None, "auto": False, "probabilities": {},
+                "note": f"evidence withheld from external judgment: {gate['reason']}",
+            })
+            continue
         excerpt = evidence_excerpt(root, ref)
         evidence = excerpt
         extra: dict = {}
@@ -491,16 +510,23 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
                        "supports": sum(1 for r in results if r["verdict"] == "supports"),
                        "contradicts": sum(1 for r in results if r["verdict"] == "contradicts"),
                        "says_nothing": sum(1 for r in results if r["verdict"] == "says_nothing"),
-                       "invalid_choice": sum(1 for r in results if r["verdict"] == INVALID_CHOICE)},
-           "model": resp.get("model"), "usage": {"input_tokens": usage_in, "output_tokens": usage_out}}
-    try:
-        record_judgments(root, judgments)
-    except OSError as exc:
-        # Replay coverage must never be lost silently: the judgments still return,
-        # but the output says the ledger write failed so the gap is visible.
-        out["judgments_recorded"] = False
-        out["judgments_error"] = f"judgment ledger write failed ({exc}) — replay coverage lost"
+                       "invalid_choice": sum(1 for r in results if r["verdict"] == INVALID_CHOICE),
+                       "unscreened": unscreened},
+           "model": resp.get("model") if isinstance(resp, dict) else None,
+           "usage": {"input_tokens": usage_in, "output_tokens": usage_out}}
+    if judgments:
+        try:
+            record_judgments(root, judgments)
+        except OSError as exc:
+            # Replay coverage must never be lost silently: the judgments still return,
+            # but the output says the ledger write failed so the gap is visible.
+            out["judgments_recorded"] = False
+            out["judgments_error"] = f"judgment ledger write failed ({exc}) — replay coverage lost"
+        else:
+            out["judgments_recorded"] = True
     else:
+        # Nothing was judged (all claims blocked or none produced a verdict): no
+        # judgment record is invented and no empty ledger file is created.
         out["judgments_recorded"] = True
     return out
 

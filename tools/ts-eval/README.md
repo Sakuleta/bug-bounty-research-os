@@ -31,7 +31,10 @@ from the variant-B run. Raw outputs: `results.json` (variant A), `results_choice
 (E-000001, E-000002, E-000004) with known expectations: supports / contradicts /
 says_nothing. Result: 10/10 verdict accuracy; the deliberately unanswerable claim was
 flagged at 0.45 confidence. `claims_results.json` is the recorded seam output
-(verdicts, confidences, probabilities, model id, usage).
+(verdicts, confidences, probabilities, model id, usage). Since v8.3 V2 the claims seam
+consumes only evidence with a clean screening verdict, so a live rerun needs
+`researchctl screen <ref>` for each cited ref first (`claims_eval.py` refuses without
+it); the committed run predates screening and is the historical record.
 
 ### 3. Injection screening — `screen_eval_set.json` + `screen_eval.py` + `screen_results.json` (v8.3)
 

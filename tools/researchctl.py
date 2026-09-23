@@ -450,6 +450,7 @@ def main() -> int:
             print(f"claims-draft: checked={s['checked']} flagged={s['flagged']} "
                   f"supports={s.get('supports', 0)} contradicts={s.get('contradicts', 0)} "
                   f"says_nothing={s.get('says_nothing', 0)} invalid={s.get('invalid_choice', 0)} "
+                  f"unscreened={s.get('unscreened', 0)} "
                   f"skipped={len(out.get('skipped', []))} "
                   f"errors={len(out.get('errors', []))} (aid, not a gate)", file=sys.stderr)
             if ns.fail_on_flag and s["flagged"]:
