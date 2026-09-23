@@ -8,6 +8,7 @@
  * The adapter is veto-only: it may block, it never pauses/resumes durable goal
  * state and never emits a continuation.
  */
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -54,6 +55,20 @@ function bareWorkspace(name) {
   const root = join(sandbox, name)
   mkdirSync(root, { recursive: true })
   return root
+}
+
+/** A real git work tree with one commit; returns the commit sha (for released fixtures). */
+function gitCommit(root) {
+  const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@e',
+    GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@e' }
+  execFileSync('git', ['init', '-q'], { cwd: root, env })
+  execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'results'], { cwd: root, env })
+  return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, env, encoding: 'utf8' }).trim()
+}
+
+function writeRecords(root, runId, records) {
+  writeFileSync(join(root, '.leases', `${runId}.jsonl`),
+    records.map((r) => (typeof r === 'string' ? r : JSON.stringify(r))).join('\n') + '\n')
 }
 
 // ---- mock harness -----------------------------------------------------------
@@ -113,9 +128,9 @@ const h3 = harness({ apply: { root: unknownRoot, runId: 'run-1', now: () => NOW 
 check('update_goal is denied while the lease is unknown (recovery required)',
   typeof h3.guardReason(exec('update_goal', unknownRoot)) === 'string')
 
-const releasedRoot = workspace('released', {
-  'run-1': [leaseRecord('released', { version: 3, commit: 'a'.repeat(40) })],
-})
+const releasedRoot = workspace('released', {})
+const releasedSha = gitCommit(releasedRoot)
+writeRecords(releasedRoot, 'run-1', [leaseRecord('released', { version: 3, commit: releasedSha })])
 const h4 = harness({ apply: { root: releasedRoot, runId: 'run-1', now: () => NOW } })
 check('update_goal is allowed once the lease is released',
   h4.guardReason(exec('update_goal', releasedRoot)) === undefined)
@@ -159,17 +174,17 @@ check('a non-increasing version chain blocks (tamper-evident)',
   typeof h10.guardReason(exec('update_goal', chainRoot)) === 'string')
 
 // ---- R3: the veto is workspace-wide when no run id is configured -------------
-const wideRoot = workspace('workspace-wide', {
-  'run-a': [leaseRecord('released', { run_id: 'run-a', commit: 'b'.repeat(40) })],
-  'run-b': [leaseRecord('active', { run_id: 'run-b' })],
-})
+const wideRoot = workspace('workspace-wide', {})
+const wideSha = gitCommit(wideRoot)
+writeRecords(wideRoot, 'run-a', [leaseRecord('released', { run_id: 'run-a', commit: wideSha })])
+writeRecords(wideRoot, 'run-b', [leaseRecord('active', { run_id: 'run-b' })])
 const h11 = harness({ apply: { root: wideRoot, now: () => NOW } })
 check('workspace-wide mode blocks while any run holds a lease',
   typeof h11.guardReason(exec('update_goal', wideRoot)) === 'string')
-const wideClear = workspace('workspace-wide-clear', {
-  'run-a': [leaseRecord('released', { run_id: 'run-a', commit: 'b'.repeat(40) })],
-  'run-b': [leaseRecord('released', { run_id: 'run-b', commit: 'c'.repeat(40) })],
-})
+const wideClear = workspace('workspace-wide-clear', {})
+const wideClearSha = gitCommit(wideClear)
+writeRecords(wideClear, 'run-a', [leaseRecord('released', { run_id: 'run-a', commit: wideClearSha })])
+writeRecords(wideClear, 'run-b', [leaseRecord('released', { run_id: 'run-b', commit: wideClearSha })])
 const h12 = harness({ apply: { root: wideClear, now: () => NOW } })
 check('workspace-wide mode allows when every recorded lease is released',
   h12.guardReason(exec('update_goal', wideClear)) === undefined)
@@ -216,9 +231,9 @@ const disposers = gate2.observeJobs({
 })
 const obsSeen = []
 gate2.onBlockerChange((v) => obsSeen.push(v.state))
-writeFileSync(join(obsRoot, '.leases', 'run-1.jsonl'),
-  [JSON.stringify(leaseRecord('active')), JSON.stringify(leaseRecord('released', { version: 2, commit: 'd'.repeat(40) }))]
-    .join('\n') + '\n')
+const obsSha = gitCommit(obsRoot)
+writeRecords(obsRoot, 'run-1', [leaseRecord('active'),
+  leaseRecord('released', { version: 2, commit: obsSha })])
 jobChanged({})
 check('a jobs-changed event re-reads and reports the transition',
   obsSeen.length === 2 && obsSeen[1] === 'released')
@@ -246,6 +261,15 @@ check('readLeaseVerdict is the default reader (no accidental bypass)',
   typeof readLeaseVerdict === 'function')
 check('a throwing reader surfaces instead of allowing',
   (() => { try { throwing.blockedReason(); return false } catch { return true } })())
+
+// ---- R9: commits are proven (a forged release never clears) -------------------
+const forgedRoot = workspace('forged-release', {
+  'run-1': [leaseRecord('released', { version: 3, commit: 'f'.repeat(40) })],
+})
+const h16 = harness({ apply: { root: forgedRoot, runId: 'run-1', now: () => NOW } })
+check('a forged released record citing a non-existent commit blocks (fail closed)',
+  typeof h16.guardReason(exec('update_goal', forgedRoot)) === 'string'
+  && /commit/.test(h16.guardReason(exec('update_goal', forgedRoot))))
 
 rmSync(sandbox, { recursive: true, force: true })
 console.log(failures.length ? `\nFAIL: ${failures.length} check(s): ${failures.join('; ')}` : '')

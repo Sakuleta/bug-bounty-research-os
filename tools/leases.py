@@ -214,6 +214,23 @@ def _append(root: Path, run_id: str, record: dict[str, Any], path: Path) -> dict
     return record
 
 
+def _commit_exists(root: Path, commit: str) -> tuple[bool, str]:
+    """Is `commit` a commit in `root`'s git work tree? Fail closed on any doubt."""
+    if not isinstance(commit, str) or not _SHA_RE.match(commit):
+        return False, f"commit must be a 40-hex sha (got {commit!r})"
+    try:
+        proc = subprocess.run(["git", "-C", str(root), "cat-file", "-e", f"{commit}^{{commit}}"],
+                              capture_output=True, text=True, timeout=30)
+    except FileNotFoundError:
+        return False, "git is unavailable — the commit cannot be verified (fail closed)"
+    except subprocess.TimeoutExpired:
+        return False, "git cat-file timed out — the commit cannot be verified"
+    if proc.returncode != 0:
+        return False, (f"commit {commit} does not exist in the git work tree at {root} "
+                       f"(git cat-file -e: {proc.stderr.strip() or proc.returncode})")
+    return True, f"commit {commit} exists"
+
+
 def _latest_or_error(root: Path, run_id: str) -> tuple[dict[str, Any], str, int, Path]:
     path = lease_path(root, run_id)
     records, corrupt, unreadable = _read_records(path)
@@ -303,6 +320,12 @@ def _write_transition(root: Path, run_id: str, *, state: str, event: str,
         if state == "active":
             record["heartbeat_at"] = now
             record["expires_at"] = now + _expiry_seconds(interval)
+        if state == "released":
+            commit_ok, commit_reason = _commit_exists(root, record["commit"])
+            if not commit_ok:
+                raise LeaseError(
+                    f"refusing {event} for run {run_id}: {commit_reason} — a release must cite a "
+                    "commit that exists (fail closed)")
         return _append(root, run_id, record, path)
 
 
@@ -413,7 +436,7 @@ def release(root: str | os.PathLike[str], run_id: str, *, commit: str, lease_id:
                              require_reason_for=("unknown-recovery-required",))
 
 
-def _verdict_from_records(run_id: str, records: list[dict[str, Any]], corrupt: int,
+def _verdict_from_records(root: Path, run_id: str, records: list[dict[str, Any]], corrupt: int,
                           unreadable: bool, path: Path, now: float) -> dict[str, Any]:
     def out(state: str, blocked: bool, reason: str, **extra: Any) -> dict[str, Any]:
         return {"run_id": run_id, "state": state, "blocked": blocked, "reason": reason,
@@ -446,6 +469,12 @@ def _verdict_from_records(run_id: str, records: list[dict[str, Any]], corrupt: i
     }
     state = latest["state"]
     if state == "released":
+        commit_ok, commit_reason = _commit_exists(root, latest.get("commit"))
+        if not commit_ok:
+            return out("unknown-recovery-required", True,
+                       f"released record cannot be verified: {commit_reason} (fail closed; a "
+                       "forged release is never a release — full commit-to-run binding is "
+                       "follow-up work)", **common)
         return out("released", False,
                    f"released after reconciliation (commit {latest.get('commit')})", **common)
     if state == "awaiting-reconciliation":
@@ -492,7 +521,7 @@ def verdict(root: str | os.PathLike[str], run_id: str, *, now: float | None = No
                 "reason": "no lease recorded for this run (registry readable)",
                 "lease_path": str(path), "corrupt_lines": 0, "record_count": 0}
     records, corrupt, unreadable = _read_records(path)
-    return _verdict_from_records(run_id, records, corrupt, unreadable, path, timestamp)
+    return _verdict_from_records(root, run_id, records, corrupt, unreadable, path, timestamp)
 
 
 def verdict_all(root: str | os.PathLike[str], *, now: float | None = None) -> dict[str, Any]:
@@ -519,7 +548,8 @@ def verdict_all(root: str | os.PathLike[str], *, now: float | None = None) -> di
         run_id = path.stem
         records, corrupt, unreadable = _read_records(path)
         corrupt_total += corrupt
-        runs.append(_verdict_from_records(run_id, records, corrupt, unreadable, path, _now(now)))
+        runs.append(_verdict_from_records(root, run_id, records, corrupt, unreadable, path,
+                                          _now(now)))
     blocked = [r for r in runs if r["blocked"]]
     if not blocked:
         return {"state": "clear", "blocked": False,
@@ -604,16 +634,9 @@ def _commit_conjunct(root: Path, run_id: str) -> tuple[bool, str, str | None]:
     if not _SHA_RE.match(commit):
         return False, (f"results-commit must hold a 40-hex commit sha "
                        f"(got {commit!r} in {commit_file})"), None
-    try:
-        proc = subprocess.run(["git", "-C", str(root), "cat-file", "-e", f"{commit}^{{commit}}"],
-                              capture_output=True, text=True, timeout=30)
-    except FileNotFoundError:
-        return False, "git is unavailable — the results commit cannot be verified (fail closed)", None
-    except subprocess.TimeoutExpired:
-        return False, "git cat-file timed out — the results commit cannot be verified", None
-    if proc.returncode != 0:
-        return False, (f"results commit {commit} does not exist in the git work tree at {root} "
-                       f"(git cat-file -e: {proc.stderr.strip() or proc.returncode})"), None
+    ok, detail = _commit_exists(root, commit)
+    if not ok:
+        return False, f"results {detail}", None
     return True, f"results commit {commit} exists", commit
 
 

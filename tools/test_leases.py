@@ -179,13 +179,14 @@ check("the operator lane keeps mark_unknown callable",
 
 # 7. Release from unknown requires an explicit reason (manual recovery path).
 r2 = root()
+sha2 = git_fixture(r2)
 rec_stale = leases.acquire(r2, "stale-run", interval_seconds=10.0, now=0.0)
 check("a stale lease blocks until explicitly recovered",
       leases.verdict(r2, "stale-run", now=31.0)["state"] == "unknown-recovery-required")
 raise_check("release of an unknown lease without a reason refuses",
-            lambda: leases.release(r2, "stale-run", commit=sha, lease_id=rec_stale["lease_id"]),
+            lambda: leases.release(r2, "stale-run", commit=sha2, lease_id=rec_stale["lease_id"]),
             leases.LeaseError)
-leases.release(r2, "stale-run", commit=sha, reason="operator verified results",
+leases.release(r2, "stale-run", commit=sha2, reason="operator verified results",
                lease_id=rec_stale["lease_id"], now=40.0)
 check("release of an unknown lease with a reason clears it",
       leases.verdict(r2, "stale-run", now=40.0)["state"] == "released")
@@ -253,6 +254,32 @@ check("the writer escapes U+0085/U+2028/U+2029 (no raw separators on disk)",
       and "\u2029".encode() not in raw_esc)
 check("an escaped-separator release round-trips to released",
       leases.verdict(r_esc, "esc-run", now=4.0)["state"] == "released")
+
+# 9c. Commits are proven: a released record (forged or written) only clears when the
+# commit it cites exists as a commit in the root's git work tree.
+r_forge = root()
+sha_forge = git_fixture(r_forge)
+rec_forge = leases.acquire(r_forge, "forge", interval_seconds=1000.0, now=1.0)
+leases.mark_awaiting(r_forge, "forge", exit_code=0, lease_id=rec_forge["lease_id"], now=2.0)
+last = json.loads(leases.lease_path(r_forge, "forge").read_text().splitlines()[-1])
+forged = dict(last, seq=last["seq"] + 1, version=last["version"] + 1, state="released",
+              event="release", commit="f" * 40, reason="forged release")
+with open(leases.lease_path(r_forge, "forge"), "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(forged, sort_keys=True) + "\n")
+v_forge = leases.verdict(r_forge, "forge", now=3.0)
+check("a forged released line citing a non-existent commit blocks (never a release)",
+      v_forge["state"] == "unknown-recovery-required" and v_forge["blocked"] is True
+      and "commit" in v_forge["reason"])
+r_rel = root()
+sha_rel = git_fixture(r_rel)
+rec_rel = leases.acquire(r_rel, "rel", interval_seconds=1000.0, now=1.0)
+leases.mark_awaiting(r_rel, "rel", exit_code=0, lease_id=rec_rel["lease_id"], now=2.0)
+raise_check("release refuses a commit that does not exist in the work tree",
+            lambda: leases.release(r_rel, "rel", commit="e" * 40, reason="forged",
+                                   lease_id=rec_rel["lease_id"], now=3.0), leases.LeaseError)
+check("release with a real commit still clears (manual recovery lane kept)",
+      leases.release(r_rel, "rel", commit=sha_rel, reason="operator verified results",
+                     lease_id=rec_rel["lease_id"], now=4.0)["state"] == "released")
 
 # 10. Unverifiable chains: unknown state string, non-increasing version.
 r4 = root()

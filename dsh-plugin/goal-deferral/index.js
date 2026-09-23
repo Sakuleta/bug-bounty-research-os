@@ -16,13 +16,14 @@
  *    registry on every edge (subscribe-then-reread — no lost wake-up).
  *
  * Fail-closed rules (readers), identical to the Python side: a missing or unreadable
- * registry, a corrupt line, an unverifiable version chain and an expired `active`
- * lease all block; `awaiting-reconciliation` stays held until the completion
- * predicate clears; a stale lease is never success. The encoding contract is shared
- * with `tools/leases.py`: bytes are decoded strictly as UTF-8 and lines are split on
- * `\n` only; an undecodable line or a raw U+0085/U+2028/U+2029 (which the writer
- * escapes) is corrupt. Internal errors in `apply()` fail open (the enforcer's
- * contract), while the veto itself fails closed.
+ * registry, a corrupt line, an unverifiable version chain, a `released` record whose
+ * commit does not exist in the root's git work tree, and an expired `active` lease all
+ * block; `awaiting-reconciliation` stays held until the completion predicate clears; a
+ * stale lease is never success. The encoding contract is shared with `tools/leases.py`:
+ * bytes are decoded strictly as UTF-8 and lines are split on `\n` only; an undecodable
+ * line or a raw U+0085/U+2028/U+2029 (which the writer escapes) is corrupt. Internal
+ * errors in `apply()` fail open (the enforcer's contract), while the veto itself fails
+ * closed.
  *
  * Activation: the adapter only vetoes inside a lease-managed workspace — an explicit
  * `root`/`RESEARCH_OS_LEASE_ROOT`, or an ancestor of the call's cwd that contains
@@ -31,6 +32,7 @@
  *
  * Dependency-free: node stdlib only.
  */
+import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { TextDecoder } from 'node:util'
@@ -53,6 +55,20 @@ const STRICT_UTF8 = new TextDecoder('utf-8', { fatal: true })
 
 function blocked(runId, state, reason, extra = {}) {
   return { runId, state, blocked: true, reason, ...extra }
+}
+
+const SHA_RE = /^[0-9a-f]{40}$/
+
+/** Does `commit` exist as a commit in `root`'s git work tree? Fail closed on doubt. */
+function commitExists(root, commit) {
+  if (typeof commit !== 'string' || !SHA_RE.test(commit)) return false
+  try {
+    execFileSync('git', ['-C', root, 'cat-file', '-e', `${commit}^{commit}`],
+      { stdio: 'ignore', timeout: 10000 })
+    return true
+  } catch {
+    return false
+  }
 }
 
 function foldRecords(records) {
@@ -134,6 +150,12 @@ function readLeaseFile(path, runId, nowSeconds, root) {
     commit: latest.commit ?? null,
   }
   if (latest.state === 'released') {
+    if (!commitExists(root, latest.commit)) {
+      return { ...common, state: 'unknown-recovery-required', blocked: true,
+        reason: `released record cannot be verified: commit ${latest.commit} does not exist in `
+          + `${root} (fail closed; a forged release is never a release — full commit-to-run `
+          + 'binding is follow-up work)' }
+    }
     return { ...common, state: 'released', blocked: false,
       reason: `released after reconciliation (commit ${latest.commit})` }
   }

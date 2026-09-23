@@ -8,6 +8,7 @@
  *
  * Run: `node gate.matrix.test.mjs` from this directory.
  */
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -83,12 +84,30 @@ function workspace(name, records) {
   return root
 }
 
+/** A real git work tree with one commit; returns the commit sha (for released fixtures). */
+function gitCommit(root) {
+  const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@e',
+    GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@e' }
+  execFileSync('git', ['init', '-q'], { cwd: root, env })
+  execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'results'], { cwd: root, env })
+  return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, env, encoding: 'utf8' }).trim()
+}
+
+const releasedRoot = workspace('released', null)
+const releasedSha = gitCommit(releasedRoot)
+writeFileSync(join(releasedRoot, '.leases', 'run-1.jsonl'),
+  JSON.stringify(leaseRecord('released', { version: 3, commit: releasedSha })) + '\n')
+const forgedRoot = workspace('forged-release', null)
+writeFileSync(join(forgedRoot, '.leases', 'run-1.jsonl'),
+  JSON.stringify(leaseRecord('released', { version: 3, commit: 'f'.repeat(40) })) + '\n')
+
 const LEASES = {
   active: workspace('active', [leaseRecord('active')]),
   awaiting: workspace('awaiting', [leaseRecord('awaiting-reconciliation', { version: 2, exit_code: 0 })]),
   unknown: workspace('unknown', [leaseRecord('unknown-recovery-required', { version: 2 })]),
   expired: workspace('expired', [leaseRecord('active', { expires_at: 2000 })]),
-  released: workspace('released', [leaseRecord('released', { version: 3, commit: 'a'.repeat(40) })]),
+  released: releasedRoot,
+  forged: forgedRoot,
   noLease: workspace('no-lease', null),
   missing: join(sandbox, 'missing-registry'),
   corrupt: workspace('corrupt', [leaseRecord('released'), '{oops}']),
@@ -129,6 +148,8 @@ const rows = [
     { tracked: RECONCILED, lease: 'missing' }, false, 'lease'],
   ['reconciled task, corrupt registry',
     { tracked: RECONCILED, lease: 'corrupt' }, false, 'lease'],
+  ['reconciled task, forged released lease (commit unproven)',
+    { tracked: RECONCILED, lease: 'forged' }, false, 'lease'],
   ['reconciled task, unverifiable version chain',
     { tracked: RECONCILED, lease: 'badChain' }, false, 'lease'],
   ['no tracked task, active lease', { tracked: NONE, lease: 'active' }, false, 'lease'],
