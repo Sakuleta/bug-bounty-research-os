@@ -1063,6 +1063,51 @@ check('replay reproduces an invalid_choice guard decision deterministically',
       _replay_inv['replayed'] == 1 and _replay_inv['matched'] == 1
       and _replay_inv['mismatched'] == 0)
 
+# 6m. Fix (Standards M1): a verify answer that `validate_choice` rejects is NOT a
+# supported verdict — the raw choice never feeds `supported`/`auto` and the stored
+# judgment records the fail-closed decision (which replay reproduces).
+_foroot = Path(tempfile.mkdtemp())
+for d in ['00_control', '11_runtime']:
+    (_foroot / d).mkdir(parents=True, exist_ok=True)
+(_foroot / '00_control/engagement.yaml').write_text('external_judgment: "ALLOWED"\n')
+(_foroot / '11_runtime/events.jsonl').write_text('')
+(_foroot / 'proof.txt').write_text('HTTP 200 observed with title Example Domain\n')
+ControlPlane(_foroot).register_evidence('proof.txt', kind='raw', source='test')
+_fo_calls: list = []
+
+
+def _failopen_client(state, questions):
+    _fo_calls.append(sorted(questions))
+    if 'verify' in questions:
+        return {'model': 'jev-fo',
+                'answers': {'verify': {'type': 'choice', 'choice': 'supported',
+                                       'confidence': 0.95,
+                                       'probabilities': {'supported': 0.9, 'unsupported': 0.9}}},
+                'usage': {}}
+    return {'model': 'jev-fo', 'answers': {'relation': {'type': 'choice', 'choice': 'supports',
+              'confidence': 0.9, 'probabilities': {'supports': 0.9, 'contradicts': 0.05,
+                                                   'says_nothing': 0.05}}}, 'usage': {}}
+
+
+_fo_out = check_claims(_foroot, {'claims': [{'id': 'fo1', 'claim': 'HTTP 200 was observed',
+                                             'evidence_ref': 'E-000001'}]},
+                       client=_failopen_client, verify=True)
+_fo_res = _fo_out['results'][0]
+check('an invalid verify answer is not-supported: the rejected choice never decides',
+      _fo_res['verify']['supported'] is False and _fo_res['auto'] is False
+      and 'invalid_choice' in _fo_res['verify'] and 'simplex' in _fo_res['verify']['invalid_choice']
+      and sum(1 for c in _fo_calls if c == ['relation']) == 2
+      and sum(1 for c in _fo_calls if c == ['verify']) == 2)
+_fo_rows = [json.loads(line) for line in
+            (_foroot / '11_runtime/jev-judgments.jsonl').read_text().splitlines() if line.strip()]
+_fo_row = [r for r in _fo_rows if r.get('claim_id') == 'fo1'][-1]
+check('the judgment ledger records the fail-closed verify decision',
+      _fo_row['verify_supported'] is False and _fo_row['auto'] is False)
+_replay_fo = _w14_replay(_foroot, client=_failopen_client)
+check('replay reproduces the fail-closed verify decision deterministically',
+      _replay_fo['replayed'] == 1 and _replay_fo['matched'] == 1
+      and _replay_fo['mismatched'] == 0)
+
 # 9. v8.3 V7: already-covered proof — the v8.2 W14 verify-clause + replay are green
 #    end to end through the CLI seam too (claims-check runs the verify judge, records
 #    the judgment ledger, and the stored records replay deterministically).

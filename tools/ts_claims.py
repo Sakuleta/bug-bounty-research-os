@@ -312,7 +312,10 @@ def replay_judgments(root: Path, *, client, path: str | Path | None = None) -> d
                                 "evidence": evidence},
                                _verify_question(str(record.get("claim") or ""), verdict, evidence))
                 vanswer = (vresp.get("answers") or {}).get("verify") or {}
-                replayed_verify = str(vanswer.get("choice", "")) == "supported"
+                # The same fail-closed rule as the write path: a rejected verify answer
+                # is not-supported, so replay compares guard decisions, not raw strings.
+                replayed_verify = (validate_choice(vanswer, VERIFY_CHOICES) is None
+                                   and str(vanswer.get("choice", "")) == "supported")
             auto = (verdict in VALID_CHOICES and confidence >= float(record.get("auto_accept", AUTO_ACCEPT))
                     and (replayed_verify if stored_verify is not None else True))
             if (verdict == record.get("verdict") and auto == record.get("auto")
@@ -343,10 +346,11 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
     `passage_index` / `triage_confidence`; both confidences must clear auto_accept.
     With `verify=True` (the `researchctl claims-check` step) each relation verdict is
     then judged supportable-or-not against the cited evidence by a second Choice
-    question; an `unsupported` verdict retries the relation once (bounded), and a
-    verdict that never verifies is kept but flagged (`auto` False with a
-    verify-clause note). Live judgments are appended to 11_runtime/jev-judgments.jsonl
-    (input digest, model, verdict, confidence, timestamp) for offline replay.
+    question; an `unsupported` verdict — and any verify answer `validate_choice`
+    rejected (fail closed) — retries the relation once (bounded), and a verdict that
+    never verifies is kept but flagged (`auto` False with a verify-clause note). Live
+    judgments are appended to 11_runtime/jev-judgments.jsonl (input digest, model,
+    verdict, confidence, timestamp) for offline replay.
     """
     claims = packet.get("claims") or []
     if not isinstance(claims, list) or not claims:
@@ -442,14 +446,14 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
                 vconfidence = float(vanswer.get("confidence", 0.0) or 0.0)
             except (TypeError, ValueError):
                 vconfidence = 0.0
-            supported = str(vanswer.get("choice", "")) == "supported"
+            vproblem = validate_choice(vanswer, VERIFY_CHOICES)
+            # Fail closed: a verify answer `validate_choice` rejected is never a
+            # supported verdict — the raw choice does not decide when validation
+            # refused the answer (the reason stays visible on the verify state).
+            supported = vproblem is None and str(vanswer.get("choice", "")) == "supported"
             verify_state = {"supported": supported, "confidence": vconfidence,
                             "attempts": attempts}
-            vproblem = validate_choice(vanswer, VERIFY_CHOICES)
             if vproblem:
-                # The verify answer failed validation: it is still treated as
-                # not-supported (fail closed), but the reason is visible instead of
-                # the invalid choice being silently coerced.
                 verify_state["invalid_choice"] = vproblem
             if supported or attempts >= VERIFY_MAX_RELATION_ATTEMPTS:
                 break
