@@ -308,7 +308,7 @@ function runCli(root, extraArgs = []) {
         steps: '1',
       },
       chromium,
-      ctl: () => ({ ok: true }),
+      ctl: () => ({ binding_present: false }),
       scopeVerdict: () => ({ in_scope: true, gate: 'assets', host: 't.example' }),
       token: { action_id: 'A-000001', nonce: 'n1', tool_family: 'browser',
                argument_digest: 'd', preflight: { account: 'researcher-A' } },
@@ -517,7 +517,7 @@ function runCli(root, extraArgs = []) {
         profile: 'lab/bua-profile', preflight: 'preflight.json', 'out-dir': 'artifacts', steps: '2',
       },
       chromium: { launchPersistentContext: async () => context },
-      ctl: () => ({ ok: true }),
+      ctl: () => ({ binding_present: false }),
       scopeVerdict: () => ({ in_scope: true, gate: 'assets', host: 't.example' }),
       token: { action_id: 'A-000001', nonce: 'n1', tool_family: 'browser',
                preflight: { account: 'researcher-A' } },
@@ -648,7 +648,7 @@ function runCli(root, extraArgs = []) {
       chromium: { launchPersistentContext: async () => context },
       ctl: (args) => (args[0] === 'prepare'
         ? { error: 'cycle budget exhausted (2/2)' }
-        : { ok: true }),
+        : { binding_present: false }),
       scopeVerdict: () => ({ in_scope: true, gate: 'assets', host: 't.example' }),
       token: { action_id: 'A-000001', nonce: 'n1', tool_family: 'browser',
                preflight: { account: 'researcher-A' } },
@@ -675,6 +675,136 @@ function runCli(root, extraArgs = []) {
     check('B3 CLI: an action id with no prepared token refuses the run (exit 5, no browser)',
       refused.status === 5 && refused.out.includes('no prepared preflight token')
       && !refused.out.includes('playwright-core'))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+// ===================================================================================
+// 7. Identity and profile binding (no silent lab default on the interactive path)
+// ===================================================================================
+{
+  const binding = 'binding_version: 1\nexpected_identity:\n  account_reference: researcher-A\n' +
+    'session:\n  browser_profile: lab/bua-prog\n  session_must_match_identity: true\n'
+  const root = tempWorkspace({ binding })
+  try {
+    const refused = runCli(root, ['--profile', 'lab/bua-other'])
+    check('B4 CLI: a --profile that disagrees with the declared identity binding is refused (exit 5)',
+      refused.status === 5 && refused.out.includes('identity binding'))
+    const absent = runCli(root, ['--profile', 'lab/bua-prog'])
+    check('B4 CLI: the bound profile passes the binding check and reaches the token check',
+      absent.status === 5 && absent.out.includes('no prepared preflight token')
+      && !absent.out.includes('identity binding'))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+{
+  const root = tempWorkspace({ binding: 'expected_identity:\n\taccount_reference: x\n' })
+  try {
+    const refused = runCli(root)
+    check('B4 CLI: a malformed identity binding fails the interactive path closed (exit 5)',
+      refused.status === 5 && refused.out.toLowerCase().includes('malformed'))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+{
+  const root = tempWorkspace()
+  try {
+    const refused = runCli(root, ['--profile', '/etc'])
+    check('B4 CLI: an absolute profile outside the workspace is refused (exit 2)',
+      refused.status === 2 && refused.out.includes('inside the workspace'))
+    const absent = runCli(root)
+    check('B4 CLI: an absent binding does not invent a profile — the token check is next (exit 5)',
+      absent.status === 5 && absent.out.includes('no prepared preflight token'))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+{
+  // Profile plumbing: the profile the controller passed is the profile the browser opens.
+  const launched = []
+  const page = {
+    on() {}, mainFrame: () => ({}), url: () => 'https://t.example/app',
+    title: async () => 'stub', screenshot: async () => {},
+    viewportSize: () => viewport, locator: () => ({ all: async () => [] }),
+    goto: async () => ({ status: () => 200 }),
+  }
+  const context = {
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    async route() {}, async routeWebSocket() {}, async addInitScript() {},
+    async newCDPSession() { return { send: async () => ({}), on() {} } },
+  }
+  const root = tempWorkspace({
+    binding: 'binding_version: 1\nexpected_identity:\n  account_reference: researcher-A\n' +
+      'session:\n  browser_profile: lab/bua-prog\n',
+  })
+  try {
+    const summary = await runInteractive({
+      root,
+      args: {
+        url: 'https://t.example/app', principal: 'researcher-A', action: 'A-000001',
+        profile: 'lab/bua-prog', preflight: 'preflight.json', 'out-dir': 'artifacts', steps: '1',
+      },
+      chromium: {
+        launchPersistentContext: async (dir) => { launched.push(dir); return context },
+      },
+      ctl: () => ({ binding_present: true, browser_profile: 'lab/bua-prog',
+                    account_reference: 'researcher-A' }),
+      scopeVerdict: () => ({ in_scope: true, gate: 'assets', host: 't.example' }),
+      token: { action_id: 'A-000001', nonce: 'n1', tool_family: 'browser',
+               browser_profile: 'lab/bua-prog',
+               preflight: { account: 'researcher-A' } },
+      plan: async () => ({ ok: true, source: 'typesafe', operation: { op: 'DONE' } }),
+      verify: async () => ({ ok: true, evidence: 'E-000001', capture: 'shot.png' }),
+      log: () => {},
+    })
+    check('B4 profile: the interactive arm opens the dedicated profile it was given',
+      launched.length === 1 && launched[0] === join(root, 'lab/bua-prog')
+      && summary.status === 'confirmed')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+{
+  const root = tempWorkspace()
+  const base = {
+    root,
+    args: {
+      url: 'https://t.example/app', principal: 'researcher-A', action: 'A-000001',
+      profile: 'lab/bua-other', preflight: 'preflight.json', 'out-dir': 'artifacts', steps: '1',
+    },
+    chromium: { launchPersistentContext: async () => { throw new Error('must not launch') } },
+    scopeVerdict: () => ({ in_scope: true, gate: 'assets', host: 't.example' }),
+    token: { action_id: 'A-000001', nonce: 'n1', tool_family: 'browser',
+             browser_profile: 'lab/bua-prog', preflight: { account: 'researcher-A' } },
+    plan: async () => ({ ok: true, source: 'typesafe', operation: { op: 'DONE' } }),
+    log: () => {},
+  }
+  try {
+    let code = null
+    try {
+      await runInteractive({ ...base, ctl: () => ({ binding_present: true,
+                                                    browser_profile: 'lab/bua-prog',
+                                                    account_reference: 'researcher-A' }) })
+    } catch (e) { code = e.code }
+    check('B4 wiring: a token bound to another profile than --profile is refused (exit 5)',
+      code === 5)
+
+    code = null
+    try {
+      await runInteractive({
+        ...base,
+        args: { ...base.args, profile: 'lab/bua-prog' },
+        ctl: () => ({ binding_present: true, browser_profile: 'lab/bua-prog',
+                      account_reference: 'researcher-A' }),
+        token: { action_id: 'A-000001', nonce: 'n1', tool_family: 'browser',
+                 browser_profile: 'lab/bua-prog', preflight: { account: 'intruder-acct' } },
+      })
+    } catch (e) { code = e.code }
+    check('B4 wiring: a token account outside the declared identity binding is refused (exit 5)',
+      code === 5)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

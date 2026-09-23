@@ -376,7 +376,7 @@ function usage(msg) {
 }
 
 function parseArgs(argv) {
-  const out = { 'out-dir': '08_artifacts/raw', profile: 'lab/bua-profile' }
+  const out = { 'out-dir': '08_artifacts/raw' }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (!a.startsWith('--')) usage('unexpected argument: ' + a)
@@ -435,6 +435,14 @@ export function scopeCheckVerdict(url, root) {
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (!args.url || !args.principal) usage('--url and --principal are required')
+  // Never a SILENT lab default: the controlled executor always passes the identity
+  // binding's `session.browser_profile` explicitly, so a default here is a direct
+  // invocation — say so loudly instead of quietly browsing on a shared profile.
+  if (!args.profile) {
+    args.profile = 'lab/bua-profile'
+    console.log('bua-runner: WARNING no --profile given — using the lab default lab/bua-profile; ' +
+      'the controlled executor always passes the identity binding\'s session.browser_profile explicitly')
+  }
   const root = findOsRoot(process.cwd())
   if (!root) usage('not inside a Research OS workspace (11_runtime/events.jsonl, 00_control/engagement.yaml or 11_runtime/)')
   insideRoot(root, args['out-dir'], '--out-dir')

@@ -3711,6 +3711,19 @@ _sub8d = subprocess.run([sys.executable, str(TOOLS / "audit.py"), str(_nr8d)],
 check("v8.2 fix M3: the audit errors on a recorded id colliding with a prepared token",
       _sub8d.returncode != 0 and "collides" in (_sub8d.stdout + _sub8d.stderr))
 
+
+# ---- B4: the interactive path consumes the binding through the token ----------------
+_nr4i, _nc4i = _w2_root()
+_tok4i = _nc4i.prepare_action({**_w7_action(), "account": "acct-binding-1",
+                               "tool_family": "browser",
+                               "request_shape": {"url": "https://example.test/app",
+                                                 "principal": "researcher-A"}})
+_consumed4i = _nc4i.consume_token(_tok4i["action_id"],
+                                  {"url": "https://example.test/app", "principal": "researcher-A"})
+check("B4 consume: the consumed browser token carries the binding's profile explicitly",
+      _consumed4i.get("browser_profile") == "lab/bua-prog"
+      and _consumed4i["preflight"].get("account") == "acct-binding-1")
+
 print(f"\n{len(passed)} checks passed")
 
 # 28. v8.3 fix: the runtime side ledgers of the new Jev seams (screening, grounding,
@@ -3869,5 +3882,18 @@ _sub3c = subprocess.run([sys.executable, str(TOOLS / "researchctl.py"), str(_nr3
                          "gate-check", _tok3g["action_id"]], capture_output=True, text=True)
 check("B3 CLI: gate-check reports the resolved gate",
       _sub3c.returncode == 0 and json.loads(_sub3c.stdout)["gate"] == "G-0004")
+
+
+# ---- B4: the interactive path consumes the binding through the token ----------------
+_nr4i, _nc4i = _w2_root()
+_tok4i = _nc4i.prepare_action({**_w7_action(), "account": "acct-binding-1",
+                               "tool_family": "browser",
+                               "request_shape": {"url": "https://example.test/app",
+                                                 "principal": "researcher-A"}})
+_consumed4i = _nc4i.consume_token(_tok4i["action_id"],
+                                  {"url": "https://example.test/app", "principal": "researcher-A"})
+check("B4 consume: the consumed browser token carries the binding's profile explicitly",
+      _consumed4i.get("browser_profile") == "lab/bua-prog"
+      and _consumed4i["preflight"].get("account") == "acct-binding-1")
 
 print(f"\n{len(passed)} checks passed")

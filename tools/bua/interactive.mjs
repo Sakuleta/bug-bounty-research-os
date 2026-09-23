@@ -942,9 +942,15 @@ export async function runInteractive({ root, args, chromium, ctl, scopeVerdict, 
 
   // 2. Identity binding + the entry preflight token (single-use), both before the
   //    browser starts. A malformed binding fails closed; a declared profile must be the
-  //    one this run uses; the token's account must be the bound account.
+  //    one this run uses; the token must be bound to that profile and to the bound
+  //    account. There is no lab profile default on this arm.
   const binding = ctl(['identity-binding'])
-  const boundProfile = binding && binding.binding_present === true ? binding.browser_profile : null
+  if (!binding || binding.ok === false || typeof binding.binding_present !== 'boolean') {
+    throw new Refusal(5, 'the engagement identity binding could not be parsed (fail closed): ' +
+      String((binding && (binding.error || binding.reason)) || 'unknown') +
+      ' — repair 00_control/identity-binding.yaml before any interactive run')
+  }
+  const boundProfile = binding.binding_present === true ? binding.browser_profile : null
   if (boundProfile && String(args.profile) !== String(boundProfile)) {
     throw new Refusal(5, `--profile ${args.profile} does not match the engagement identity binding ` +
       `(${boundProfile} in 00_control/identity-binding.yaml) — the interactive arm never runs on an ` +
@@ -965,8 +971,11 @@ export async function runInteractive({ root, args, chromium, ctl, scopeVerdict, 
   if (!entryToken || !entryToken.action_id) {
     throw new Refusal(5, `entry preflight token ${args.action} could not be consumed — no token, no dispatch`)
   }
-  if (boundProfile === null && binding && binding.binding_present === true && binding.account_reference
-      && entryToken.preflight && entryToken.preflight.account
+  if (entryToken.browser_profile && String(entryToken.browser_profile) !== String(args.profile)) {
+    throw new Refusal(5, `the entry token is bound to browser profile ${entryToken.browser_profile}, ` +
+      `not --profile ${args.profile} — prepare the action for the profile this run uses`)
+  }
+  if (binding.account_reference && entryToken.preflight && entryToken.preflight.account
       && String(entryToken.preflight.account) !== String(binding.account_reference)) {
     throw new Refusal(5, `the entry token's account (${entryToken.preflight.account}) does not match the ` +
       `workspace identity binding (${binding.account_reference}) — fail closed`)

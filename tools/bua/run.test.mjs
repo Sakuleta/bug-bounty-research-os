@@ -460,6 +460,8 @@ module.exports = { chromium: { launchPersistentContext: async () => ({
     check('F14 workspace without OS_VERSION is still detected (past root discovery, not exit 2)',
       threwNoMarker !== null && threwNoMarker.status !== 2
       && !String((threwNoMarker.stdout || '') + (threwNoMarker.stderr || '')).includes('not inside a Research OS workspace'))
+    check('the read-only runner never falls back to the lab profile silently (a warning when --profile is absent)',
+      String((threwNoMarker.stdout || '') + (threwNoMarker.stderr || '')).includes('no --profile given'))
     rmSync(join(wsRoot, '11_runtime', 'events.jsonl'), { force: true })
     const threwLedgerGone = runArgs()
     check('F14 engagement.yaml alone still marks the workspace',
