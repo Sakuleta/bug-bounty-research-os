@@ -19,6 +19,13 @@ except ImportError:
 from control_plane import (  # noqa: E402
     ControlPlane, broker_client as load_broker_client, never_considered_packs, scope_check,
 )
+try:
+    # `leases` is stdlib-only; a partial workspace copy (the replay fixture carries only
+    # the tool files it needs) keeps every other command working and refuses only
+    # `lease-reconcile`, mirroring the tolerant broker import above.
+    from leases import reconcile as lease_reconcile  # noqa: E402
+except ImportError:
+    lease_reconcile = None
 from ts_triage import suggest as triage_suggest  # noqa: E402
 from ts_claims import check_claims, check_draft  # noqa: E402
 from ts_cost import record_seam_cost  # noqa: E402
@@ -313,8 +320,19 @@ def main() -> int:
     au.add_argument("--matrix", help="six-row method-self-attack matrix JSON (required for that class)")
     au.set_defaults(fn="audit-record")
 
+    lr = sub.add_parser("lease-reconcile", help="the run-completion predicate: releases the work "
+                                                "lease only when the loop exited, zero matching "
+                                                "children are alive, every planned cell has a "
+                                                "manifest, reports were regenerated and the results "
+                                                "commit exists; otherwise blocked (exit 3) and the "
+                                                "lease stays held (stale => recovery required)")
+    lr.add_argument("run", help="run id (the .leases/<run>.jsonl registry file)")
+    lr.set_defaults(fn="lease-reconcile")
+
     ns = ap.parse_args()
-    cp = ControlPlane(Path(ns.root))
+    # lease-reconcile reads the run workspace's `.leases/` registry directly; it must not
+    # instantiate the control plane, whose constructor mkdirs 11_runtime/ on every call.
+    cp = None if ns.fn == "lease-reconcile" else ControlPlane(Path(ns.root))
     try:
         if ns.fn == "status":
             out = cp.refresh()
@@ -473,6 +491,11 @@ def main() -> int:
             out = cp.record_audit(ns.audit_class, ns.status, ns.summary, cycle_id=ns.cycle,
                                   evidence_refs=ns.evidence,
                                   matrix=load_json(ns.matrix) if ns.matrix else None)
+        elif ns.fn == "lease-reconcile":
+            if lease_reconcile is None:
+                raise ValueError("tools/leases.py is missing from this workspace copy — "
+                                 "lease-reconcile is unavailable")
+            out = lease_reconcile(Path(ns.root), ns.run)
         else:
             raise ValueError(ns.fn)
         print(json.dumps(out, ensure_ascii=False, indent=2))
@@ -525,7 +548,18 @@ def main() -> int:
         elif ns.fn == "knowledge-resolve":
             print(f"knowledge resolve: {out['payload']['id']} {out['payload']['decision']} "
                   f"(reference: {out['payload']['reference']})", file=sys.stderr)
+        if ns.fn == "lease-reconcile":
+            if out["clear"]:
+                print(f"lease-reconcile {ns.run}: CLEAR (released={out['released']}, "
+                      f"commit={out['commit']})", file=sys.stderr)
+            else:
+                failed = ",".join(out.get("failed") or []) or "none"
+                print(f"lease-reconcile {ns.run}: BLOCKED ({out['state']}; failed={failed})"
+                      + (" — recovery required" if out.get("recovery_required") else ""),
+                      file=sys.stderr)
         if ns.fn == "scope-check" and not out["in_scope"]:
+            return 3
+        if ns.fn == "lease-reconcile" and not out["clear"]:
             return 3
         return 0
     except Exception as exc:

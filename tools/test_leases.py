@@ -315,6 +315,158 @@ check("a held lease refuses the launch before spawning",
 check("the refused launch names the run and the held state",
       "w-held" in proc.stderr and "lease" in proc.stderr.lower())
 
+# ---------------- D3: completion predicate + reconciliation ----------------
+
+RESEARCHCTL = TOOLS / "researchctl.py"
+
+
+def dead_pgid() -> int:
+    """A pgid whose group has no live members (a reaped child's pid)."""
+    proc = subprocess.Popen(["true"])
+    pid = proc.pid
+    proc.wait()
+    return pid
+
+
+def git_fixture(r: Path) -> str:
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@e", "PATH": os.environ.get("PATH", "")}
+    subprocess.run(["git", "init", "-q"], cwd=r, check=True, env=env, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "results"], cwd=r, check=True,
+                   env=env, capture_output=True)
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=r, check=True, env=env,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def make_run(r: Path, run: str = "sweep-1", *, cells: tuple[str, ...] = ("cell-a", "cell-b"),
+             plan: bool = True, manifests: bool = True,
+             manifests_for: tuple[str, ...] | None = None, reports: bool = True,
+             reports_newer: bool = True, commit: bool = True, commit_sha: str | None = None,
+             repo: bool = True, pgid: int | None = None, record_pgid: bool = True,
+             lease: bool = True, state: str = "awaiting") -> Path:
+    """A root-relative run fixture; returns the fixture root."""
+    (r / "runs" / run).mkdir(parents=True, exist_ok=True)
+    if plan:
+        (r / "runs" / run / "plan.json").write_text(json.dumps({"cells": list(cells)}))
+    with_manifest = cells if manifests_for is None else manifests_for
+    for index, cell in enumerate(cells):
+        if manifests and cell in with_manifest:
+            (r / "runs" / cell).mkdir(parents=True, exist_ok=True)
+            (r / "runs" / cell / "manifest.json").write_text(
+                json.dumps({"run_id": cell, "order": index}))
+    if reports:
+        (r / "reports").mkdir(parents=True, exist_ok=True)
+        (r / "reports" / "sweep.md").write_text("# sweep\n")
+        if not reports_newer:
+            old = time.time() - 3600
+            os.utime(r / "reports" / "sweep.md", (old, old))
+    sha = commit_sha
+    if commit and sha is None:
+        sha = git_fixture(r) if repo else "f" * 40
+    if commit:
+        (r / "runs" / run / "results-commit").write_text(sha + "\n")
+    elif repo:
+        git_fixture(r)
+    if lease:
+        leases.acquire(r, run, interval_seconds=1000.0)
+        if state != "active":
+            if pgid is None:
+                pgid = dead_pgid()
+            if record_pgid:
+                leases.heartbeat(r, run, pgid=pgid)
+            leases.mark_awaiting(r, run, exit_code=0)
+    return r
+
+
+# 17. Full set clears and releases with the commit recorded.
+r13 = make_run(root())
+result = leases.reconcile(r13, "sweep-1")
+v11 = leases.verdict(r13, "sweep-1")
+check("the full conjunct set clears and releases the lease",
+      result["clear"] is True and result["released"] is True and v11["state"] == "released"
+      and v11["blocked"] is False and v11["commit"] == result["commit"])
+check("a clear reconcile records exactly one attempt",
+      result["attempts"] == 1 and result["recovery_required"] is False)
+
+# 18. Every missing conjunct blocks.
+cases = [
+    ("plan", dict(plan=False)),
+    ("a planned cell without a manifest", dict(cells=("cell-a", "cell-gone"),
+                                              manifests_for=("cell-a",))),
+    ("an empty plan", dict(cells=())),
+    ("a missing reports directory", dict(reports=False)),
+    ("stale reports", dict(reports_newer=False)),
+    ("a missing results commit", dict(commit=False)),
+    ("a results commit unknown to git", dict(commit_sha="e" * 40)),
+    ("a missing git work tree", dict(repo=False, commit_sha="e" * 40)),
+    ("live children in the recorded group", dict(pgid=os.getpgid(os.getpid()))),
+    ("no recorded process group", dict(record_pgid=False)),
+]
+for label, kwargs in cases:
+    fixture_root = make_run(root(), **kwargs)
+    outcome = leases.reconcile(fixture_root, "sweep-1")
+    check(f"blocked: {label}",
+          outcome["clear"] is False and outcome["released"] is False
+          and outcome["state"] == "awaiting-reconciliation" and bool(outcome["failed"]))
+live = leases.reconcile(make_run(root(), pgid=os.getpgid(os.getpid())), "sweep-1")
+check("the live-children block names the process group",
+      "live members" in live["conjuncts"]["children-dead"]["reason"])
+no_pgid = leases.reconcile(make_run(root(), record_pgid=False), "sweep-1")
+check("an unrecorded process group blocks with an explicit reason",
+      "no process-group id" in no_pgid["conjuncts"]["children-dead"]["reason"])
+
+# 19. No lease recorded -> loop exit is not established; never clear.
+r14 = root()
+leases.registry_dir(r14).mkdir(parents=True)
+make_run(r14, lease=False)
+outcome = leases.reconcile(r14, "sweep-1")
+check("a run with no lease never clears (loop exit unverifiable)",
+      outcome["clear"] is False and outcome["state"] == "no-lease")
+r14b = root()
+make_run(r14b, lease=False)
+outcome = leases.reconcile(r14b, "sweep-1")
+check("a missing registry reconciles to recovery-required, never clear",
+      outcome["clear"] is False and outcome["recovery_required"] is True
+      and outcome["state"] == "unknown-recovery-required")
+
+# 20. Stale/expired -> unknown-recovery-required, one bounded attempt, never success.
+r15 = root()
+make_run(r15, state="active")
+stale = leases.reconcile(r15, "sweep-1", now=time.time() + 3600)
+check("a stale lease reconciles to recovery-required, never a success report",
+      stale["clear"] is False and stale["released"] is False
+      and stale["state"] == "unknown-recovery-required" and stale["recovery_required"] is True
+      and stale["attempts"] == 1)
+
+# 21. Already released: idempotent clear, no new records.
+r16 = make_run(root())
+leases.reconcile(r16, "sweep-1")
+records_before = leases.verdict(r16, "sweep-1")["record_count"]
+again = leases.reconcile(r16, "sweep-1")
+check("reconciling an already released run is an idempotent clear",
+      again["clear"] is True and again["already_released"] is True and again["released"] is False
+      and leases.verdict(r16, "sweep-1")["record_count"] == records_before)
+
+# 22. The CLI seam: exit 3 while blocked, exit 0 on clear, no 11_runtime side effect.
+r17 = make_run(root(), cells=("cell-a", "cell-missing"), manifests_for=("cell-a",))
+blocked = subprocess.run([sys.executable, str(RESEARCHCTL), str(r17), "lease-reconcile", "sweep-1"],
+                         capture_output=True, text=True, timeout=60)
+payload = json.loads(blocked.stdout)
+check("researchctl lease-reconcile exits 3 and reports the failed conjuncts",
+      blocked.returncode == 3 and payload["clear"] is False
+      and "manifests" in payload["failed"] and "BLOCKED" in blocked.stderr)
+check("lease-reconcile does not instantiate the control plane (no 11_runtime side effect)",
+      not (r17 / "11_runtime").exists())
+
+r18 = make_run(root())
+clear = subprocess.run([sys.executable, str(RESEARCHCTL), str(r18), "lease-reconcile", "sweep-1"],
+                       capture_output=True, text=True, timeout=60)
+payload2 = json.loads(clear.stdout)
+check("researchctl lease-reconcile exits 0, releases and records the commit",
+      clear.returncode == 0 and payload2["clear"] is True and payload2["released"] is True
+      and payload2["commit"] == leases.verdict(r18, "sweep-1")["commit"]
+      and "CLEAR" in clear.stderr)
+
 print(f"\n{len(passed)}/{len(passed) + len(failures)} passed")
 for path in ROOTS:
     shutil.rmtree(path, ignore_errors=True)
