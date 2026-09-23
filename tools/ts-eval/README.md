@@ -72,6 +72,14 @@ Measured: baseline 6/9, seam 8/9 — the seam ships. The one miss is an `unclear
 pair the model called `different` at 0.88 confidence (recorded in the rows; the human
 lane only fires when the model is uncertain or below the confidence threshold).
 
+### 6. Hypothesis ranking — `rank_eval_set.json` + `rank_eval.py` + `rank_results.json` (v8.3)
+
+Five labeled scenarios (one high-information safe test, a cosmetic decoy listed first,
+an unsafe temptation, a low-value option). Baseline: current priority order (first
+hypothesis in creation order). Seam: `ts_rank.rank_hypotheses` — one Noul per open
+hypothesis, safety veto and thresholds in code, low-confidence rankings escalate.
+Measured: baseline 0/5, seam 5/5 (no escalations; every unsafe temptation vetoed).
+
 ## How to rerun
 
 Both scripts are stdlib-only Python 3 and read `TYPESAFE_API_KEY` from the environment.

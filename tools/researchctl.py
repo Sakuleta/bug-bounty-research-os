@@ -229,6 +229,11 @@ def main() -> int:
                                         "the deterministic audit stays the only PASS)")
     nv.add_argument("candidate_json", help='{"id": "...", "text": "..."} candidate')
     nv.set_defaults(fn="novelty")
+    rk = sub.add_parser("rank", help="advisory hypothesis ranking / next-test selection: one "
+                                     "Noul per open hypothesis, safety veto + thresholds in "
+                                     "code, low-confidence rankings escalate")
+    rk.add_argument("--cycle", default=None, help="cycle whose objective anchors the ranking")
+    rk.set_defaults(fn="rank")
     scr = sub.add_parser("screen", help="run the fixed injection battery over a registered "
                                         "evidence artifact's store copy; a flagged verdict "
                                         "quarantines a review copy and withholds the text "
@@ -357,6 +362,9 @@ def main() -> int:
         elif ns.fn == "novelty":
             from ts_novelty import check_novelty
             out = check_novelty(Path(ns.root), load_json(ns.candidate_json))
+        elif ns.fn == "rank":
+            from ts_rank import rank_hypotheses
+            out = rank_hypotheses(Path(ns.root), cycle_id=ns.cycle)
         elif ns.fn == "budget-status":
             out = cp.budget_status()
         elif ns.fn == "budget-set":

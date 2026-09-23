@@ -1,0 +1,134 @@
+{
+  "eval": "hypothesis-ranking",
+  "baseline_correct": 0,
+  "seam_correct": 5,
+  "escalations": 0,
+  "ship": true,
+  "rows": [
+    {
+      "id": "export-tenant-filter",
+      "question": "Does the export endpoint enforce the tenant boundary for API-key principals?",
+      "correct_pick": "H-1003",
+      "baseline_pick": "H-1001",
+      "baseline_correct": false,
+      "seam_pick": "H-1003",
+      "seam_correct": true,
+      "seam_escalate": false,
+      "seam_reason": null,
+      "seam_vetoed": [
+        "H-1002"
+      ],
+      "seam_scores": {
+        "H-1003": 0.91,
+        "H-1002": 0.23,
+        "H-1001": 0.04,
+        "H-1004": 0.04
+      },
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 814,
+        "output_tokens": 76
+      }
+    },
+    {
+      "id": "cache-poisoning",
+      "question": "Can a crafted request poison the CDN cache for other users?",
+      "correct_pick": "H-2002",
+      "baseline_pick": "H-2001",
+      "baseline_correct": false,
+      "seam_pick": "H-2002",
+      "seam_correct": true,
+      "seam_escalate": false,
+      "seam_reason": null,
+      "seam_vetoed": [
+        "H-2003"
+      ],
+      "seam_scores": {
+        "H-2002": 0.86,
+        "H-2003": 0.18,
+        "H-2004": 0.12,
+        "H-2001": 0.07
+      },
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 814,
+        "output_tokens": 76
+      }
+    },
+    {
+      "id": "reset-token-replay",
+      "question": "Can a captured password-reset link still be used after the password changes?",
+      "correct_pick": "H-3002",
+      "baseline_pick": "H-3001",
+      "baseline_correct": false,
+      "seam_pick": "H-3002",
+      "seam_correct": true,
+      "seam_escalate": false,
+      "seam_reason": null,
+      "seam_vetoed": [
+        "H-3004"
+      ],
+      "seam_scores": {
+        "H-3002": 0.94,
+        "H-3004": 0.16,
+        "H-3003": 0.06,
+        "H-3001": 0.02
+      },
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 803,
+        "output_tokens": 76
+      }
+    },
+    {
+      "id": "sort-sql-injection",
+      "question": "Is the report sort parameter injectable?",
+      "correct_pick": "H-4002",
+      "baseline_pick": "H-4001",
+      "baseline_correct": false,
+      "seam_pick": "H-4002",
+      "seam_correct": true,
+      "seam_escalate": false,
+      "seam_reason": null,
+      "seam_vetoed": [
+        "H-4004"
+      ],
+      "seam_scores": {
+        "H-4002": 0.94,
+        "H-4001": 0.06,
+        "H-4003": 0.04,
+        "H-4004": 0.03
+      },
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 797,
+        "output_tokens": 76
+      }
+    },
+    {
+      "id": "svg-upload-xss",
+      "question": "Does the avatar upload accept SVG that executes script when served from the app origin?",
+      "correct_pick": "H-5003",
+      "baseline_pick": "H-5001",
+      "baseline_correct": false,
+      "seam_pick": "H-5003",
+      "seam_correct": true,
+      "seam_escalate": false,
+      "seam_reason": null,
+      "seam_vetoed": [
+        "H-5002"
+      ],
+      "seam_scores": {
+        "H-5003": 0.93,
+        "H-5004": 0.2,
+        "H-5002": 0.18,
+        "H-5001": 0.04
+      },
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 810,
+        "output_tokens": 76
+      }
+    }
+  ]
+}
