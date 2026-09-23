@@ -87,8 +87,12 @@ lane only fires when the model is uncertain or below the confidence threshold).
 Five labeled scenarios (one high-information safe test, a cosmetic decoy listed first,
 an unsafe temptation, a low-value option). Baseline: current priority order (first
 hypothesis in creation order). Seam: `ts_rank.rank_hypotheses` — one Noul per open
-hypothesis, safety veto and thresholds in code, low-confidence rankings escalate.
-Measured: baseline 0/5, seam 5/5 (no escalations; every unsafe temptation vetoed).
+hypothesis, safety veto and thresholds in code, low-confidence rankings escalate, and a
+declared candidate `test_cost` (number or low/medium/high band) breaks an information
+tie toward the materially cheaper safe test. The committed scenario set declares no
+costs, so the recorded win is information/safety-only; the cost tie-break is pinned by
+`tools/test_rank.py`. Measured: baseline 0/5, seam 5/5 (no escalations; every unsafe
+temptation vetoed).
 
 ### 7. Technique-outcome labeling — `label_eval_set.json` + `label_eval.py` + `label_results.json` (v8.3)
 

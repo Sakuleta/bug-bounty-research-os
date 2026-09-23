@@ -199,6 +199,39 @@ rank_hypotheses(rp_denied, client=rank_client({"info_1": 0.95}), cycle_id="C-000
 check("a DENIED seam writes no judgment record (nothing was judged)",
       read_judgments(rp_denied, seam="rank") == [])
 
+# 8. v8.3 fix: candidate test cost is part of the selection (spec MF-5) — a materially
+#    cheaper safe test wins when the information margin cannot separate the top two;
+#    cost never overrides a clear information win, and undeclared costs change nothing.
+from ts_rank import test_cost  # noqa: E402
+
+COST_HYPS = [{"id": "H-8001", "text": "expensive deep scan of the export endpoint",
+              "test_cost": 10},
+             {"id": "H-8002", "text": "cheap header check on the export endpoint",
+              "test_cost": 1}]
+cost_pick = rank_hypotheses(ALLOWED, client=rank_client({"info_1": 0.80, "info_2": 0.78}),
+                            hypotheses=COST_HYPS, question="q")
+check("a materially cheaper safe test wins the cost tie-break (deterministic, advisory)",
+      cost_pick["pick"] == "H-8002" and cost_pick["escalate"] is False
+      and "cost" in cost_pick["reason"]
+      and next(r for r in cost_pick["ranking"] if r["id"] == "H-8002")["cost"] == 1.0
+      and next(r for r in cost_pick["ranking"] if r["id"] == "H-8001")["cost"] == 10.0)
+check("without declared costs the narrow margin still escalates (backward compatible)",
+      rank_hypotheses(ALLOWED, client=rank_client({"info_1": 0.80, "info_2": 0.78}),
+                      hypotheses=[{"id": "H-8001", "text": "a"}, {"id": "H-8002", "text": "b"}],
+                      question="q")["escalate"] is True)
+check("a clear information win is never traded for cost",
+      rank_hypotheses(ALLOWED, client=rank_client({"info_1": 0.9, "info_2": 0.2}),
+                      hypotheses=COST_HYPS, question="q")["pick"] == "H-8001")
+check("declared cost is read from a number or a low/medium/high band, else unknown",
+      test_cost({"payload": {"test_cost": 2.5}}) == (2.5, None)
+      and test_cost({"payload": {"cost": "high"}}) == (3.0, "high")
+      and test_cost({"payload": {"cost": "cheap"}}) == (None, None)
+      and test_cost({}) == (None, None)
+      and test_cost({"payload": {"test_cost": -1}}) == (None, None))
+check("the declared cost reaches the model state as a constraint",
+      calls[-1][0]["hypotheses"]["hypothesis_1"].get("cost") == 10.0
+      and calls[-1][0]["hypotheses"]["hypothesis_2"].get("cost") == 1.0)
+
 # 7. CLI wiring: `researchctl rank --cycle C-0001`.
 import contextlib  # noqa: E402
 import io  # noqa: E402
