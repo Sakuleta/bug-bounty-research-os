@@ -363,7 +363,10 @@ tooling is install-shaped, so `npx playwright install chromium && npx playwright
 browser launch hidden inside an arbitrary interpreter script is not detectable by
 command scanning — the runner + token remains the sanctioned path. Interactive or
 state-changing flows extend the runner with a dedicated task script carrying its
-documented precondition.
+documented precondition: `tools/bua/interactive.mjs` (controller-driven, one single-use
+preflight token per dispatch, node-identity guards, a resolved human gate before any
+consequential action, `DONE` only after a fresh observation registers its capture) with
+its guard suite `tools/bua/interactive.test.mjs`.
 
 ## Machine-level enforcement (DSH plugin, optional install)
 

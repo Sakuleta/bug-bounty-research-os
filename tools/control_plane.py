@@ -77,6 +77,30 @@ EVENT_TYPES = {
     "STATE_CHANGE", "NOTE", "SCOPE_CHANGED", "BUDGET_CHANGED",
 }
 HUMAN_GATE_DECISIONS = {"RESUME", "PROVIDED", "APPROVED", "DENIED", "CANCELLED"}
+# A human gate authorizes only when the human said GO: DENIED/CANCELLED are refusals
+# (`resolve_gate` itself transitions the cycle to BLOCKED on them). One predicate is
+# shared by the dispatch-time gate and the audit's scope-violation disposition, so the
+# two can never drift apart on what counts as an approval.
+GATE_AUTHORIZING_DECISIONS = frozenset({"RESUME", "PROVIDED", "APPROVED"})
+
+
+def gate_decision_authorizes(decision: Any) -> bool:
+    """True when a RESOLVED gate's decision returns the cycle to RUNNING (an approval)."""
+    return str(decision or "").strip().upper() in GATE_AUTHORIZING_DECISIONS
+
+
+def gate_postdates_token(gate_requested_at: Any, issued_at: Any) -> bool:
+    """True when the gate was raised strictly after the token it names was minted.
+
+    Action ids are sequential (`A-%06d`) and therefore predictable, so a gate resolved
+    before the run on the predicted id must never pre-authorize it. Both timestamps are
+    same-machine ISO-8601 Z strings (`now()`), so the lexical compare is the ordering; a
+    same-second tie fails closed (the gate cannot be proven to postdate the mint).
+    """
+    requested = str(gate_requested_at or "")
+    issued = str(issued_at or "")
+    return bool(requested) and bool(issued) and requested > issued
+
 REQUIRED_AUDIT_CLASSES = {"scope", "coverage", "negative", "open-hypothesis", "novelty-duplicate", "hygiene-cleanup", "method-self-attack"}
 METHOD_SELF_ATTACK_ROWS = ("assumed-secure", "weak-negative", "early-close", "skipped-collision", "version-drift", "tool-misread")
 EVIDENCE_STORE = "11_runtime/evidence-store"
@@ -3107,6 +3131,155 @@ class ControlPlane:
                 fh.write(_json_dump(token) + "\n")
         self.refresh()
         return token
+
+    def _token_state(self, action_id: str) -> dict[str, Any] | None:
+        """Latest state for one prepared token action id (None when never prepared).
+
+        The store is append-only with latest-state-per-action_id semantics: the consume
+        line is a later record for the same id, never a rewrite of the mint line.
+        """
+        path = self._tokens_file()
+        if not path.exists():
+            return None
+        state: dict[str, Any] | None = None
+        for line in path.read_text(errors="ignore").splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(rec, dict) and str(rec.get("action_id") or "") == action_id:
+                state = {**(state or {}), **rec}
+        return state
+
+    def _broker_consume(self, client, rec: dict[str, Any], digest: str, family: str) -> None:
+        """Consume a broker-minted token in the broker ledger first (fail closed).
+
+        The broker is the token authority while its socket is present: a broker refusal
+        (replay, signature mismatch, expiry) must stop the local consume, never be
+        papered over locally.
+        """
+        try:
+            response = client.call("token.consume", timeout=5, workspace=str(self.root),
+                                   digest=digest, tool_family=family,
+                                   nonce=str(rec.get("broker_nonce") or ""),
+                                   sig=str(rec.get("broker_sig") or ""))
+        except client.BrokerUnavailable as exc:
+            raise ValueError(
+                f"broker socket is present but the consume call failed (fail closed): {exc} — "
+                "start the broker (`researchctl broker serve`) and consume again") from exc
+        if not response.get("ok"):
+            raise ValueError(
+                f"the broker refused to consume the preflight token (fail closed): {response.get('error')}")
+
+    def consume_token(self, action_id: str, shape: dict[str, Any], *, family: str = "browser",
+                      actor: str = "controller") -> dict[str, Any]:
+        """Consume a prepared preflight token exactly once, bound to the exact action shape.
+
+        The single-use gate for a controller-driven arm (no executor plugin consumes its
+        tokens): the token must exist, be unconsumed and unexpired, carry the requested
+        tool family, and its `argument_digest` must equal the canonical digest of `shape`
+        — the same bytes the executor's `shapeFromArgs` hashes, so a token can never
+        authorize a different action than the one it was prepared for. The check and the
+        append share one critical section (two concurrent consumes cannot both win), the
+        consume is a durable append (latest state per action_id wins), and consumption
+        never restores budget headroom. With a broker socket present the broker consumes
+        first and a broker refusal fails closed. Returns the token record with its
+        `preflight`; raises ValueError with the failing reason otherwise.
+        """
+        aid = str(action_id or "").strip()
+        if not aid:
+            raise ValueError("token-consume requires an action id")
+        if not isinstance(shape, dict) or not shape:
+            raise ValueError("token-consume requires a non-empty request_shape")
+        canonical = canonical_request_shape(shape)
+        digest = hashlib.sha256(_json_dump(canonical).encode("utf-8")).hexdigest()
+        with _lock(self.root):
+            rec = self._token_state(aid)
+            if rec is None:
+                raise ValueError(
+                    f"no prepared preflight token for {aid} — no token, no dispatch (prepare it first)")
+            if rec.get("consumed"):
+                raise ValueError(
+                    f"preflight token {aid} was already consumed — preflight tokens are single-use")
+            expires = str(rec.get("expires_at") or "")
+            if expires and expires < now():
+                raise ValueError(f"preflight token {aid} expired at {expires} — prepare a fresh one")
+            token_family = str(rec.get("tool_family") or "")
+            if token_family != str(family):
+                raise ValueError(
+                    f"preflight token {aid} is bound to tool_family {token_family!r}, not {family!r}")
+            if str(rec.get("argument_digest") or "") != digest:
+                raise ValueError(
+                    f"preflight token {aid} is bound to a different action shape — the token "
+                    "authorizes exactly the shape it was prepared for; prepare the action again")
+            client = broker_client()
+            if client is not None and rec.get("broker_nonce"):
+                self._broker_consume(client, rec, digest, family)
+            with self._tokens_file().open("a", encoding="utf-8") as fh:
+                fh.write(_json_dump({
+                    "action_id": aid,
+                    "nonce": str(rec.get("nonce") or ""),
+                    "consumed": True,
+                    "consumed_at": now(),
+                    "consumed_by": actor,
+                }) + "\n")
+        self.refresh()
+        return rec
+
+    def gate_for_action(self, action_id: str) -> dict[str, Any]:
+        """Is there a RESOLVED human gate that APPROVES this action id (the consequential gate)?
+
+        The dispatch-time twin of the audit's disposition rule: a gate counts only when it
+        is RESOLVED on the action's own cycle with an authorizing decision (APPROVED /
+        RESUME / PROVIDED — a DENIED or CANCELLED gate is the human saying no), its
+        `what_is_needed` names the action id (substring, exactly the audit's
+        `aid in what_is_needed` match), and it was RAISED after the token was minted —
+        ids are sequential and predictable, so a gate resolved before the run on the
+        predicted id must never pre-authorize it. The answer is advisory evidence for the
+        runner; the code that dispatches refuses without it. Raises for an action id with
+        no prepared token (nothing to gate).
+        """
+        aid = str(action_id or "").strip()
+        if not aid:
+            raise ValueError("gate-check requires an action id")
+        rec = self._token_state(aid)
+        if rec is None:
+            raise ValueError(f"no prepared preflight token for {aid} — nothing to gate")
+        cycle_id = str(rec.get("cycle_id") or "")
+        issued_at = str(rec.get("issued_at") or "")
+        for event in self._read_events():
+            if event.get("type") != "HUMAN_GATE_RESOLVED":
+                continue
+            if cycle_id and str(event.get("cycle_id") or "") != cycle_id:
+                continue
+            gid = str(event.get("entity_id") or "")
+            gate = self.gate(gid) or {}
+            if not gate_decision_authorizes(gate.get("decision")):
+                continue
+            if not gate_postdates_token(self._gate_request_time(gid), issued_at):
+                continue
+            if aid in str(gate.get("what_is_needed") or ""):
+                return {"resolved": True, "gate": gid,
+                        "decision": gate.get("decision"), "cycle_id": cycle_id,
+                        "reason": "a RESOLVED human gate approving this action postdates it"}
+        return {"resolved": False, "gate": None, "cycle_id": cycle_id,
+                "reason": (f"no RESOLVED human gate on cycle {cycle_id or '<missing>'} approves "
+                           f"{aid} (raised after the token, naming it in what_is_needed) — raise one "
+                           "(`researchctl gate request`) and resolve it APPROVED/RESUME/PROVIDED "
+                           "before dispatching a consequential action")}
+
+    def _gate_request_time(self, gid: str) -> str:
+        """The HUMAN_GATE_REQUESTED event time for one gate ('' when never requested).
+
+        The ordering anchor: a gate that was never requested (or whose request predates
+        the token) cannot authorize the token, however it was resolved.
+        """
+        for event in self._read_events():
+            if event.get("type") == "HUMAN_GATE_REQUESTED" and str(event.get("entity_id") or "") == gid:
+                return str(event.get("time") or "")
+        return ""
 
     def _bound_browser_profile(self) -> str:
         """The dedicated runner profile for a browser preflight, validated.
