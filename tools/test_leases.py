@@ -216,6 +216,44 @@ raise_check("mutation refuses a registry with a corrupt line",
             lambda: leases.heartbeat(r3, "corrupt-run", lease_id=rec3["lease_id"], now=3.0),
             leases.LeaseError)
 
+# 9b. Encoding contract: bytes are decoded STRICTLY, lines split on `\n` only, and a
+# raw U+0085/U+2028/U+2029 is a corrupt line (writers escape those separators). An
+# invalid byte or a raw separator must never be repaired into a release or split the
+# record into fragments (both would diverge from the JS gate reader).
+r_enc = root()
+leases.acquire(r_enc, "enc-run", interval_seconds=1000.0, now=1.0)
+with open(leases.lease_path(r_enc, "enc-run"), "ab") as handle:
+    handle.write(b'{"seq": 2, "version": 2, "state": "released", "commit": "'
+                 + b"a" * 40 + b'", "reason": "x\xffy"}\n')
+v_enc = leases.verdict(r_enc, "enc-run", now=2.0)
+check("an invalid UTF-8 byte in a record is a corrupt line (never silently repaired)",
+      v_enc["state"] == "unknown-recovery-required" and v_enc["blocked"] is True
+      and v_enc["corrupt_lines"] == 1 and "corrupt" in v_enc["reason"])
+r_sep = root()
+leases.acquire(r_sep, "sep-run", interval_seconds=1000.0, now=1.0)
+with open(leases.lease_path(r_sep, "sep-run"), "a", encoding="utf-8") as handle:
+    handle.write(json.dumps({"seq": 2, "version": 2, "state": "released",
+                             "commit": "b" * 40, "reason": "a\u2028b"},
+                            ensure_ascii=False) + "\n")
+v_sep = leases.verdict(r_sep, "sep-run", now=2.0)
+check("a raw U+2028 inside a record is one corrupt line (never split into fragments)",
+      v_sep["state"] == "unknown-recovery-required" and v_sep["blocked"] is True
+      and v_sep["corrupt_lines"] == 1)
+r_esc = root()
+sha_esc = git_fixture(r_esc)
+rec_esc = leases.acquire(r_esc, "esc-run", interval_seconds=1000.0, now=1.0)
+leases.mark_awaiting(r_esc, "esc-run", exit_code=0, lease_id=rec_esc["lease_id"], now=2.0)
+leases.release(r_esc, "esc-run", commit=sha_esc,
+               reason="operator\u2028verified\u0085\u2029done",
+               lease_id=rec_esc["lease_id"], now=3.0)
+raw_esc = leases.lease_path(r_esc, "esc-run").read_bytes()
+check("the writer escapes U+0085/U+2028/U+2029 (no raw separators on disk)",
+      b"\\u2028" in raw_esc and b"\\u0085" in raw_esc and b"\\u2029" in raw_esc
+      and "\u2028".encode() not in raw_esc and "\u0085".encode() not in raw_esc
+      and "\u2029".encode() not in raw_esc)
+check("an escaped-separator release round-trips to released",
+      leases.verdict(r_esc, "esc-run", now=4.0)["state"] == "released")
+
 # 10. Unverifiable chains: unknown state string, non-increasing version.
 r4 = root()
 leases.acquire(r4, "tampered", now=1.0)
@@ -585,6 +623,26 @@ else:
     with open(leases.lease_path(p_state, "run"), "a", encoding="utf-8") as handle:
         handle.write(json.dumps({"seq": 2, "version": 2, "state": "sneaky"}) + "\n")
     parity_case("unknown state string", p_state, "run", 200.0)
+    p_utf8 = root()
+    leases.acquire(p_utf8, "run", interval_seconds=1000.0, now=100.0)
+    with open(leases.lease_path(p_utf8, "run"), "ab") as handle:
+        handle.write(b'{"seq": 2, "version": 2, "state": "released", "commit": "'
+                     + b"a" * 40 + b'", "reason": "x\xffy"}\n')
+    parity_case("invalid UTF-8 record", p_utf8, "run", 200.0)
+    p_raw_sep = root()
+    leases.acquire(p_raw_sep, "run", interval_seconds=1000.0, now=100.0)
+    with open(leases.lease_path(p_raw_sep, "run"), "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"seq": 2, "version": 2, "state": "released",
+                                 "commit": "b" * 40, "reason": "a\u2028b"},
+                                ensure_ascii=False) + "\n")
+    parity_case("raw U+2028 record", p_raw_sep, "run", 200.0)
+    p_escaped_sep = root()
+    sha_escaped_sep = git_fixture(p_escaped_sep)
+    rec_pes = leases.acquire(p_escaped_sep, "run", interval_seconds=1000.0, now=100.0)
+    leases.mark_awaiting(p_escaped_sep, "run", exit_code=0, lease_id=rec_pes["lease_id"], now=110.0)
+    leases.release(p_escaped_sep, "run", commit=sha_escaped_sep,
+                   reason="operator\u2028verified", lease_id=rec_pes["lease_id"], now=120.0)
+    parity_case("writer-escaped U+2028 release", p_escaped_sep, "run", 200.0)
     p_wide = root()
     sha_wide = git_fixture(p_wide)
     leases.acquire(p_wide, "run-a", interval_seconds=1000.0, now=100.0)
@@ -620,6 +678,12 @@ else:
     unsafe = js_verdict(p_active, "../escape", 200.0)
     check("parity: an unsafe run id blocks the node reader",
           unsafe["blocked"] is True and unsafe["state"] == "unknown-recovery-required")
+    js_utf8 = js_verdict(p_utf8, "run", 200.0)
+    check("parity: an invalid UTF-8 record blocks BOTH readers (no silent repair)",
+          js_utf8["blocked"] is True and js_utf8["state"] == "unknown-recovery-required")
+    js_raw_sep = js_verdict(p_raw_sep, "run", 200.0)
+    check("parity: a raw U+2028 record blocks BOTH readers (no split-brain)",
+          js_raw_sep["blocked"] is True and js_raw_sep["state"] == "unknown-recovery-required")
 
 print(f"\n{len(passed)}/{len(passed) + len(failures)} passed")
 for path in ROOTS:

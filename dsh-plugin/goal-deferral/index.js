@@ -18,8 +18,11 @@
  * Fail-closed rules (readers), identical to the Python side: a missing or unreadable
  * registry, a corrupt line, an unverifiable version chain and an expired `active`
  * lease all block; `awaiting-reconciliation` stays held until the completion
- * predicate clears; a stale lease is never success. Internal errors in `apply()`
- * fail open (the enforcer's contract), while the veto itself fails closed.
+ * predicate clears; a stale lease is never success. The encoding contract is shared
+ * with `tools/leases.py`: bytes are decoded strictly as UTF-8 and lines are split on
+ * `\n` only; an undecodable line or a raw U+0085/U+2028/U+2029 (which the writer
+ * escapes) is corrupt. Internal errors in `apply()` fail open (the enforcer's
+ * contract), while the veto itself fails closed.
  *
  * Activation: the adapter only vetoes inside a lease-managed workspace — an explicit
  * `root`/`RESEARCH_OS_LEASE_ROOT`, or an ancestor of the call's cwd that contains
@@ -30,6 +33,7 @@
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
+import { TextDecoder } from 'node:util'
 
 export const name = 'research-os-goal-deferral'
 export const inject = ['tools']
@@ -41,6 +45,11 @@ const LEASE_STATES = ['active', 'awaiting-reconciliation', 'unknown-recovery-req
 const RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 // Worst state wins for the workspace-wide verdict (unknown > awaiting > active).
 const WORST_ORDER = { active: 1, 'awaiting-reconciliation': 2, 'unknown-recovery-required': 3 }
+// Line separators a conforming writer escapes (see tools/leases.py `_RAW_SEPARATORS`):
+// a raw occurrence means the line was not written by the shared writer, and the
+// Python reader counts it corrupt — this reader must agree.
+const RAW_SEPARATOR_RE = /[\u0085\u2028\u2029]/
+const STRICT_UTF8 = new TextDecoder('utf-8', { fatal: true })
 
 function blocked(runId, state, reason, extra = {}) {
   return { runId, state, blocked: true, reason, ...extra }
@@ -65,18 +74,36 @@ function foldRecords(records) {
   return { latest }
 }
 
-function readLeaseFile(path, runId, nowSeconds) {
-  let text
+function readLeaseFile(path, runId, nowSeconds, root) {
+  let buffer
   try {
-    text = readFileSync(path, 'utf8')
+    buffer = readFileSync(path)
   } catch (error) {
     return blocked(runId, 'unknown-recovery-required',
       `lease registry file is unreadable: ${path} (${error}) (fail closed)`)
   }
   const records = []
   let corrupt = 0
-  for (const line of text.split('\n')) {
+  // Encoding contract (shared with tools/leases.py): split on `\n` bytes only and
+  // decode each line strictly as UTF-8; an undecodable line or a raw
+  // U+0085/U+2028/U+2029 is corrupt (never dropped, repaired or split).
+  let start = 0
+  for (let index = 0; index <= buffer.length; index += 1) {
+    if (index !== buffer.length && buffer[index] !== 0x0a) continue
+    const chunk = buffer.subarray(start, index)
+    start = index + 1
+    let line
+    try {
+      line = STRICT_UTF8.decode(chunk)
+    } catch {
+      corrupt += 1
+      continue
+    }
     if (!line.trim()) continue
+    if (RAW_SEPARATOR_RE.test(line)) {
+      corrupt += 1
+      continue
+    }
     let record
     try {
       record = JSON.parse(line)
@@ -167,10 +194,10 @@ export function readLeaseVerdict(root, runId = null, options = {}) {
       return { runId, state: 'no-lease', blocked: false,
         reason: 'no lease recorded for this run (registry readable)' }
     }
-    return readLeaseFile(path, runId, nowSeconds)
+    return readLeaseFile(path, runId, nowSeconds, root)
   }
   const runs = entries.map((entry) => readLeaseFile(
-    join(directory, entry), entry.slice(0, -'.jsonl'.length), nowSeconds))
+    join(directory, entry), entry.slice(0, -'.jsonl'.length), nowSeconds, root))
   const held = runs.filter((entry) => entry.blocked)
   if (!held.length) {
     return { runId: null, state: 'clear', blocked: false,

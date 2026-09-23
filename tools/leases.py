@@ -28,6 +28,9 @@ Fail-closed rules (readers):
   - a corrupt line is tolerated (never a crash) but the run's state is unverifiable
     from that file, so the verdict is `unknown-recovery-required` (a corrupt line
     must never read as a missed heartbeat or as a release);
+  - the encoding contract is shared with the JS reader: bytes are decoded strictly
+    as UTF-8 and lines are split on `\n` only; an undecodable line or a raw
+    U+0085/U+2028/U+2029 (which the writer escapes) is corrupt;
   - a version chain that is not strictly increasing is unverifiable, same verdict;
   - expiry turns a missed heartbeat on an `active` lease into `unknown-recovery-required`
     (`awaiting-reconciliation` has no heartbeat expectation and stays as recorded).
@@ -60,6 +63,10 @@ BLOCKING_STATES = ("active", "awaiting-reconciliation", "unknown-recovery-requir
 
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+# Line separators a conforming writer escapes (`\u0085`/`\u2028`/`\u2029`). A raw
+# occurrence on disk means the record was not written by the shared writer (or was
+# tampered with): both readers split on `\n` only and count it corrupt.
+_RAW_SEPARATORS = ("\u0085", "\u2028", "\u2029")
 
 
 class LeaseError(ValueError):
@@ -128,17 +135,30 @@ def lease_path(root: str | os.PathLike[str], run_id: str) -> Path:
 def _read_records(path: Path) -> tuple[list[dict[str, Any]], int, bool]:
     """Tolerant JSONL read: (records, corrupt_line_count, unreadable).
 
-    Tolerates blank/corrupt/non-object lines without raising (they are counted);
+    Encoding contract (shared with the JS reader in `dsh-plugin/goal-deferral`):
+    the file is read as BYTES, each line is decoded strictly as UTF-8, and lines
+    are split on `\\n` only. An undecodable line, or a line carrying a raw
+    U+0085/U+2028/U+2029 (separators a conforming writer escapes), counts as
+    corrupt: it is never dropped, silently repaired or split into fragments, so
+    both readers agree. Blank/non-object lines are tolerated and counted.
     `unreadable` marks a file that exists but cannot be read at all.
     """
     try:
-        text = path.read_text(errors="ignore")
+        data = path.read_bytes()
     except OSError:
         return [], 0, True
     records: list[dict[str, Any]] = []
     corrupt = 0
-    for line in text.splitlines():
-        if not line.strip():
+    for raw in data.split(b"\n"):
+        if not raw.strip():
+            continue
+        try:
+            line = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            corrupt += 1
+            continue
+        if any(separator in line for separator in _RAW_SEPARATORS):
+            corrupt += 1
             continue
         try:
             record = json.loads(line)
@@ -175,8 +195,16 @@ def _expiry_seconds(interval_seconds: float) -> float:
 
 
 def _append(root: Path, run_id: str, record: dict[str, Any], path: Path) -> dict[str, Any]:
-    """Read-modify-write one record under the registry lock (fsynced O_APPEND)."""
-    line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+    """Read-modify-write one record under the registry lock (fsynced O_APPEND).
+
+    U+0085/U+2028/U+2029 are escaped as `\\uXXXX` after the dump: a raw occurrence
+    would be a corrupt line for both readers (they split on `\\n` only), so the
+    writer never emits one.
+    """
+    line = json.dumps(record, ensure_ascii=False, sort_keys=True)
+    for separator in _RAW_SEPARATORS:
+        line = line.replace(separator, f"\\u{ord(separator):04x}")
+    line += "\n"
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
         os.write(fd, line.encode("utf-8"))
