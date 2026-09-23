@@ -528,6 +528,87 @@ no_pgid = leases.reconcile(make_run(root(), record_pgid=False), "sweep-1")
 check("an unrecorded process group blocks with an explicit reason",
       "no process-group id" in no_pgid["conjuncts"]["children-dead"]["reason"])
 
+# 18b. The incident shape: a daemonized (double-fork + setsid) grandchild escapes the
+# recorded process group. The completion predicate must still see it (process-table
+# sweep: pgrep by group and by the recorded command) and block; killing the stray must
+# let the same run clear.
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def daemon_spawn(marker: Path) -> str:
+    """A script that double-forks, setsids, writes its pid and sleeps 30s."""
+    return (
+        "import os, sys, time\n"
+        "if os.fork() == 0:\n"
+        "    os.setsid()\n"
+        "    if os.fork() == 0:\n"
+        "        dn = os.open(os.devnull, os.O_RDWR)\n"
+        "        os.dup2(dn, 0)\n"
+        "        os.dup2(dn, 1)\n"
+        "        os.dup2(dn, 2)\n"
+        f"        handle = open({str(marker)!r}, 'w')\n"
+        "        handle.write(str(os.getpid()))\n"
+        "        handle.close()\n"
+        "        time.sleep(30)\n"
+        "    os._exit(0)\n"
+        "os.wait()\n"
+        "sys.exit(0)\n")
+
+
+def wait_children_dead(r: Path, run_id: str, timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if leases.completion_predicate(r, run_id)["conjuncts"]["children-dead"]["ok"]:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+r_daemon = make_run(root(), lease=False)
+daemon_marker = r_daemon / "daemon.pid"
+daemon_proc = run_wrapper(r_daemon, "sweep-1",
+                          [sys.executable, "-c", daemon_spawn(daemon_marker)],
+                          "--interval", "0.2")
+daemon_pid = int(daemon_marker.read_text()) if daemon_marker.exists() else 0
+try:
+    check("the daemonized grandchild outlives the wrapper (the incident shape)",
+          daemon_proc.returncode == 0 and daemon_pid > 0 and pid_alive(daemon_pid))
+    daemon_verdict = leases.verdict(r_daemon, "sweep-1")
+    check("the lease is awaiting-reconciliation while the recorded group is empty",
+          daemon_verdict["state"] == "awaiting-reconciliation"
+          and not leases._pgid_alive(daemon_verdict["pgid"]))
+    daemon_outcome = leases.reconcile(r_daemon, "sweep-1")
+    check("a detached descendant blocks the completion predicate (never a release)",
+          daemon_outcome["clear"] is False and daemon_outcome["released"] is False
+          and daemon_outcome["conjuncts"]["children-dead"]["ok"] is False
+          and "stray" in daemon_outcome["conjuncts"]["children-dead"]["reason"])
+finally:
+    if daemon_pid > 0:
+        try:
+            os.kill(daemon_pid, signal.SIGKILL)
+        except OSError:
+            pass
+check("with the stray gone the same run clears (the sweep is not a blanket block)",
+      wait_children_dead(r_daemon, "sweep-1")
+      and leases.reconcile(r_daemon, "sweep-1")["released"] is True)
+
+# 18c. The sweep fails closed when pgrep is absent or failing (unverifiable ⇒ block).
+sweep_alive, sweep_reason = leases._tree_sweep_alive(1, "some-command",
+                                                     pgrep="/nonexistent/pgrep")
+check("the process-table sweep fails closed when pgrep is unavailable",
+      sweep_alive is True and "unavailable" in sweep_reason)
+bad_pgrep = root("bad-pgrep-") / "pgrep"
+bad_pgrep.write_text("#!/bin/sh\nexit 2\n")
+bad_pgrep.chmod(0o755)
+sweep_alive, sweep_reason = leases._tree_sweep_alive(1, "some-command", pgrep=str(bad_pgrep))
+check("the process-table sweep fails closed when pgrep fails (exit 2)",
+      sweep_alive is True and "fail closed" in sweep_reason)
+
 # 19. No lease recorded -> loop exit is not established; never clear.
 r14 = root()
 leases.registry_dir(r14).mkdir(parents=True)

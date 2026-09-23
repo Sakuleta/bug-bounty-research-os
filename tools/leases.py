@@ -46,6 +46,8 @@ import fcntl
 import json
 import os
 import re
+import shlex
+import shutil
 import subprocess
 import time
 from contextlib import contextmanager
@@ -587,6 +589,86 @@ def _pgid_alive(pgid: int) -> bool:
     return True
 
 
+_ERE_SPECIALS = frozenset(".^$*+?()[]{}|\\")
+
+
+def _command_pattern(command: str) -> str | None:
+    """A `pgrep -f` ERE that matches the recorded command line literally, or None.
+
+    The registry records `shlex.join(argv)` (shell-quoted for humans) while the
+    process table exposes the raw argv; the executable is dropped from the pattern
+    (macOS resolves the exec path, so argv[0] as passed is not what the table shows)
+    and the remaining arguments are joined and ERE-escaped for a literal substring
+    match. Fragments shorter than 8 characters are not distinctive enough to sweep
+    on — such commands rely on the process-group half. An unparseable command or an
+    argument-less command yields None.
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return None
+    args = tokens[1:]
+    joined = " ".join(args)
+    if len(joined) < 8:
+        return None
+    return "".join(("\\" + ch) if ch in _ERE_SPECIALS else ch for ch in joined)
+
+
+def _run_pgrep(pgrep: str, args: list[str]) -> tuple[int | None, str]:
+    """(exit code, stdout); None marks a pgrep that could not be executed at all."""
+    try:
+        proc = subprocess.run([pgrep, *args], capture_output=True, text=True, timeout=10)
+    except OSError:
+        return None, ""
+    except subprocess.TimeoutExpired:
+        return 2, ""
+    return proc.returncode, proc.stdout.strip()
+
+
+_PGREP_UNAVAILABLE = "pgrep is unavailable — stray descendants cannot be ruled out (fail closed)"
+
+
+def _tree_sweep_alive(pgid: int, command: str, *,
+                      pgrep: str | None = None) -> tuple[bool, str]:
+    """Process-table sweep for live members of the recorded tree: (alive, reason).
+
+    The recorded process group is checked with `pgrep -g` (a second opinion on
+    `killpg`, and the half that survives a dead group leader), and the recorded
+    command with `pgrep -f` — a descendant that left the group but kept the argv
+    (the common setsid/double-fork detach shape) is still matched. pgrep absent,
+    failing (exit != 0/1) or otherwise unverifiable counts as ALIVE (fail closed).
+
+    Proof bound (documented residual): a descendant that both leaves the recorded
+    group and re-execs a different argv can still evade this sweep — there is no
+    cgroup/job-object containment available on this platform, and the sweep sees
+    only what the process table exposes.
+    """
+    if pgrep is None:
+        pgrep = shutil.which("pgrep")
+    if pgrep is None:
+        return True, _PGREP_UNAVAILABLE
+    code, output = _run_pgrep(pgrep, ["-g", str(pgid), "."])
+    if code is None:
+        return True, _PGREP_UNAVAILABLE
+    if code == 0:
+        return True, f"pgrep -g {pgid} still matches live process(es): {output}"
+    if code != 1:
+        return True, (f"pgrep -g {pgid} failed (exit {code}) — child liveness is unverifiable "
+                      "(fail closed)")
+    pattern = _command_pattern(command)
+    if pattern is not None:
+        code, output = _run_pgrep(pgrep, ["-f", "--", pattern])
+        if code is None:
+            return True, _PGREP_UNAVAILABLE
+        if code == 0:
+            return True, (f"pgrep -f matches live process(es) still carrying the recorded command: "
+                          f"{output} (a stray escaped the recorded process group)")
+        if code != 1:
+            return True, (f"pgrep -f failed (exit {code}) — stray liveness is unverifiable "
+                          "(fail closed)")
+    return False, "no live group members and no matching strays"
+
+
 def _manifest_conjunct(root: Path, run_id: str) -> tuple[bool, str]:
     """Every planned cell has a manifest (layout: runs/<cell>/manifest.json)."""
     plan_path = root / "runs" / run_id / "plan.json"
@@ -656,9 +738,12 @@ def completion_predicate(root: str | os.PathLike[str], run_id: str, *,
     """The five-conjunct completion predicate (root-relative documented layout).
 
     clear == loop exited AND zero matching children alive AND every planned cell has
-    a manifest AND reports regenerated AND the results commit exists. Any missing or
-    unverifiable conjunct blocks; a stale/expired lease yields
-    `unknown-recovery-required`, never success.
+    a manifest AND reports regenerated AND the results commit exists. "Children" is
+    the recorded process group PLUS a process-table sweep (`pgrep -g`/`-f`) for
+    strays that escaped it (setsid/double-fork); the sweep fails closed when pgrep
+    is absent or unverifiable, and its proof bound is documented on
+    `_tree_sweep_alive`. Any missing or unverifiable conjunct blocks; a
+    stale/expired lease yields `unknown-recovery-required`, never success.
     """
     root = Path(root)
     return _predicate_from_verdict(root, run_id, verdict(root, run_id, now=now))
@@ -682,12 +767,18 @@ def _predicate_from_verdict(root: Path, run_id: str, current: dict[str, Any]) ->
     }
     pgid = current.get("pgid")
     if isinstance(pgid, int) and not isinstance(pgid, bool):
-        children_dead = not _pgid_alive(pgid)
-        conjuncts["children-dead"] = {
-            "ok": children_dead,
-            "reason": (f"process group {pgid} has no live members" if children_dead
-                       else f"process group {pgid} still has live members"),
-        }
+        if _pgid_alive(pgid):
+            children_dead = False
+            children_reason = f"process group {pgid} still has live members"
+        else:
+            stray_alive, stray_reason = _tree_sweep_alive(pgid, current.get("command") or "")
+            children_dead = not stray_alive
+            children_reason = (
+                f"process group {pgid} has no live members but the process-table sweep still "
+                f"sees the run's tree: {stray_reason}" if stray_alive
+                else f"process group {pgid} has no live members and no process-table stray "
+                     "matches the recorded tree")
+        conjuncts["children-dead"] = {"ok": children_dead, "reason": children_reason}
     else:
         conjuncts["children-dead"] = {
             "ok": False,
