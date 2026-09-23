@@ -89,6 +89,14 @@ transcript; the draft's `result` is the label under test; the payload carries th
 `_draft` marker and is only recordable through `researchctl technique confirm`).
 Measured: baseline 2/4, seam 4/4 — the seam ships.
 
+### 8. Knowledge-use honesty — `honesty_eval_set.json` + `honesty_eval.py` + `honesty_results.json` (v8.3)
+
+Six labeled rows (genuine uses and decorative citations of a pack over cycle outputs).
+Baseline: the audit-style presence heuristic (a distinctive guide keyword in the
+outputs means "used"). Seam: `ts_honesty.check_knowledge_use` (one Noul per cited pack:
+is the citation load-bearing?). Measured: baseline 4/6, seam 6/6 — the seam ships, as
+an advisory warning only (it adds no audit error and changes no verdict).
+
 ## How to rerun
 
 Both scripts are stdlib-only Python 3 and read `TYPESAFE_API_KEY` from the environment.

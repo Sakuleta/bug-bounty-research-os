@@ -167,6 +167,10 @@ def main() -> int:
                                     "--unused lists indexed packs never considered")
     x.add_argument("--unused", action="store_true")
     x.set_defaults(fn="knowledge-usage")
+    x = ks.add_parser("honesty", help="advisory honesty check: one Noul per pack a cycle cites "
+                                      "(warning only, never a fail)")
+    x.add_argument("--cycle", required=True, help="cycle whose cited packs are checked")
+    x.set_defaults(fn="knowledge-honesty")
     x = ks.add_parser("propose", help="{pack, title, body, technique_ref?, evidence_refs?, "
                                        "recheck_date?} — writes a reviewed proposal artifact")
     x.add_argument("json")
@@ -333,6 +337,9 @@ def main() -> int:
             if ns.unused:
                 out = {"totals": out["totals"],
                        "packs": {name: out["packs"][name] for name in never_considered_packs(out)}}
+        elif ns.fn == "knowledge-honesty":
+            from ts_honesty import check_knowledge_use
+            out = check_knowledge_use(Path(ns.root), ns.cycle)
         elif ns.fn == "knowledge-propose":
             out = cp.knowledge_propose(load_json(ns.json))
         elif ns.fn == "knowledge-proposals":
@@ -470,6 +477,10 @@ def main() -> int:
                   f"packs={len(out['packs'])} never_considered={len(never)}", file=sys.stderr)
             if ns.unused:
                 print("unused packs: " + (", ".join(never) or "none"), file=sys.stderr)
+        if ns.fn == "knowledge-honesty":
+            print(f"knowledge honesty: checked={len(out.get('checked', []))} "
+                  f"warnings={len(out.get('warnings', []))} "
+                  "(advisory warning only, never a fail)", file=sys.stderr)
         elif ns.fn == "knowledge-propose":
             print(f"knowledge propose: {out['payload']['id']} -> "
                   f"{out['payload']['proposal_path']}", file=sys.stderr)

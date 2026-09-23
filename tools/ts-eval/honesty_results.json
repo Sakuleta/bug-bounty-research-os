@@ -1,0 +1,105 @@
+{
+  "eval": "knowledge-use-honesty",
+  "baseline_correct": 4,
+  "seam_correct": 6,
+  "ship": true,
+  "rows": [
+    {
+      "id": "used-cache-semantics",
+      "truth": "used",
+      "pack": "http-edge-cache",
+      "baseline_verdict": "used",
+      "baseline_correct": true,
+      "seam_verdict": "used",
+      "seam_correct": true,
+      "seam_score": 0.9,
+      "seam_warning": false,
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 465,
+        "output_tokens": 23
+      }
+    },
+    {
+      "id": "decorative-name-drop",
+      "truth": "decorative",
+      "pack": "http-edge-cache",
+      "baseline_verdict": "used",
+      "baseline_correct": false,
+      "seam_verdict": "decorative",
+      "seam_correct": true,
+      "seam_score": 0.13,
+      "seam_warning": true,
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 452,
+        "output_tokens": 23
+      }
+    },
+    {
+      "id": "decorative-unrelated",
+      "truth": "decorative",
+      "pack": "email-dns",
+      "baseline_verdict": "decorative",
+      "baseline_correct": true,
+      "seam_verdict": "decorative",
+      "seam_correct": true,
+      "seam_score": 0.04,
+      "seam_warning": true,
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 453,
+        "output_tokens": 23
+      }
+    },
+    {
+      "id": "used-different-vocabulary",
+      "truth": "used",
+      "pack": "parsers-injection",
+      "baseline_verdict": "decorative",
+      "baseline_correct": false,
+      "seam_verdict": "used",
+      "seam_correct": true,
+      "seam_score": 0.72,
+      "seam_warning": false,
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 481,
+        "output_tokens": 25
+      }
+    },
+    {
+      "id": "used-checklist-applied",
+      "truth": "used",
+      "pack": "access-auth",
+      "baseline_verdict": "used",
+      "baseline_correct": true,
+      "seam_verdict": "used",
+      "seam_correct": true,
+      "seam_score": 0.9,
+      "seam_warning": false,
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 464,
+        "output_tokens": 22
+      }
+    },
+    {
+      "id": "decorative-ledger-only",
+      "truth": "decorative",
+      "pack": "web3-emerging",
+      "baseline_verdict": "decorative",
+      "baseline_correct": true,
+      "seam_verdict": "decorative",
+      "seam_correct": true,
+      "seam_score": 0.03,
+      "seam_warning": true,
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 473,
+        "output_tokens": 25
+      }
+    }
+  ],
+  "advisory_note": "warnings only; the audit's presence heuristic and the human remain deciding"
+}
