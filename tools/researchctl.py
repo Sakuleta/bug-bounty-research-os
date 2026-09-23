@@ -151,6 +151,15 @@ def main() -> int:
     t = sub.add_parser("technique")
     ts = t.add_subparsers(dest="op", required=True)
     x = ts.add_parser("evaluate"); x.add_argument("json"); x.set_defaults(fn="technique-evaluate")
+    x = ts.add_parser("draft", help="compile a TECHNIQUE_EVALUATED payload draft from per-field "
+                                    "questions over the cycle transcript (nothing is recorded; "
+                                    "the controller confirms with `technique confirm`)")
+    x.add_argument("cycle_id")
+    x.set_defaults(fn="technique-draft")
+    x = ts.add_parser("confirm", help="confirm a reviewed technique draft: strip the _draft "
+                                      "marker and record it via the canonical seam")
+    x.add_argument("draft_json")
+    x.set_defaults(fn="technique-confirm")
 
     k = sub.add_parser("knowledge")
     ks = k.add_subparsers(dest="op", required=True)
@@ -307,6 +316,18 @@ def main() -> int:
             out = cp.register_evidence(ns.path, kind=ns.kind, source=ns.source, cycle_id=ns.cycle)
         elif ns.fn == "technique-evaluate":
             out = cp.evaluate_technique(load_json(ns.json))
+        elif ns.fn == "technique-draft":
+            from ts_label import draft_technique_payload
+            out = draft_technique_payload(Path(ns.root), ns.cycle_id)
+        elif ns.fn == "technique-confirm":
+            from ts_label import DRAFT_MARKER
+            payload = load_json(ns.draft_json)
+            if not isinstance(payload, dict) or DRAFT_MARKER not in payload:
+                raise ValueError(
+                    f"{ns.draft_json} is not a technique draft (no {DRAFT_MARKER} marker) — "
+                    "confirm only drafts produced by `researchctl technique draft`")
+            payload.pop(DRAFT_MARKER)
+            out = cp.evaluate_technique(payload)
         elif ns.fn == "knowledge-usage":
             out = cp.knowledge_usage()
             if ns.unused:

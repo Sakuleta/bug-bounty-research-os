@@ -1683,8 +1683,19 @@ class ControlPlane:
 
         The OS projects technique-discoveries.md and last-result.md from these events;
         the agent reports the outcome, it does not hand-edit the learning files.
+
+        A payload carrying the `_draft` marker (from the labeling aid, `ts_label`) is
+        refused: drafts are reviewed and confirmed by the controller first
+        (`researchctl technique confirm <file>`), which strips the marker — a draft can
+        never be recorded as-is.
         """
         data = dict(payload)
+        if "_draft" in data:
+            raise ValueError(
+                "technique evaluation payload is a draft (_draft present) — review it and "
+                "confirm via `researchctl technique confirm <file>`; drafts are never "
+                "recorded as-is"
+            )
         cid = str(data.get("cycle_id", ""))
         if self.cycle_status(cid) in {None, "CLOSED"}:
             raise ValueError("technique evaluation must reference an existing non-closed cycle")

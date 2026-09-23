@@ -80,6 +80,15 @@ hypothesis in creation order). Seam: `ts_rank.rank_hypotheses` — one Noul per 
 hypothesis, safety veto and thresholds in code, low-confidence rankings escalate.
 Measured: baseline 0/5, seam 5/5 (no escalations; every unsafe temptation vetoed).
 
+### 7. Technique-outcome labeling — `label_eval_set.json` + `label_eval.py` + `label_results.json` (v8.3)
+
+Four labeled cycle transcripts (CONFIRMED / FALSE_POSITIVE / NEGATIVE / INCONCLUSIVE).
+Baseline: an ordered keyword scan that reads "succeeded" as CONFIRMED and misses
+negations. Seam: `ts_label.draft_technique_payload` (per-field questions over the
+transcript; the draft's `result` is the label under test; the payload carries the
+`_draft` marker and is only recordable through `researchctl technique confirm`).
+Measured: baseline 2/4, seam 4/4 — the seam ships.
+
 ## How to rerun
 
 Both scripts are stdlib-only Python 3 and read `TYPESAFE_API_KEY` from the environment.
