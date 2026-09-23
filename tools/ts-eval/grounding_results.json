@@ -1,0 +1,197 @@
+{
+  "eval": "grounded-judgment",
+  "threshold": 0.8,
+  "metric": "confidently wrong = verdict != truth with confidence >= threshold; a confident `unclear` counts as a confident non-answer (reported separately as the yes/no-wrong count)",
+  "before_confident_wrong": 6,
+  "after_confident_wrong": 0,
+  "before_confident_yesno_wrong": 0,
+  "after_confident_yesno_wrong": 0,
+  "before_correct": 0,
+  "after_correct": 6,
+  "ship": true,
+  "rows": [
+    {
+      "id": "gpt6-released",
+      "question": "Has GPT-6 been released as of September 2026?",
+      "truth": "yes",
+      "before_verdict": "unclear",
+      "before_confidence": 1.0,
+      "before_confident_wrong": true,
+      "after_verdict": "yes",
+      "after_confidence": 0.96,
+      "after_confident_wrong": false,
+      "after_auto": true,
+      "after_relevant": 2,
+      "after_excluded": 0,
+      "after_sources": [
+        "https://openai.com/index/gpt-6-astra",
+        "https://openai.com/news/"
+      ],
+      "before_model": "jev-1.13.0",
+      "after_model": "jev-1.13.0",
+      "before_usage": {
+        "input_tokens": 403,
+        "output_tokens": 41
+      },
+      "after_usage": {
+        "input_tokens": 2081,
+        "output_tokens": 248
+      }
+    },
+    {
+      "id": "cf-fresh-verifier",
+      "question": "Does the Cloudflare security-audit skill validate candidate findings with a fresh verifier that tries to refute them?",
+      "truth": "yes",
+      "before_verdict": "unclear",
+      "before_confidence": 1.0,
+      "before_confident_wrong": true,
+      "after_verdict": "yes",
+      "after_confidence": 1.0,
+      "after_confident_wrong": false,
+      "after_auto": true,
+      "after_relevant": 2,
+      "after_excluded": 0,
+      "after_sources": [
+        "https://github.com/cloudflare/security-audit-skill",
+        "https://github.com/cloudflare/security-audit-skill"
+      ],
+      "before_model": "jev-1.13.0",
+      "after_model": "jev-1.13.0",
+      "before_usage": {
+        "input_tokens": 412,
+        "output_tokens": 41
+      },
+      "after_usage": {
+        "input_tokens": 2083,
+        "output_tokens": 248
+      }
+    },
+    {
+      "id": "cf-no-live-probing",
+      "question": "Does the Cloudflare security-audit skill permit contacting deployed endpoints?",
+      "truth": "no",
+      "before_verdict": "unclear",
+      "before_confidence": 1.0,
+      "before_confident_wrong": true,
+      "after_verdict": "no",
+      "after_confidence": 0.96,
+      "after_confident_wrong": false,
+      "after_auto": true,
+      "after_relevant": 1,
+      "after_excluded": 1,
+      "after_sources": [
+        "https://github.com/cloudflare/security-audit-skill"
+      ],
+      "before_model": "jev-1.13.0",
+      "after_model": "jev-1.13.0",
+      "before_usage": {
+        "input_tokens": 403,
+        "output_tokens": 41
+      },
+      "after_usage": {
+        "input_tokens": 1917,
+        "output_tokens": 230
+      }
+    },
+    {
+      "id": "typesafe-no-websearch-knob",
+      "question": "Does the TypeSafe System One API expose a websearch parameter?",
+      "truth": "no",
+      "before_verdict": "unclear",
+      "before_confidence": 1.0,
+      "before_confident_wrong": true,
+      "after_verdict": "no",
+      "after_confidence": 1.0,
+      "after_confident_wrong": false,
+      "after_auto": true,
+      "after_relevant": 2,
+      "after_excluded": 0,
+      "after_sources": [
+        "https://docs.typesafe.ai/introduction/quickstart",
+        "https://docs.typesafe.ai"
+      ],
+      "before_model": "jev-1.13.0",
+      "after_model": "jev-1.13.0",
+      "before_usage": {
+        "input_tokens": 403,
+        "output_tokens": 41
+      },
+      "after_usage": {
+        "input_tokens": 2091,
+        "output_tokens": 248
+      }
+    },
+    {
+      "id": "jev-ultrafast-browser-harness",
+      "question": "Does the browser-use/jev-ultrafast demo depend on browser-harness?",
+      "truth": "yes",
+      "before_verdict": "unclear",
+      "before_confidence": 1.0,
+      "before_confident_wrong": true,
+      "after_verdict": "yes",
+      "after_confidence": 1.0,
+      "after_confident_wrong": false,
+      "after_auto": true,
+      "after_relevant": 2,
+      "after_excluded": 0,
+      "after_sources": [
+        "https://github.com/browser-use/jev-ultrafast",
+        "https://github.com/browser-use/jev-ultrafast"
+      ],
+      "before_model": "jev-1.13.0",
+      "after_model": "jev-1.13.0",
+      "before_usage": {
+        "input_tokens": 405,
+        "output_tokens": 41
+      },
+      "after_usage": {
+        "input_tokens": 2122,
+        "output_tokens": 248
+      }
+    },
+    {
+      "id": "jev-ultrafast-fanout",
+      "question": "Does the jev-ultrafast demo send one TypeSafe request per step using speculative fan-out (an operation Choice plus target Choices over the same state)?",
+      "truth": "yes",
+      "before_verdict": "unclear",
+      "before_confidence": 1.0,
+      "before_confident_wrong": true,
+      "after_verdict": "yes",
+      "after_confidence": 0.79,
+      "after_confident_wrong": false,
+      "after_auto": false,
+      "after_relevant": 1,
+      "after_excluded": 1,
+      "after_sources": [
+        "https://github.com/browser-use/jev-ultrafast"
+      ],
+      "before_model": "jev-1.13.0",
+      "after_model": "jev-1.13.0",
+      "before_usage": {
+        "input_tokens": 420,
+        "output_tokens": 41
+      },
+      "after_usage": {
+        "input_tokens": 1940,
+        "output_tokens": 230
+      }
+    }
+  ],
+  "removed_for_no_go": {
+    "cases": [
+      "laya-apache",
+      "laya-base-near-chance"
+    ],
+    "reason": "SPRINT-v8.3-SPEC.md keeps this project out in any form; the spec-axis review flagged the two cases (MF-2)",
+    "replaced_by": [
+      "cf-fresh-verifier",
+      "jev-ultrafast-fanout"
+    ]
+  },
+  "posture": {
+    "before_arm": "off (no search_results)",
+    "after_arm": "on (committed fixture retrieval, verbatim insertion)",
+    "grounding_opt_in": true,
+    "scored_system_runs": "grounding stays off unless the engagement explicitly allows it; the posture is recorded in the run manifest"
+  }
+}

@@ -54,6 +54,34 @@ bound draft. Lessons from triage feed back into `10_learning/` (LEARNING stage).
 
  Researchers should verify scope and duplicates before submission.
 
+## Severity anchors (calibration)
+
+Severity comes from a **boundary defeat**, not from a checklist deviation: a finding
+needs the control that should have stopped the request to have failed, reproduced with
+a clean near-identical control. Checklist deviations (a missing header on a
+non-exploitable path, a scanner template match, a policy difference with no control
+failure) are not findings — record them as hardening notes or leave them in the method
+self-attack matrix. The discriminator: *state what the attacker gains that the control
+should have prevented.* If that sentence cannot be written, the severity rationale is
+missing.
+
+```text
+critical       boundary defeat with direct cross-tenant/account impact, unauthenticated
+               code execution, or full credential compromise; path reproduced end-to-end
+high           boundary defeat with limited scope (one object class, read-only data) or a
+               reachable chained precondition; clear security impact
+medium         real boundary weakening behind an unusual precondition, or low-impact
+               disclosure with demonstrated access beyond the intended principal
+low            hardening: defense-in-depth gaps, version disclosure, misconfiguration with
+               no demonstrated boundary defeat
+informational  observations with no security boundary at stake
+```
+
+The finding record's `report-draft.md` fills `## Severity Rationale` against these
+anchors (the template carries the discriminator prompt). The program's own severity
+method (`00_control/engagement.yaml` `severity_method`, surfaced in
+`11_runtime/current-context.md`) wins where it is stricter than these anchors.
+
 ## Draft claim audit — aid, not a gate
 
 A finding's `report-draft.md` can be audited before human review with

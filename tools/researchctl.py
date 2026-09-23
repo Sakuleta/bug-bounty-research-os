@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from pathlib import Path
 import sys
 
@@ -20,6 +21,7 @@ from control_plane import (  # noqa: E402
 )
 from ts_triage import suggest as triage_suggest  # noqa: E402
 from ts_claims import check_claims, check_draft  # noqa: E402
+from ts_cost import record_seam_cost  # noqa: E402
 
 BROKER_SCRIPT = Path(__file__).resolve().parent / "broker" / "broker.py"
 
@@ -149,6 +151,15 @@ def main() -> int:
     t = sub.add_parser("technique")
     ts = t.add_subparsers(dest="op", required=True)
     x = ts.add_parser("evaluate"); x.add_argument("json"); x.set_defaults(fn="technique-evaluate")
+    x = ts.add_parser("draft", help="compile a TECHNIQUE_EVALUATED payload draft from per-field "
+                                    "questions over the cycle transcript (nothing is recorded; "
+                                    "the controller confirms with `technique confirm`)")
+    x.add_argument("cycle_id")
+    x.set_defaults(fn="technique-draft")
+    x = ts.add_parser("confirm", help="confirm a reviewed technique draft: strip the _draft "
+                                      "marker and record it via the canonical seam")
+    x.add_argument("draft_json")
+    x.set_defaults(fn="technique-confirm")
 
     k = sub.add_parser("knowledge")
     ks = k.add_subparsers(dest="op", required=True)
@@ -156,6 +167,10 @@ def main() -> int:
                                     "--unused lists indexed packs never considered")
     x.add_argument("--unused", action="store_true")
     x.set_defaults(fn="knowledge-usage")
+    x = ks.add_parser("honesty", help="advisory honesty check: one Noul per pack a cycle cites "
+                                      "(warning only, never a fail)")
+    x.add_argument("--cycle", required=True, help="cycle whose cited packs are checked")
+    x.set_defaults(fn="knowledge-honesty")
     x = ks.add_parser("propose", help="{pack, title, body, technique_ref?, evidence_refs?, "
                                        "recheck_date?} — writes a reviewed proposal artifact")
     x.add_argument("json")
@@ -215,6 +230,30 @@ def main() -> int:
     frs = fr.add_subparsers(dest="op", required=True)
     x = frs.add_parser("record"); x.add_argument("json"); x.set_defaults(fn="freshness-record")
     x = frs.add_parser("status"); x.set_defaults(fn="freshness-status")
+    gr = sub.add_parser("ground", help="retrieval-backed Jev judgment: provider snippets "
+                                       "go verbatim into state.search_results; code "
+                                       "thresholds decide; default off (needs "
+                                       "external_judgment ALLOWED + grounding: ALLOWED)")
+    gr.add_argument("question")
+    gr.add_argument("--cycle", default=None)
+    gr.set_defaults(fn="ground")
+    nv = sub.add_parser("novelty", help="advisory novelty/duplicate aid: pairwise Choice over "
+                                        "blocked candidates (unclear routes to the human lane; "
+                                        "the deterministic audit stays the only PASS)")
+    nv.add_argument("candidate_json", help='{"id": "...", "text": "..."} candidate')
+    nv.set_defaults(fn="novelty")
+    rk = sub.add_parser("rank", help="advisory hypothesis ranking / next-test selection: one "
+                                     "Noul per open hypothesis, safety veto + thresholds in "
+                                     "code, low-confidence rankings escalate")
+    rk.add_argument("--cycle", default=None, help="cycle whose objective anchors the ranking")
+    rk.set_defaults(fn="rank")
+    scr = sub.add_parser("screen", help="run the fixed injection battery over a registered "
+                                        "evidence artifact's store copy; a flagged verdict "
+                                        "quarantines a review copy and withholds the text "
+                                        "from external judgment (never dropped)")
+    scr.add_argument("evidence_ref", help="registered E-* id (screen web-fetch output, BUA "
+                                          "captures and excerpts by registering them first)")
+    scr.set_defaults(fn="screen")
     bu = sub.add_parser("budget")
     bus = bu.add_subparsers(dest="op", required=True)
     x = bus.add_parser("status", help="limits, counted actions (recorded + outstanding tokens) and remaining")
@@ -281,11 +320,34 @@ def main() -> int:
             out = cp.register_evidence(ns.path, kind=ns.kind, source=ns.source, cycle_id=ns.cycle)
         elif ns.fn == "technique-evaluate":
             out = cp.evaluate_technique(load_json(ns.json))
+        elif ns.fn == "technique-draft":
+            from ts_label import draft_technique_payload
+            out = draft_technique_payload(Path(ns.root), ns.cycle_id)
+        elif ns.fn == "technique-confirm":
+            from ts_label import DRAFT_MARKER
+            payload = load_json(ns.draft_json)
+            if not isinstance(payload, dict) or DRAFT_MARKER not in payload:
+                raise ValueError(
+                    f"{ns.draft_json} is not a technique draft (no {DRAFT_MARKER} marker) — "
+                    "confirm only drafts produced by `researchctl technique draft`")
+            draft_meta = payload.pop(DRAFT_MARKER)
+            if isinstance(draft_meta, dict):
+                # Keep the replayable provenance on the confirmed record: the model and
+                # confidence whose draft the controller confirmed, plus the input digest,
+                # endpoint and posture (the _draft marker itself is never recorded).
+                payload["label_provenance"] = {
+                    key: draft_meta.get(key) for key in
+                    ("model", "confidence", "input_digest", "endpoint", "posture",
+                     "has_learning", "notes")}
+            out = cp.evaluate_technique(payload)
         elif ns.fn == "knowledge-usage":
             out = cp.knowledge_usage()
             if ns.unused:
                 out = {"totals": out["totals"],
                        "packs": {name: out["packs"][name] for name in never_considered_packs(out)}}
+        elif ns.fn == "knowledge-honesty":
+            from ts_honesty import check_knowledge_use
+            out = check_knowledge_use(Path(ns.root), ns.cycle)
         elif ns.fn == "knowledge-propose":
             out = cp.knowledge_propose(load_json(ns.json))
         elif ns.fn == "knowledge-proposals":
@@ -309,15 +371,36 @@ def main() -> int:
         elif ns.fn == "scope-sync":
             out = cp.sync_scope()
         elif ns.fn == "triage":
+            started = time.monotonic()
             out = triage_suggest(Path(ns.root), ns.question)
+            record_seam_cost(cp.root, decision="triage", out=out, cycle_id=cp.active_cycle(),
+                             latency_ms=int((time.monotonic() - started) * 1000))
         elif ns.fn == "claims-check":
+            started = time.monotonic()
             out = check_claims(Path(ns.root), load_json(ns.packet_json), verify=True)
+            record_seam_cost(cp.root, decision="claims-check", out=out, cycle_id=cp.active_cycle(),
+                             latency_ms=int((time.monotonic() - started) * 1000))
         elif ns.fn == "claims-draft":
+            started = time.monotonic()
             out = check_draft(Path(ns.root), ns.draft, triage=ns.triage)
+            record_seam_cost(cp.root, decision="claims-draft", out=out, cycle_id=cp.active_cycle(),
+                             latency_ms=int((time.monotonic() - started) * 1000))
         elif ns.fn == "freshness-record":
             out = cp.record_freshness(load_json(ns.json))
         elif ns.fn == "freshness-status":
             out = cp.freshness_report()
+        elif ns.fn == "screen":
+            from ts_screen import screen_evidence
+            out = screen_evidence(Path(ns.root), ns.evidence_ref)
+        elif ns.fn == "ground":
+            from ts_ground import ground_state
+            out = ground_state(Path(ns.root), ns.question, cycle_id=ns.cycle)
+        elif ns.fn == "novelty":
+            from ts_novelty import check_novelty
+            out = check_novelty(Path(ns.root), load_json(ns.candidate_json))
+        elif ns.fn == "rank":
+            from ts_rank import rank_hypotheses
+            out = rank_hypotheses(Path(ns.root), cycle_id=ns.cycle)
         elif ns.fn == "budget-status":
             out = cp.budget_status()
         elif ns.fn == "budget-set":
@@ -375,10 +458,22 @@ def main() -> int:
             print(f"claims-draft: checked={s['checked']} flagged={s['flagged']} "
                   f"supports={s.get('supports', 0)} contradicts={s.get('contradicts', 0)} "
                   f"says_nothing={s.get('says_nothing', 0)} invalid={s.get('invalid_choice', 0)} "
+                  f"unscreened={s.get('unscreened', 0)} "
                   f"skipped={len(out.get('skipped', []))} "
                   f"errors={len(out.get('errors', []))} (aid, not a gate)", file=sys.stderr)
             if ns.fail_on_flag and s["flagged"]:
                 return 1
+        if ns.fn == "screen":
+            verdict = ("FLAGGED" if out.get("flagged") else
+                       ("clean" if out.get("flagged") is False else "unavailable"))
+            print(f"screen {ns.evidence_ref}: {verdict} "
+                  f"(flagged_questions={out.get('flagged_questions') or []}, "
+                  f"quarantine={out.get('quarantine_path')})", file=sys.stderr)
+        if ns.fn == "ground":
+            print(f"ground: posture={out.get('posture')} verdict={out.get('verdict')} "
+                  f"auto={out.get('auto')} relevant={len(out.get('relevant') or [])} "
+                  f"excluded={len(out.get('excluded') or [])} (aid, not a decision)",
+                  file=sys.stderr)
         if (ns.fn == "budget-set" and isinstance(out, dict)
                 and out.get("payload", {}).get("below_current_count")):
             print("warning: the new caps are below the current recorded action counts — "
@@ -391,6 +486,10 @@ def main() -> int:
                   f"packs={len(out['packs'])} never_considered={len(never)}", file=sys.stderr)
             if ns.unused:
                 print("unused packs: " + (", ".join(never) or "none"), file=sys.stderr)
+        if ns.fn == "knowledge-honesty":
+            print(f"knowledge honesty: checked={len(out.get('checked', []))} "
+                  f"warnings={len(out.get('warnings', []))} "
+                  "(advisory warning only, never a fail)", file=sys.stderr)
         elif ns.fn == "knowledge-propose":
             print(f"knowledge propose: {out['payload']['id']} -> "
                   f"{out['payload']['proposal_path']}", file=sys.stderr)

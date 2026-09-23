@@ -38,6 +38,21 @@ TARGET -> RESEARCH -> WHAT DID OUR METHOD MISS?
 
 One row per prompt, no blanks. "None" with a one-line reason counts as answered.
 
+## Coverage ledger (deterministic units + critic wave)
+
+The six rows are the shape; the coverage ledger is the completeness mechanism. The
+control plane derives the units the ledger can prove — one per FALSE_POSITIVE /
+NOT_APPLICABLE hypothesis (weak-negative), one per cycle that entered BLOCKED
+(early-close), one per freshness component (assumed-secure), one per stale/unpinned
+component (version-drift) — and the critic checks that each unit's subject is named in
+its row. `researchctl audit-record method-self-attack` records the derived units and
+the unnamed ones on the audit event; `tools/audit.py` warns (never errors) when a row
+leaves a unit unnamed, so a bare "none" cannot hide a branch. Rows the ledger cannot
+derive units for (skipped-collision, tool-misread) say so in the report instead of
+pretending completeness. The critic wave is the re-run loop: answer the unnamed units,
+re-record the matrix, repeat until the report is complete. The enforcement below stays
+the six-row form check — the coverage ledger is the critic, not a closure gate.
+
 ## Worked mini-loop
 
 Baseline: 12 branches closed, 8 NOT_APPLICABLE, 3 FALSE_POSITIVE, 1 VERIFIED. Prompt 2 re-opens the 3 FALSE_POSITIVEs; one lacked a fresh-connection control — re-run flips it to VERIFIED (H-15). Prompt 4 finds cache/auth fingerprinted but untested — new hypothesis H-16, re-run confirms clean with control. Matrix records both; learning log notes "prompt 2 -> H-15 verified; prompt 4 -> H-16 clean".

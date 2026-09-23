@@ -55,7 +55,7 @@ OBSERVE
 
 ## Identity binding
 
-`00_control/identity-binding.yaml` defines the only research identity and session context permitted for this workspace. Before authenticated or identity-sensitive actions:
+`00_control/identity-binding.yaml` declares the research identity and session context for this workspace, and the tools enforce it — it is not prose. Before authenticated or identity-sensitive actions:
 
 ```text
 EXPECTED IDENTITY
@@ -63,7 +63,7 @@ EXPECTED IDENTITY
 → MATCH
 ```
 
-Do not infer identity from the workspace name, email filename, or conversation memory. If the active session does not match, repair or switch to the dedicated authorized session autonomously when possible. Ask the researcher only for a genuinely human-owned authentication factor or an explicit decisi
+Machine-checked: `researchctl prepare` refuses a live preflight whose `account` differs from the bound `expected_identity.account_reference` (a garbled binding file fails closed too); the browser executor passes the bound `session.browser_profile` to `tools/bua/run.mjs`
 
 ## ENGAGEMENT POLICY
 
@@ -283,6 +283,6 @@ auto_exploit: false
 Injection and retrieval:
 
 - Direct prompt injection crossing a trust or capability boundary
-- In
+- Ind
 
 [CONTEXT_TRUNCATED]

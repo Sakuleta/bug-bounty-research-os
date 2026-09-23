@@ -82,3 +82,20 @@ E-ID + engagement-relative path + SHA-256 + kind + source + cycle
 ```
 
 A path string alone is not evidence identity.
+
+## Live-target validation (authorized targets)
+
+A decisive check on an authorized live target is a preflight + controlled-executor
+action — `researchctl prepare` → `research_os_request` / `research_os_browser` — never a
+`needs_validation` marker: the OS exists for authorized live testing, and a reviewer who
+declines an available, authorized check has verified nothing. The preflight carries
+target, scope status, account, object owner, purpose, hypothesis, expected
+secure/vulnerable behavior, side effect, stop condition and the canonical
+`request_shape`; the executor re-checks scope and consumes the single-use token once,
+and the capture registers as evidence with the receipt.
+
+Reserve `needs_validation` / cycle `BLOCKED` for what the authorization boundary or the
+available capability genuinely cannot reach, and name the exact blocker plus the local
+or owner-observed check that would resolve it (`what_is_needed`) — a blocker states what
+is missing, never "did not try". Reviewer instructions:
+`.dsh/skills/fresh-verifier/SKILL.md`.

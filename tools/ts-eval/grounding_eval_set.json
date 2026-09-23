@@ -1,0 +1,104 @@
+[
+  {
+    "id": "gpt6-released",
+    "question": "Has GPT-6 been released as of September 2026?",
+    "truth": "yes",
+    "snippets": [
+      {
+        "text": "GPT-6 \"Astra\" shipped on 2026-09-10; the model card lists general availability through the API and the consumer console.",
+        "source": "https://openai.com/index/gpt-6-astra",
+        "date": "2026-09-10"
+      },
+      {
+        "text": "OpenAI release index: GPT-6 Astra — general availability announcement, dated 2026-09-10.",
+        "source": "https://openai.com/news/",
+        "date": "2026-09-11"
+      }
+    ]
+  },
+  {
+    "id": "cf-fresh-verifier",
+    "question": "Does the Cloudflare security-audit skill validate candidate findings with a fresh verifier that tries to refute them?",
+    "truth": "yes",
+    "snippets": [
+      {
+        "text": "Six-phase audit: candidate validation runs a fresh verifier whose task is to refute each candidate before it can be reported, not to confirm it.",
+        "source": "https://github.com/cloudflare/security-audit-skill",
+        "date": "2026-09-21"
+      },
+      {
+        "text": "The independent record-verification phase re-verifies with material replacements, so a finding survives only if the fresh check holds.",
+        "source": "https://github.com/cloudflare/security-audit-skill",
+        "date": "2026-09-21"
+      }
+    ]
+  },
+  {
+    "id": "cf-no-live-probing",
+    "question": "Does the Cloudflare security-audit skill permit contacting deployed endpoints?",
+    "truth": "no",
+    "snippets": [
+      {
+        "text": "Universal execution safety: do not contact deployed endpoints. When a question cannot be decided from the local code, mark the candidate needs_validation instead of probing it.",
+        "source": "https://github.com/cloudflare/security-audit-skill",
+        "date": "2026-09-21"
+      },
+      {
+        "text": "The skill requires an OS-enforced sandbox: no external network, allowlisted environment, read-only target, scratch-only writes.",
+        "source": "https://github.com/cloudflare/security-audit-skill",
+        "date": "2026-09-21"
+      }
+    ]
+  },
+  {
+    "id": "typesafe-no-websearch-knob",
+    "question": "Does the TypeSafe System One API expose a websearch parameter?",
+    "truth": "no",
+    "snippets": [
+      {
+        "text": "The public docs contain no websearch parameter; the request body is {state, model, questions} and the console orchestrates retrieval client-side: selected evidence goes verbatim into state.search_results.",
+        "source": "https://docs.typesafe.ai/introduction/quickstart",
+        "date": "2026-09-22"
+      },
+      {
+        "text": "Primitives table: choice, score, noul — no search primitive is listed; state is caller-supplied.",
+        "source": "https://docs.typesafe.ai",
+        "date": "2026-09-22"
+      }
+    ]
+  },
+  {
+    "id": "jev-ultrafast-browser-harness",
+    "question": "Does the browser-use/jev-ultrafast demo depend on browser-harness?",
+    "truth": "yes",
+    "snippets": [
+      {
+        "text": "pyproject.toml dependencies: browser-harness==0.1.13 and httpx[http2]; the agent loop executes over raw CDP through browser-harness.",
+        "source": "https://github.com/browser-use/jev-ultrafast",
+        "date": "2026-09-22"
+      },
+      {
+        "text": "README: an interactive browser agent loop — snapshot.js builds an indexed element table, model.choose() sends one TypeSafe request, agent.py executes via browser.py over raw CDP (browser_harness).",
+        "source": "https://github.com/browser-use/jev-ultrafast",
+        "date": "2026-09-22"
+      }
+    ]
+  },
+  {
+    "id": "jev-ultrafast-fanout",
+    "question": "Does the jev-ultrafast demo send one TypeSafe request per step using speculative fan-out (an operation Choice plus target Choices over the same state)?",
+    "truth": "yes",
+    "snippets": [
+      {
+        "text": "model.choose() sends one TypeSafe request with speculative fan-out: an operation Choice plus one *_target Choice per operation, all evaluated against the same state.",
+        "source": "https://github.com/browser-use/jev-ultrafast",
+        "date": "2026-09-22"
+      },
+      {
+        "text": "Strict response validation on the fan-out: the probability simplex must be ≈1 and the picked choice must be the argmax (validate_choice).",
+        "source": "https://github.com/browser-use/jev-ultrafast",
+        "date": "2026-09-22"
+      }
+    ]
+  }
+]

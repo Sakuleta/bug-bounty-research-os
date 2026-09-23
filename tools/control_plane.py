@@ -32,6 +32,7 @@ from knowledge_index import (
     selection_query,
     top_packs,
 )
+from ts_cost import cost_summary
 
 CYCLE_EDGES = {
     "PLANNED": {"READY", "BLOCKED"},
@@ -1682,8 +1683,19 @@ class ControlPlane:
 
         The OS projects technique-discoveries.md and last-result.md from these events;
         the agent reports the outcome, it does not hand-edit the learning files.
+
+        A payload carrying the `_draft` marker (from the labeling aid, `ts_label`) is
+        refused: drafts are reviewed and confirmed by the controller first
+        (`researchctl technique confirm <file>`), which strips the marker — a draft can
+        never be recorded as-is.
         """
         data = dict(payload)
+        if "_draft" in data:
+            raise ValueError(
+                "technique evaluation payload is a draft (_draft present) — review it and "
+                "confirm via `researchctl technique confirm <file>`; drafts are never "
+                "recorded as-is"
+            )
         cid = str(data.get("cycle_id", ""))
         if self.cycle_status(cid) in {None, "CLOSED"}:
             raise ValueError("technique evaluation must reference an existing non-closed cycle")
@@ -2593,7 +2605,12 @@ class ControlPlane:
         return out
 
     def budget_status(self) -> dict[str, Any]:
-        """Limits, counted actions and remaining capacity — the `budget status` seam."""
+        """Limits, counted actions and remaining capacity — the `budget status` seam.
+
+        `spend` is the Jev cost ledger summary, reported BESIDE the action budget and
+        deliberately not folded into `remaining`: the caps count actions, and an
+        estimated dollar figure must never consume or relax action capacity.
+        """
         limits = budget_limits(self.root)
         if isinstance(limits, str):
             raise ValueError(
@@ -2615,6 +2632,7 @@ class ControlPlane:
                 "cycles": {cid: left(cap_cycle, used) for cid, used in counts["cycles"].items()},
                 "engagement": left(cap_total, counts["engagement"]),
             },
+            "spend": cost_summary(self.root),
         }
 
     def set_budget(self, payload: dict[str, Any], actor: str = "controller") -> dict[str, Any]:
@@ -3237,6 +3255,79 @@ class ControlPlane:
             current = {**(current or {}), **payload, "cycle_id": e.get("cycle_id"), "time": e["time"]}
         return current
 
+    def method_attack_units(self) -> dict[str, dict[str, Any]]:
+        """Deterministic coverage units per method-self-attack prompt, derived from the ledger.
+
+        The critic-wave loop's input (`33_METHOD_SELF_ATTACK.md`): each unit names the
+        subject (hypothesis / cycle / freshness component) whose row must be answered.
+        Rows the ledger cannot derive units for say so with a reason instead of
+        pretending completeness. Deterministic: same ledger, same units.
+        """
+        events = self._read_events()
+        units: dict[str, list[dict[str, Any]]] = {row: [] for row in METHOD_SELF_ATTACK_ROWS}
+
+        def add(row: str, subject: str, label: str) -> None:
+            units[row].append({"unit": f"MU-{row}-{len(units[row]) + 1}",
+                               "subject": subject, "label": label})
+
+        for component in self.freshness_ledger():
+            name = str(component.get("target_component") or "").strip()
+            if name:
+                add("assumed-secure", name,
+                    f"freshness component pinned {component.get('pinned_version') or 'UNKNOWN'}")
+        for row in self.freshness_report()["components"]:
+            reasons = []
+            if row.get("stale"):
+                reasons.append("stale")
+            if row.get("unpinned"):
+                reasons.append("unpinned")
+            if reasons:
+                add("version-drift", str(row.get("target_component")),
+                    f"freshness component {'/'.join(reasons)}")
+        for hid in self.all_hypothesis_ids():
+            status = self.hypothesis_status(hid)
+            if status in {"FALSE_POSITIVE", "NOT_APPLICABLE"}:
+                add("weak-negative", hid, f"hypothesis closed {status}")
+        seen_blocked: set[str] = set()
+        for event in events:
+            if (event.get("type") != "CYCLE_TRANSITIONED"
+                    or str((event.get("payload") or {}).get("to")) != "BLOCKED"):
+                continue
+            cid = str(event.get("entity_id") or "")
+            if cid and cid not in seen_blocked:
+                seen_blocked.add(cid)
+                add("early-close", cid, "cycle entered BLOCKED")
+        notes = {
+            "skipped-collision": "no derivable units: boundary pairs are not recorded in the ledger",
+            "tool-misread": "no derivable units: tool failures are not their own event type",
+        }
+        return {
+            row: {"units": units[row],
+                  "note": notes.get(row) if not units[row] else None}
+            for row in METHOD_SELF_ATTACK_ROWS
+        }
+
+    def critique_self_attack(self, matrix: dict[str, Any] | None) -> dict[str, Any]:
+        """Coverage critic: is every derived unit named in its matrix row?
+
+        A unit counts as covered when its subject id (hypothesis / cycle / component
+        name) appears in the row text — naming the thing that was re-opened is what the
+        matrix cell promises. Returns `{"complete", "rows", "uncovered", "units_total"}`.
+        """
+        units = self.method_attack_units()
+        rows: dict[str, dict[str, Any]] = {}
+        uncovered: list[str] = []
+        for row in METHOD_SELF_ATTACK_ROWS:
+            text = str((matrix or {}).get(row, ""))
+            subjects = [u["subject"] for u in units[row]["units"]]
+            missing = [s for s in subjects if s not in text]
+            rows[row] = {"units": subjects,
+                         "named": [s for s in subjects if s not in missing],
+                         "uncovered": missing, "note": units[row]["note"]}
+            uncovered.extend(f"{row}:{s}" for s in missing)
+        return {"complete": not uncovered, "rows": rows, "uncovered": uncovered,
+                "units_total": sum(len(units[r]["units"]) for r in METHOD_SELF_ATTACK_ROWS)}
+
     def record_audit(self, audit_class: str, status: str, summary: str, *, cycle_id: str | None = None,
                      evidence_refs: Iterable[str] = (), matrix: dict | None = None,
                      actor: str = "controller") -> dict[str, Any]:
@@ -3268,11 +3359,19 @@ class ControlPlane:
                 raise ValueError(f"method-self-attack matrix invalid — {detail.rstrip('; ')}")
         if cycle_id and self.cycle_status(str(cycle_id)) is None:
             raise ValueError(f"audit references unknown cycle: {cycle_id}")
+        coverage = self.critique_self_attack(matrix) if audit_class == "method-self-attack" else None
         with _lock(self.root):
             self._validate_refs(refs)
             payload: dict[str, Any] = {"class": audit_class, "status": status, "summary": summary}
             if matrix is not None:
                 payload["matrix"] = {r: str(matrix[r]).strip() for r in METHOD_SELF_ATTACK_ROWS if r in matrix}
+            if coverage is not None:
+                # Coverage-ledger discipline: the derived units and what the matrix left
+                # unnamed ride on the event (advisory to the audit's warning stream; the
+                # six-row form check stays the enforcement).
+                payload["coverage"] = {"units_total": coverage["units_total"],
+                                       "uncovered": coverage["uncovered"],
+                                       "complete": coverage["complete"]}
             event = self._append_locked("AUDIT_RECORDED", "audit", audit_class, actor=actor,
                                         reason=summary, payload=payload,
                                         evidence_refs=refs, cycle_id=cycle_id)
@@ -3476,6 +3575,19 @@ class ControlPlane:
         self.refresh()
         return event
 
+    def active_cycle(self) -> str | None:
+        """Latest non-closed cycle touched by an event — the run-status `current_cycle` rule.
+
+        The one derivation shared by `refresh()` and the cost-ledger CLI wiring, so
+        `current_cycle` cannot mean two things.
+        """
+        active = {cid for cid in self.all_cycle_ids()
+                  if self.cycle_status(cid) not in {None, "CLOSED"}}
+        for e in reversed(self._read_events()):
+            if e.get("entity_type") == "cycle" and e.get("entity_id") in active:
+                return str(e.get("entity_id"))
+        return None
+
     def refresh(self) -> dict[str, Any]:
         events = self._read_events()
         cycle_ids = self.all_cycle_ids()
@@ -3483,12 +3595,7 @@ class ControlPlane:
         pending_gates = [gid for gid in self.all_gate_ids() if (self.gate(gid) or {}).get("status") != "RESOLVED"]
         active_h = [hid for hid in self.all_hypothesis_ids()
                     if self.hypothesis_status(hid) not in {None, "CLOSED", "VERIFIED", "FALSE_POSITIVE", "NOT_APPLICABLE"}]
-        current = None
-        active_set = set(active_cycles)
-        for e in reversed(events):
-            if e.get("entity_type") == "cycle" and e.get("entity_id") in active_set:
-                current = e.get("entity_id")
-                break
+        current = self.active_cycle()
         if active_cycles:
             status = "ACTIVE"
         elif cycle_ids and all(self.cycle_status(cid) == "CLOSED" for cid in cycle_ids):

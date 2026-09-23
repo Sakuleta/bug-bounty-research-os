@@ -35,7 +35,10 @@ The method attacks itself before closure (`33_METHOD_SELF_ATTACK.md`): all six p
 tool-misread) answered as a six-row matrix, no blanks — "none — reason" counts as
 answered. Machine-checked: `researchctl audit-record method-self-attack PASS "<summary>"
 --matrix matrix.json --evidence <E-id>`; the control plane refuses a missing or blank
-matrix and `tools/audit.py` re-checks the event.
+matrix and `tools/audit.py` re-checks the event. The control plane also derives coverage
+units from the ledger (weak-negative hypotheses, BLOCKED cycles, freshness components)
+and records what the matrix left unnamed on the event; the audit warns on unnamed units —
+the completeness critic, never a closure gate.
 
 ## Closure proof (machine-checked)
 
@@ -123,6 +126,18 @@ A cycle that reached `REVIEWED` must carry, per axis, a review packet with `verd
 Every quote must be a substring (≥ 20 stripped characters) of the content-addressed
 store copy of the referenced evidence — never the living file. Versioned packets are
 held to the rule as errors; legacy packets warn.
+
+The verifier instructions are procedural and live in `.dsh/skills/fresh-verifier/SKILL.md`
+(adapted from Cloudflare's security-audit skill, not imported): refute-don't-confirm
+(a `pass` means the refutation attempt failed, with the attempts recorded),
+fingerprint stability (record the packet digest and the evidence store digests with the
+verdict; a packet that moved materially invalidates the review), and
+material-replacement re-verification (a replaced claim, quote or artifact invalidates
+any earlier pass — re-verify from the fresh packet). Live-target validation on
+authorized targets routes through `researchctl prepare` + the controlled executors;
+`needs_validation`/`BLOCKED` is only for genuine authorization or capability blockers,
+with the blocker named. The binding rules above stay enforced by the control plane and
+the audit; the prompt blocks change how reviewers work, not what the guards accept.
 
 ## Closure decision
 

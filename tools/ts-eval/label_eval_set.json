@@ -1,0 +1,22 @@
+[
+  {
+    "id": "tenant-filter-confirmed",
+    "truth": "CONFIRMED",
+    "transcript": "--- results.md\n## Disposition\nCONFIRMED\n\n## Interpretation\nThe unauthenticated request returned another tenant's row while the own-tenant control returned only own rows; the differential reproduced twice with a clean negative control."
+  },
+  {
+    "id": "waf-block-false-positive",
+    "truth": "FALSE_POSITIVE",
+    "transcript": "--- results.md\n## Disposition\nFALSE_POSITIVE\n\n## Interpretation\nThe 403 was a WAF challenge, not an authorization decision: the same request with a browser user agent succeeded, the application log shows no authorization check, and the response body is the edge block page."
+  },
+  {
+    "id": "secure-behavior-negative",
+    "truth": "NEGATIVE",
+    "transcript": "--- results.md\n## Disposition\nNEGATIVE\n\n## Interpretation\nThe secure behavior held: every crafted request was denied with the same generic error, including the control-shaped payload; the negative control was clean and no bypass was observed."
+  },
+  {
+    "id": "timeout-inconclusive",
+    "truth": "INCONCLUSIVE",
+    "transcript": "--- results.md\n## Disposition\nINCONCLUSIVE\n\n## Interpretation\nThe run timed out before any response arrived and the retry hit a rate limit; no observation either way, so the question is not decided."
+  }
+]

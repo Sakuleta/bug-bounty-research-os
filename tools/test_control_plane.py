@@ -3712,3 +3712,34 @@ check("v8.2 fix M3: the audit errors on a recorded id colliding with a prepared 
       _sub8d.returncode != 0 and "collides" in (_sub8d.stdout + _sub8d.stderr))
 
 print(f"\n{len(passed)} checks passed")
+
+# 28. v8.3 fix: the runtime side ledgers of the new Jev seams (screening, grounding,
+# grounding cache, costs, judgments) sit outside the event ledger's hygiene scan, so the
+# audit re-scans them too — a hand edit cannot smuggle a secret-shaped value past the
+# redaction contract (the review's M2 on the ground path).
+_hgroot = fresh_root()
+_before = run_audit(_hgroot)
+check("a fresh runtime audits clean before any side ledger exists", _before.returncode == 0)
+_secret = "glpat-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+(_hgroot / "11_runtime/grounding.jsonl").write_text(
+    json.dumps({"question": f"is token {_secret} still valid?"}) + "\n")
+_after = run_audit(_hgroot)
+check("a secret-shaped value in grounding.jsonl errors the audit",
+      _after.returncode != 0 and "grounding.jsonl" in _after.stdout + _after.stderr)
+(_hgroot / "11_runtime/grounding.jsonl").write_text("")
+(_hgroot / "11_runtime/grounding-cache").mkdir(exist_ok=True)
+(_hgroot / "11_runtime/grounding-cache/C-0001.json").write_text(
+    json.dumps({"entries": {"k": {"question": f"token {_secret}"}}}) + "\n")
+_after_cache = run_audit(_hgroot)
+check("a secret-shaped value in the grounding cache errors the audit",
+      _after_cache.returncode != 0 and "grounding-cache" in _after_cache.stdout + _after_cache.stderr)
+(_hgroot / "11_runtime/grounding-cache/C-0001.json").write_text("{}\n")
+(_hgroot / "11_runtime/jev-screening.jsonl").write_text(
+    json.dumps({"evidence_ref": "E-000001", "input": f"token {_secret}"}) + "\n")
+_after_screen = run_audit(_hgroot)
+check("a secret-shaped value in the screening ledger errors the audit",
+      _after_screen.returncode != 0 and "jev-screening.jsonl" in _after_screen.stdout + _after_screen.stderr)
+(_hgroot / "11_runtime/jev-screening.jsonl").write_text("")
+_after_clean = run_audit(_hgroot)
+check("the side ledgers audit clean again once the secret-shaped value is removed",
+      _after_clean.returncode == 0)

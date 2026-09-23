@@ -1,0 +1,176 @@
+{
+  "eval": "novelty-duplicate-aid",
+  "block_threshold": 0.4,
+  "baseline_correct": 6,
+  "seam_correct": 7,
+  "ship": true,
+  "rows": [
+    {
+      "id": "same-tenant-export",
+      "truth": "same",
+      "baseline_verdict": "same",
+      "baseline_correct": true,
+      "seam_verdict": "same",
+      "seam_correct": true,
+      "seam_confidence": 1.0,
+      "seam_auto": true,
+      "seam_human_lane": [],
+      "seam_blocked": [
+        "H-0007"
+      ],
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 523,
+        "output_tokens": 39
+      }
+    },
+    {
+      "id": "same-reset-token",
+      "truth": "same",
+      "baseline_verdict": "same",
+      "baseline_correct": true,
+      "seam_verdict": "same",
+      "seam_correct": true,
+      "seam_confidence": 0.99,
+      "seam_auto": true,
+      "seam_human_lane": [],
+      "seam_blocked": [
+        "H-0011"
+      ],
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 508,
+        "output_tokens": 39
+      }
+    },
+    {
+      "id": "same-cache-poison",
+      "truth": "same",
+      "baseline_verdict": "same",
+      "baseline_correct": true,
+      "seam_verdict": "same",
+      "seam_correct": true,
+      "seam_confidence": 1.0,
+      "seam_auto": true,
+      "seam_human_lane": [],
+      "seam_blocked": [
+        "H-0012"
+      ],
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 528,
+        "output_tokens": 39
+      }
+    },
+    {
+      "id": "diff-shared-vocabulary",
+      "truth": "different",
+      "baseline_verdict": "different",
+      "baseline_correct": true,
+      "seam_verdict": "different",
+      "seam_correct": true,
+      "seam_confidence": null,
+      "seam_auto": null,
+      "seam_human_lane": [],
+      "seam_blocked": [],
+      "model": null,
+      "usage": {}
+    },
+    {
+      "id": "diff-auth-vs-csrf",
+      "truth": "different",
+      "baseline_verdict": "different",
+      "baseline_correct": true,
+      "seam_verdict": "different",
+      "seam_correct": true,
+      "seam_confidence": null,
+      "seam_auto": null,
+      "seam_human_lane": [],
+      "seam_blocked": [],
+      "model": null,
+      "usage": {}
+    },
+    {
+      "id": "diff-upload-vs-sqli",
+      "truth": "different",
+      "baseline_verdict": "different",
+      "baseline_correct": true,
+      "seam_verdict": "different",
+      "seam_correct": true,
+      "seam_confidence": null,
+      "seam_auto": null,
+      "seam_human_lane": [],
+      "seam_blocked": [],
+      "model": null,
+      "usage": {}
+    },
+    {
+      "id": "diff-two-tenant-leaks",
+      "truth": "different",
+      "baseline_verdict": "same",
+      "baseline_correct": false,
+      "seam_verdict": "unclear",
+      "seam_correct": false,
+      "seam_confidence": 0.46,
+      "seam_auto": false,
+      "seam_human_lane": [
+        "H-0016"
+      ],
+      "seam_blocked": [
+        "H-0016"
+      ],
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 504,
+        "output_tokens": 39
+      }
+    },
+    {
+      "id": "unclear-reflection",
+      "truth": "unclear",
+      "baseline_verdict": "same",
+      "baseline_correct": false,
+      "seam_verdict": "unclear",
+      "seam_correct": true,
+      "seam_confidence": 0.66,
+      "seam_auto": false,
+      "seam_human_lane": [
+        "H-0017"
+      ],
+      "seam_blocked": [
+        "H-0017"
+      ],
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 489,
+        "output_tokens": 39
+      }
+    },
+    {
+      "id": "unclear-rate-limit",
+      "truth": "unclear",
+      "baseline_verdict": "same",
+      "baseline_correct": false,
+      "seam_verdict": "different",
+      "seam_correct": false,
+      "seam_confidence": 0.88,
+      "seam_auto": true,
+      "seam_human_lane": [],
+      "seam_blocked": [
+        "H-0018"
+      ],
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 480,
+        "output_tokens": 39
+      }
+    }
+  ],
+  "threshold_rule_rederived": {
+    "reason": "v8.3 fix: every below-threshold verdict (same or different) now degrades to unclear and routes to the human lane, matching the README and the seam docstring. The committed model outputs (verdict + confidence) are unchanged; only the code-side threshold mapping was re-applied deterministically to the recorded rows — no new model calls, no fabricated rows.",
+    "threshold": 0.8,
+    "affected_rows": [
+      "diff-two-tenant-leaks"
+    ]
+  }
+}

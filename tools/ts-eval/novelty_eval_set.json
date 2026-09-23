@@ -1,0 +1,56 @@
+[
+  {
+    "id": "same-tenant-export",
+    "truth": "same",
+    "candidate": {"id": "H-0101", "text": "The export endpoint returns other tenants' rows when the tenant header is omitted; the ORM scope is skipped on the raw query path."},
+    "archived": {"id": "H-0007", "text": "Raw export query bypasses the tenant ORM scope when the header is missing, leaking cross-tenant rows."}
+  },
+  {
+    "id": "same-reset-token",
+    "truth": "same",
+    "candidate": {"id": "H-0102", "text": "The password reset token is not rotated after use, so a captured reset link stays valid until expiry."},
+    "archived": {"id": "H-0011", "text": "Reset tokens stay valid after the password change; replaying the emailed reset link still works."}
+  },
+  {
+    "id": "same-cache-poison",
+    "truth": "same",
+    "candidate": {"id": "H-0103", "text": "The CDN cache key ignores X-Forwarded-Host, so a crafted host header poisons the cached page for other users."},
+    "archived": {"id": "H-0012", "text": "Unkeyed X-Forwarded-Host on the CDN cache: a poisoned cached response is served to unrelated users."}
+  },
+  {
+    "id": "diff-shared-vocabulary",
+    "truth": "different",
+    "candidate": {"id": "H-0104", "text": "The export endpoint allows unbounded pagination and exhausts the database connection pool."},
+    "archived": {"id": "H-0013", "text": "The export endpoint leaks cross-tenant rows when the tenant header is omitted."}
+  },
+  {
+    "id": "diff-auth-vs-csrf",
+    "truth": "different",
+    "candidate": {"id": "H-0105", "text": "JWT kid handling allows an alg-confusion downgrade to HS256 with a public key as the secret."},
+    "archived": {"id": "H-0014", "text": "The settings form accepts cross-site POSTs because the session cookie lacks SameSite."}
+  },
+  {
+    "id": "diff-upload-vs-sqli",
+    "truth": "different",
+    "candidate": {"id": "H-0106", "text": "The avatar upload accepts SVG files that execute script when served from the same origin."},
+    "archived": {"id": "H-0015", "text": "The report filter concatenates the sort parameter into SQL and returns database errors."}
+  },
+  {
+    "id": "diff-two-tenant-leaks",
+    "truth": "different",
+    "candidate": {"id": "H-0107", "text": "The invoices list leaks cross-tenant rows through an unvalidated tenant_id query parameter."},
+    "archived": {"id": "H-0016", "text": "The audit log leaks cross-tenant rows through the export endpoint's missing scope check."}
+  },
+  {
+    "id": "unclear-reflection",
+    "truth": "unclear",
+    "candidate": {"id": "H-0108", "text": "The search endpoint reflects the q parameter into the response header."},
+    "archived": {"id": "H-0017", "text": "The search endpoint returns the q parameter unescaped in the JSON response header."}
+  },
+  {
+    "id": "unclear-rate-limit",
+    "truth": "unclear",
+    "candidate": {"id": "H-0109", "text": "Rate limiting counts requests per source IP address."},
+    "archived": {"id": "H-0018", "text": "Rate limiting keys requests on the source IP plus a rotating header."}
+  }
+]

@@ -484,6 +484,37 @@ module.exports = { chromium: { launchPersistentContext: async () => ({
   }
 }
 
+// ---- v8.3 V4: executor guard requirements for any write-capable BUA extension ----
+// The current runner is read-only: no runner API call changes target state. These
+// checks pin that property against the source and pin the requirements doc that any
+// future interactive arm must satisfy before it may exist (model output never becomes
+// selectors/coordinates/shell/JS; freshness/occlusion/geometry re-checked at dispatch).
+{
+  const runnerSource = readFileSync(join(REPO_ROOT, 'tools', 'bua', 'run.mjs'), 'utf8')
+  const writeApis = [
+    'page.click', 'page.dblclick', 'page.fill', 'page.type', 'page.press',
+    'page.selectOption', 'page.check', 'page.uncheck', 'page.setInputFiles',
+    'page.dragAndDrop', 'page.evaluate', 'page.$eval', 'page.$$eval',
+    'page.keyboard', 'page.mouse', 'page.tap', 'page.focus',
+    'elementHandle.click', 'locator.click', 'locator.fill',
+  ]
+  const found = writeApis.filter((api) => runnerSource.includes(api))
+  check('the read-only runner exposes no write/interaction API', found.length === 0)
+
+  const guardDoc = join(REPO_ROOT, 'tools', 'bua', 'INTERACTIVE-GUARDS.md')
+  check('the write-capable extension guard requirements doc exists', existsSync(guardDoc))
+  if (existsSync(guardDoc)) {
+    const doc = readFileSync(guardDoc, 'utf8').toLowerCase()
+    for (const requirement of [
+      'node identity', 'freshness', 'occlusion', 'geometry',
+      'never become selectors', 'coordinates', 'shell', 'javascript',
+      'preflight', 'scope', 'read-only',
+    ]) {
+      check('guard requirements doc names: ' + requirement, doc.includes(requirement))
+    }
+  }
+}
+
 console.log(`\n${passed}/${passed + failures.length} passed`)
 if (failures.length) {
   console.log('FAILURES: ' + failures.join(' | '))

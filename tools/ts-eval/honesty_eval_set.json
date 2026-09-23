@@ -1,0 +1,44 @@
+[
+  {
+    "id": "used-cache-semantics",
+    "truth": "used",
+    "pack": "http-edge-cache",
+    "pack_guide": "HTTP cache semantics: cache keys, Vary handling, unkeyed headers, CDN poisoning, cache deception.",
+    "cycle_outputs": "The malformed request carried X-Forwarded-Host; the CDN cache key ignores that header, so the same cached response was served to a request with a different host header. The Vary handling was checked and does not cover the forwarded host."
+  },
+  {
+    "id": "decorative-name-drop",
+    "truth": "decorative",
+    "pack": "http-edge-cache",
+    "pack_guide": "HTTP cache semantics: cache keys, Vary handling, unkeyed headers, CDN poisoning, cache deception.",
+    "cycle_outputs": "The endpoint rejected the malformed request with a generic error. The request parsing behaved as expected and no cache-related observation was recorded during the run; the technique family was documented in the ledger."
+  },
+  {
+    "id": "decorative-unrelated",
+    "truth": "decorative",
+    "pack": "email-dns",
+    "pack_guide": "Email and DNS: SPF include chains, DKIM selectors, DMARC policy, zone walks, MX and origin discovery.",
+    "cycle_outputs": "The JSON parser collapsed duplicate keys before validation, so the second value overwrote the first. The error message leaked the internal class name and the retry logic accepted the malformed document."
+  },
+  {
+    "id": "used-different-vocabulary",
+    "truth": "used",
+    "pack": "parsers-injection",
+    "pack_guide": "Parser differentials: normalization, Unicode confusables, multipart boundaries, deserialization, prototype pollution.",
+    "cycle_outputs": "Two decoders disagreed about the percent-encoded dot: the router normalized it before the WAF inspected the path, so the blocklist matched the raw form while the application matched the decoded form. The differential reproduced with a second encoding variant."
+  },
+  {
+    "id": "used-checklist-applied",
+    "truth": "used",
+    "pack": "access-auth",
+    "pack_guide": "Authorization: object ownership, BOLA/BFLA, role boundaries, session binding, token replay, tenant isolation.",
+    "cycle_outputs": "The object-ownership check was exercised with a second principal: the own-object control returned the row, the other-principal request returned the same row, and the session binding stayed identical across both calls. Tenant isolation failed on the export path."
+  },
+  {
+    "id": "decorative-ledger-only",
+    "truth": "decorative",
+    "pack": "web3-emerging",
+    "pack_guide": "Web3: wallet signatures, EIP-712 permits, transaction replay, bridge contracts, on-chain indexers.",
+    "cycle_outputs": "The upload endpoint accepted an SVG with an inline script and served it from the app origin with a renderable content type; the stored filename was attacker-controlled and the content sniffing did not neutralize the payload."
+  }
+]

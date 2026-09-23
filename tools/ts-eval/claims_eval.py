@@ -57,6 +57,15 @@ def guard_live(force: bool, root: Path) -> None:
                          f'external_judgment: "ALLOWED" in the workspace passed as --root')
     if not os.environ.get('TYPESAFE_API_KEY'):
         raise SystemExit('TYPESAFE_API_KEY missing')
+    # Screening is a precondition for external judgment (v8.3 V2/MF-1): the claims
+    # seam refuses unscreened evidence, so a live rerun needs clean screening rows.
+    from ts_screen import screening_state
+    refs = sorted({c['evidence_ref'] for c in PACKET['claims']})
+    blocked = [ref for ref in refs if not screening_state(root, ref)['clear']]
+    if blocked:
+        reasons = '; '.join(f"{ref}: {screening_state(root, ref)['reason']}" for ref in blocked)
+        raise SystemExit(f'claims_eval: evidence not screened clean ({reasons}) — run '
+                         f'`researchctl screen <ref>` for each ref first')
 
 
 def write_results(path: Path, data, *, force: bool) -> bool:

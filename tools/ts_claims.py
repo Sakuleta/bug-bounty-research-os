@@ -14,10 +14,11 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from control_plane import ControlPlane, external_judgment_allowed  # noqa: E402
-from ts_http import model_name, post_json  # noqa: E402
+from ts_http import API, model_name, post_json, validate_choice  # noqa: E402
 
 AUTO_ACCEPT = 0.8
 EXCERPT_CAP = 6000
@@ -53,18 +54,31 @@ def _unavailable(note: str, auto_accept: float) -> dict:
             "model": None, "usage": {}, "note": note}
 
 
-def evidence_excerpt(root: Path, ref: str, cap: int = EXCERPT_CAP) -> str:
+def evidence_excerpt(root: Path, ref: str, cap: int = EXCERPT_CAP, *,
+                     constrained: bool = True) -> str:
     """Registered evidence text, bounded, read from the content-addressed store copy.
 
     The store copy under 11_runtime/evidence-store/ is the registered artifact (audits
     verify it; review quotes must match it); the living path is mutable and must never
     be what the seam reasons over. A legacy record without a store_path falls back to
     its readable living path, never a guessed filename.
+
+    With `constrained=True` (the default) screening is a precondition: a flagged ref
+    reads back as the constrained quarantine view (flag + quarantine pointer, text
+    withheld) and an unscreened — or screened-without-verdict — ref reads back as the
+    explicit withheld banner. Only a clean screening row returns the store copy, so
+    target-controlled content never reaches external judgment unscreened. Screening
+    itself reads with `constrained=False` so the store copy is what gets screened.
     """
     index = ControlPlane(root).evidence_index()
     meta = index.get(ref)
     if not meta:
         raise ValueError(f"unknown evidence ref: {ref}")
+    if constrained:
+        from ts_screen import constrained_view  # lazy: ts_screen imports this module
+        view = constrained_view(Path(root), ref)
+        if view is not None:
+            return view
     store_rel = str(meta.get("store_path") or "")
     path = (root / store_rel) if store_rel else (root / str(meta.get("path", "")))
     if not path.is_file():
@@ -218,11 +232,83 @@ def _verify_question(claim: str, verdict: str, evidence: str) -> dict:
 
 
 def _judgment_digest(claim: str, evidence: str) -> str:
-    """Canonical input digest for one judgment (replay compares it first)."""
+    """Canonical input digest for one claim judgment (replay compares it first)."""
+    return judgment_digest({"claim": claim, "evidence": evidence})
+
+
+def judgment_digest(payload: Any) -> str:
+    """Canonical input digest over any JSON-able judgment payload.
+
+    The one digest used by every seam's judgment record (claims, screening, grounding,
+    novelty, ranking, labeling, honesty): sorted keys + compact separators, so the same
+    input always hashes the same and a replay can detect drift before comparing verdicts.
+    """
     import hashlib
-    return hashlib.sha256(json.dumps({"claim": claim, "evidence": evidence},
-                                     ensure_ascii=False, sort_keys=True,
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True,
                                      separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def judgment_posture(root: Path, *, live: bool = True) -> str:
+    """The recorded egress posture for a judgment call: `on`, or `off: <why>`.
+
+    Never a silent default: every seam result and every judgment record carries this
+    beside the endpoint, so a reader can tell whether external judgment was live.
+    """
+    if not live:
+        return "off: live=False"
+    if not external_judgment_allowed(root):
+        return "off: external judgment denied"
+    return "on"
+
+
+def judgment_record(*, seam: str, input_payload: Any, model: Any = None,
+                    verdict: Any = None, confidence: Any = None, endpoint: str = API,
+                    posture: str = "on", cycle_id: str | None = None,
+                    timestamp: str | None = None, **extra: Any) -> dict:
+    """The one replayable judgment shape: input digest + input snapshot, model, verdict,
+    confidence, timestamp, endpoint and policy posture (plus seam-specific extras).
+
+    Replay re-runs the stored `input` through a mocked provider and compares the guard
+    decisions; the snapshot is the redacted egress copy, never raw workspace content.
+    """
+    return {"seam": seam, "input_digest": judgment_digest(input_payload),
+            "input": input_payload, "model": model, "verdict": verdict,
+            "confidence": confidence, "timestamp": timestamp or _now_iso(),
+            "endpoint": endpoint, "posture": posture, "cycle_id": cycle_id, **extra}
+
+
+def read_judgments(root: Path, *, path: str | Path | None = None,
+                   seam: str | None = None) -> list[dict]:
+    """Stored judgment records, optionally one seam's; malformed lines are skipped."""
+    ledger = Path(path) if path is not None else Path(root) / JUDGMENTS_REL
+    rows: list[dict] = []
+    if not ledger.is_file():
+        return rows
+    for line in ledger.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        if seam is not None and record.get("seam") != seam:
+            continue
+        rows.append(record)
+    return rows
+
+
+def verified_records(root: Path, *, seam: str, path: str | Path | None = None) -> tuple[list[dict], int]:
+    """(records whose stored input matches its digest, drifted count) for one seam."""
+    kept: list[dict] = []
+    drifted = 0
+    for record in read_judgments(root, path=path, seam=seam):
+        if judgment_digest(record.get("input")) == record.get("input_digest"):
+            kept.append(record)
+        else:
+            drifted += 1
+    return kept, drifted
 
 
 def _now_iso() -> str:
@@ -238,6 +324,24 @@ def record_judgments(root: Path, records: list[dict]) -> Path:
         for record in records:
             fh.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
     return path
+
+
+def try_record_judgments(root: Path, records: list[dict]) -> dict:
+    """Append judgment records without letting a disk error eat the paid result.
+
+    Returns {"judgments_recorded": bool} plus `judgments_error` when the write failed —
+    the v8.2 B10 standard: replay coverage must never be lost silently, and the seam
+    result still returns.
+    """
+    if not records:
+        return {"judgments_recorded": True}
+    try:
+        record_judgments(root, records)
+    except OSError as exc:
+        return {"judgments_recorded": False,
+                "judgments_error": (f"judgment ledger write failed ({exc}) — "
+                                    "replay coverage lost")}
+    return {"judgments_recorded": True}
 
 
 def replay_judgments(root: Path, *, client, path: str | Path | None = None) -> dict:
@@ -265,6 +369,10 @@ def replay_judgments(root: Path, *, client, path: str | Path | None = None) -> d
                 continue
             if not isinstance(record, dict):
                 continue
+            # The ledger is shared with the V2/V6 seams (their records carry a `seam`
+            # key): claims replay only reads claim judgments, never a foreign seam's.
+            if record.get("seam") not in (None, "claims"):
+                continue
             replayed += 1
             ref = str(record.get("evidence_ref") or "")
             try:
@@ -286,7 +394,10 @@ def replay_judgments(root: Path, *, client, path: str | Path | None = None) -> d
             }}
             resp = client({"claim": record.get("claim"), "evidence": evidence}, questions)
             answer = (resp.get("answers") or {}).get("relation") or {}
-            verdict = str(answer.get("choice", ""))
+            problem = validate_choice(answer, VALID_CHOICES)
+            # A rejected answer replays as the same invalid_choice label the write path
+            # recorded, so replay compares guard decisions instead of raw strings.
+            verdict = str(answer.get("choice", "")) if problem is None else INVALID_CHOICE
             try:
                 confidence = float(answer.get("confidence", 0.0) or 0.0)
             except (TypeError, ValueError):
@@ -298,7 +409,10 @@ def replay_judgments(root: Path, *, client, path: str | Path | None = None) -> d
                                 "evidence": evidence},
                                _verify_question(str(record.get("claim") or ""), verdict, evidence))
                 vanswer = (vresp.get("answers") or {}).get("verify") or {}
-                replayed_verify = str(vanswer.get("choice", "")) == "supported"
+                # The same fail-closed rule as the write path: a rejected verify answer
+                # is not-supported, so replay compares guard decisions, not raw strings.
+                replayed_verify = (validate_choice(vanswer, VERIFY_CHOICES) is None
+                                   and str(vanswer.get("choice", "")) == "supported")
             auto = (verdict in VALID_CHOICES and confidence >= float(record.get("auto_accept", AUTO_ACCEPT))
                     and (replayed_verify if stored_verify is not None else True))
             if (verdict == record.get("verdict") and auto == record.get("auto")
@@ -329,14 +443,20 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
     `passage_index` / `triage_confidence`; both confidences must clear auto_accept.
     With `verify=True` (the `researchctl claims-check` step) each relation verdict is
     then judged supportable-or-not against the cited evidence by a second Choice
-    question; an `unsupported` verdict retries the relation once (bounded), and a
-    verdict that never verifies is kept but flagged (`auto` False with a
-    verify-clause note). Live judgments are appended to 11_runtime/jev-judgments.jsonl
-    (input digest, model, verdict, confidence, timestamp) for offline replay.
+    question; an `unsupported` verdict — and any verify answer `validate_choice`
+    rejected (fail closed) — retries the relation once (bounded), and a verdict that
+    never verifies is kept but flagged (`auto` False with a verify-clause note).
+    Screening is a precondition: a claim whose evidence is not screened clean (never
+    screened, flagged, or screened without a verdict under the DENIED-default gate) is
+    recorded with `verdict: None` and the reason under `note` — no model call, no raw
+    excerpt, counted under `summary.unscreened`. Live judgments are appended to
+    11_runtime/jev-judgments.jsonl (input digest, model, verdict, confidence,
+    timestamp) for offline replay.
     """
     claims = packet.get("claims") or []
     if not isinstance(claims, list) or not claims:
         raise ValueError("claims packet needs a non-empty 'claims' list")
+    from ts_screen import screening_state  # lazy: ts_screen imports this module
     key = os.environ.get("TYPESAFE_API_KEY", "")
     if not live:
         return _unavailable(NO_KEY_NOTE, auto_accept)
@@ -349,12 +469,24 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
     judgments: list[dict] = []
     usage_in = usage_out = 0
     resp = None
+    unscreened = 0
     for i, item in enumerate(claims, 1):
         cid = str(item.get("id") or f"C-{i}")
         claim = str(item.get("claim", "")).strip()
         ref = str(item.get("evidence_ref", "")).strip()
         if not claim or not ref:
             raise ValueError(f"claim {cid} needs both 'claim' and 'evidence_ref'")
+        gate = screening_state(root, ref)
+        if not gate["clear"]:
+            # Fail closed at the consumption seam: the text never egresses and no
+            # verdict is invented; the claim stays visible with the blocking reason.
+            unscreened += 1
+            results.append({
+                "id": cid, "claim": claim, "evidence_ref": ref,
+                "verdict": None, "confidence": None, "auto": False, "probabilities": {},
+                "note": f"evidence withheld from external judgment: {gate['reason']}",
+            })
+            continue
         excerpt = evidence_excerpt(root, ref)
         evidence = excerpt
         extra: dict = {}
@@ -369,10 +501,12 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
                 usage = tresp.get("usage", {})
                 usage_in += int(usage.get("input_tokens", 0) or 0)
                 usage_out += int(usage.get("output_tokens", 0) or 0)
-                t_answer = tresp["answers"]["passage"]
+                t_answer = (tresp.get("answers") or {}).get("passage") or {}
                 t_conf = float(t_answer.get("confidence", 0.0) or 0.0)
                 choice = str(t_answer.get("choice", ""))
-                if choice == NONE:
+                problem = validate_choice(t_answer, [str(i) for i in range(1, len(passages) + 1)]
+                                          + [NONE])
+                if choice == NONE and problem is None:
                     results.append({
                         "id": cid, "claim": claim, "evidence_ref": ref,
                         "verdict": "says_nothing", "confidence": t_conf,
@@ -382,12 +516,13 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
                     })
                     resp = tresp
                     continue
-                if choice.isdigit() and 1 <= int(choice) <= len(passages):
+                if choice.isdigit() and 1 <= int(choice) <= len(passages) and problem is None:
                     evidence = passages[int(choice) - 1]
                     extra.update(passage_index=int(choice), triage_confidence=t_conf,
                                  triage_auto=t_conf >= auto_accept)
                 else:
-                    extra["note"] = (f"triage: unrecognized selection {choice!r}; "
+                    detail = f" ({problem})" if problem else ""
+                    extra["note"] = (f"triage: unrecognized selection {choice!r}{detail}; "
                                      "the relation ran on the full excerpt")
         questions = {"relation": {
             "type": "choice",
@@ -401,16 +536,18 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
         }}
         verify_state: dict = {}
         attempts = 0
+        invalid_reason: str | None = None
         while True:
             attempts += 1
             resp = call({"claim": claim, "evidence": evidence}, questions)
             usage = resp.get("usage", {})
             usage_in += int(usage.get("input_tokens", 0) or 0)
             usage_out += int(usage.get("output_tokens", 0) or 0)
-            answer = resp["answers"]["relation"]
+            answer = (resp.get("answers") or {}).get("relation") or {}
             confidence = float(answer.get("confidence", 0.0) or 0.0)
             choice = str(answer.get("choice", ""))
-            valid = choice in VALID_CHOICES
+            invalid_reason = validate_choice(answer, VALID_CHOICES)
+            valid = invalid_reason is None
             if not verify or not valid:
                 break
             vresp = call({"claim": claim, "verdict": choice, "evidence": evidence},
@@ -423,9 +560,15 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
                 vconfidence = float(vanswer.get("confidence", 0.0) or 0.0)
             except (TypeError, ValueError):
                 vconfidence = 0.0
-            supported = str(vanswer.get("choice", "")) == "supported"
+            vproblem = validate_choice(vanswer, VERIFY_CHOICES)
+            # Fail closed: a verify answer `validate_choice` rejected is never a
+            # supported verdict — the raw choice does not decide when validation
+            # refused the answer (the reason stays visible on the verify state).
+            supported = vproblem is None and str(vanswer.get("choice", "")) == "supported"
             verify_state = {"supported": supported, "confidence": vconfidence,
                             "attempts": attempts}
+            if vproblem:
+                verify_state["invalid_choice"] = vproblem
             if supported or attempts >= VERIFY_MAX_RELATION_ATTEMPTS:
                 break
         result = {
@@ -441,7 +584,9 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
                 result["note"] = ("verify-clause: the cited evidence does not support "
                                   f"the {choice} verdict after {attempts} attempts; flagged for review")
         if not valid:
-            result["note"] = f"unrecognized relation choice {choice!r}; flagged for review"
+            result["note"] = (f"unrecognized relation choice {choice!r}"
+                              + (f" ({invalid_reason})" if invalid_reason else "")
+                              + "; flagged for review")
         result.update(extra)
         results.append(result)
         judgments.append({
@@ -460,17 +605,14 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
                        "supports": sum(1 for r in results if r["verdict"] == "supports"),
                        "contradicts": sum(1 for r in results if r["verdict"] == "contradicts"),
                        "says_nothing": sum(1 for r in results if r["verdict"] == "says_nothing"),
-                       "invalid_choice": sum(1 for r in results if r["verdict"] == INVALID_CHOICE)},
-           "model": resp.get("model"), "usage": {"input_tokens": usage_in, "output_tokens": usage_out}}
-    try:
-        record_judgments(root, judgments)
-    except OSError as exc:
-        # Replay coverage must never be lost silently: the judgments still return,
-        # but the output says the ledger write failed so the gap is visible.
-        out["judgments_recorded"] = False
-        out["judgments_error"] = f"judgment ledger write failed ({exc}) — replay coverage lost"
-    else:
-        out["judgments_recorded"] = True
+                       "invalid_choice": sum(1 for r in results if r["verdict"] == INVALID_CHOICE),
+                       "unscreened": unscreened},
+           "model": resp.get("model") if isinstance(resp, dict) else None,
+           "usage": {"input_tokens": usage_in, "output_tokens": usage_out}}
+    # Replay coverage must never be lost silently: a failed write surfaces on the
+    # result while the paid judgments still return (v8.2 B10), and blocked claims
+    # (nothing judged) create no empty ledger file.
+    out.update(try_record_judgments(root, judgments))
     return out
 
 

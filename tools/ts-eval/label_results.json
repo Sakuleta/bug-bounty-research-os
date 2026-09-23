@@ -1,0 +1,101 @@
+{
+  "eval": "technique-labeling",
+  "baseline_rules": [
+    [
+      "CONFIRMED",
+      [
+        "confirmed",
+        "reproduced",
+        "returned another",
+        "succeeded",
+        "bypass"
+      ]
+    ],
+    [
+      "FALSE_POSITIVE",
+      [
+        "false positive",
+        "noise",
+        "waf",
+        "challenge"
+      ]
+    ],
+    [
+      "NEGATIVE",
+      [
+        "held",
+        "denied",
+        "no bypass"
+      ]
+    ]
+  ],
+  "baseline_correct": 2,
+  "seam_correct": 4,
+  "ship": true,
+  "rows": [
+    {
+      "id": "tenant-filter-confirmed",
+      "truth": "CONFIRMED",
+      "baseline_label": "CONFIRMED",
+      "baseline_correct": true,
+      "seam_label": "CONFIRMED",
+      "seam_correct": true,
+      "seam_family": "other",
+      "seam_has_learning": 0.61,
+      "seam_notes": {},
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 649,
+        "output_tokens": 110
+      }
+    },
+    {
+      "id": "waf-block-false-positive",
+      "truth": "FALSE_POSITIVE",
+      "baseline_label": "CONFIRMED",
+      "baseline_correct": false,
+      "seam_label": "FALSE_POSITIVE",
+      "seam_correct": true,
+      "seam_family": "other",
+      "seam_has_learning": 0.76,
+      "seam_notes": {},
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 662,
+        "output_tokens": 111
+      }
+    },
+    {
+      "id": "secure-behavior-negative",
+      "truth": "NEGATIVE",
+      "baseline_label": "CONFIRMED",
+      "baseline_correct": false,
+      "seam_label": "NEGATIVE",
+      "seam_correct": true,
+      "seam_family": "other",
+      "seam_has_learning": 0.73,
+      "seam_notes": {},
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 650,
+        "output_tokens": 110
+      }
+    },
+    {
+      "id": "timeout-inconclusive",
+      "truth": "INCONCLUSIVE",
+      "baseline_label": "INCONCLUSIVE",
+      "baseline_correct": true,
+      "seam_label": "INCONCLUSIVE",
+      "seam_correct": true,
+      "seam_family": "other",
+      "seam_has_learning": 0.08,
+      "seam_notes": {},
+      "model": "jev-1.13.0",
+      "usage": {
+        "input_tokens": 647,
+        "output_tokens": 111
+      }
+    }
+  ]
+}

@@ -189,21 +189,25 @@ POLICY_ALLOW = policy_root('external_judgment: "ALLOWED"\n')
 POLICY_DENY = policy_root('external_judgment: "DENIED"  # default posture\n')
 POLICY_UNREADABLE = policy_root(unreadable=True)
 
-stub = lambda state, questions: {  # noqa: E731
-    'model': 'stub-1',
-    'answers': {'first_pack': {'type': 'choice', 'choice': 'realtime', 'confidence': 0.91,
-                               'probabilities': {'realtime': 0.7, 'api-protocols': 0.25, 'none': 0.05}}},
-    'usage': {'input_tokens': 10, 'output_tokens': 2},
-}
+def triage_stub(choice: str, confidence: float, weights: dict) -> object:
+    """A valid triage answer: the probability map covers the whole answer space
+    (every candidate pack + none); unspecified packs sit at 0.0."""
+    def client(state, questions):
+        probs = {name: 0.0 for name in state['candidate_pack']}
+        probs['none'] = 0.0
+        probs.update(weights)
+        return {'model': 'stub-1',
+                'answers': {'first_pack': {'type': 'choice', 'choice': choice,
+                                           'confidence': confidence, 'probabilities': probs}},
+                'usage': {'input_tokens': 10, 'output_tokens': 2}}
+    return client
+
+
+stub = triage_stub('realtime', 0.91, {'realtime': 0.7, 'api-protocols': 0.25, 'none': 0.05})
 ranked = triage_suggest(POLICY_ALLOW, 'realtime socket subscription leak', client=stub)
 check('triage ranks via the client', ranked['source'] == 'typesafe' and ranked['suggested'] == 'realtime'
       and ranked['ranked'][0] == 'realtime' and ranked['probabilities']['api-protocols'] == 0.25)
-none_stub = lambda state, questions: {  # noqa: E731
-    'model': 'stub-1',
-    'answers': {'first_pack': {'type': 'choice', 'choice': 'none', 'confidence': 0.8,
-                               'probabilities': {'realtime': 0.4, 'none': 0.6}}},
-    'usage': {},
-}
+none_stub = triage_stub('none', 0.8, {'realtime': 0.4, 'none': 0.6})
 check('triage none means no pack', triage_suggest(POLICY_ALLOW, 'unknown thing', client=none_stub)['suggested'] is None)
 fallback = triage_suggest(V6ROOT, 'realtime socket subscription leak', live=False)
 check('triage falls back to IDF without live',
@@ -236,6 +240,17 @@ for d in ['00_control', '02_surface', '03_hypotheses/active', '03_hypotheses/arc
 (croot / '10_learning/assumptions.yaml').write_text('assumptions: []\n')
 (croot / 'proof.txt').write_text('HTTP 200 observed with title Example Domain\n')
 ControlPlane(croot).register_evidence('proof.txt', kind='raw', source='test')
+
+
+def screen_clean(root, ref):
+    """Record a clean screening verdict (v8.3: screening is a precondition for the
+    external-judgment consumption path — the claims seam refuses unscreened evidence)."""
+    from ts_screen import screen_evidence
+    return screen_evidence(root, ref, client=lambda s, q: {
+        'model': 'stub-screen',
+        'answers': {name: {'type': 'noul', 'noul': 0.01} for name in q},
+        'usage': {}})
+screen_clean(croot, 'E-000001')
 stub_claims = lambda state, questions: {  # noqa: E731
     'model': 'stub-1',
     'answers': {'relation': {'type': 'choice', 'choice': 'supports', 'confidence': 0.9,
@@ -370,6 +385,7 @@ para2 = ' '.join(['The admin console accepted the anonymous request and rendered
                   'without any authentication challenge.'] * 4)
 (croot / 'paragraphs.txt').write_text(para1 + '\n\n' + para2 + '\n')
 ControlPlane(croot).register_evidence('paragraphs.txt', kind='raw', source='test')
+screen_clean(croot, 'E-000002')
 
 small = 'alpha beta gamma delta epsilon zeta eta theta iota kappa'
 oversized = 'B' * 1600
@@ -414,7 +430,7 @@ def none_triage_client(state, questions):
     if 'passage' in questions:
         return {'model': 'stub-1',
                 'answers': {'passage': {'choice': 'none', 'confidence': 0.88,
-                                        'probabilities': {'none': 0.88}}},
+                                        'probabilities': {'1': 0.06, '2': 0.06, 'none': 0.88}}},
                 'usage': {}}
     raise AssertionError('the relation question must not run after a none triage')
 
@@ -774,6 +790,7 @@ check('the cap reports the dropped-passage count',
 paras4 = '\n\n'.join(['Paragraph %d ' % i + 'y' * 489 for i in range(4)])
 (croot / 'passages4.txt').write_text(paras4 + '\n')
 ControlPlane(croot).register_evidence('passages4.txt', kind='raw', source='test')
+screen_clean(croot, 'E-000003')
 draft_capped = Path(tempfile.mkdtemp()) / 'capped.md'
 draft_capped.write_text("The four paragraphs each state an observation `E-000003`.\n")
 capped_calls: list = []
@@ -876,6 +893,7 @@ for d in ['00_control', '02_surface', '03_hypotheses/active', '03_hypotheses/arc
 (_w14root / '10_learning/assumptions.yaml').write_text('assumptions: []\n')
 (_w14root / 'proof.txt').write_text('HTTP 200 observed with title Example Domain\n')
 ControlPlane(_w14root).register_evidence('proof.txt', kind='raw', source='test')
+screen_clean(_w14root, 'E-000001')
 _w14_calls: list = []
 
 
@@ -920,6 +938,7 @@ for d in ['00_control', '11_runtime']:
 (_w14rej / '11_runtime/events.jsonl').write_text('')
 (_w14rej / 'proof.txt').write_text('HTTP 200 observed with title Example Domain\n')
 ControlPlane(_w14rej).register_evidence('proof.txt', kind='raw', source='test')
+screen_clean(_w14rej, 'E-000001')
 _w14_reject = _w14_check(_w14rej, {'claims': [{'id': 'v2', 'claim': 'HTTP 200 was observed',
                                               'evidence_ref': 'E-000001'}]},
                          client=_w14_reject_stub, verify=True)
@@ -971,5 +990,224 @@ check('backlog B10: a judgment-ledger write failure is surfaced, not swallowed',
       and 'judgment' in str(_w14_lost.get('judgments_error', '')).lower())
 check('backlog B10: the happy path reports recorded judgments',
       _w14_out.get('judgments_recorded') is True)
+
+# 8. v8.3 V4: validate_choice — a model answer is validated before it becomes a value.
+#    Rejection is never coercion: callers fall back or flag, they never take the bad value.
+from ts_http import validate_choice  # noqa: E402
+
+CHOICES3 = ('supports', 'contradicts', 'says_nothing')
+check('validate_choice accepts a full simplex whose choice is the argmax',
+      validate_choice({'choice': 'supports',
+                       'probabilities': {'supports': 0.9, 'contradicts': 0.05, 'says_nothing': 0.05}},
+                      CHOICES3) is None)
+check('validate_choice rejects a partial probability map: the map must be a simplex over '
+      'the whole answer space (fix for the blessed relaxation)',
+      'cover' in str(validate_choice({'choice': 'supports', 'probabilities': {'supports': 0.9}},
+                                     CHOICES3))
+      and 'cover' in str(validate_choice({'choice': 'supports',
+                                          'probabilities': {'supports': 0.9, 'contradicts': 0.05}},
+                                         CHOICES3)))
+check('validate_choice accepts absent probabilities and the none option',
+      validate_choice({'choice': 'none'}, ('none', 'pack-a')) is None)
+check('validate_choice rejects a choice outside the answer space',
+      'not one of' in str(validate_choice({'choice': 'maybe'}, CHOICES3)))
+check('validate_choice rejects a simplex violation',
+      'simplex' in str(validate_choice({'choice': 'supports',
+                                        'probabilities': {'supports': 0.5, 'contradicts': 0.2,
+                                                          'says_nothing': 0.1}}, CHOICES3)))
+check('validate_choice rejects an argmax mismatch',
+      'argmax' in str(validate_choice({'choice': 'contradicts',
+                                       'probabilities': {'supports': 0.8, 'contradicts': 0.15,
+                                                         'says_nothing': 0.05}}, CHOICES3)))
+check('validate_choice tolerates float noise around the simplex',
+      validate_choice({'choice': 'supports', 'probabilities': {'supports': 0.6,
+                                                               'contradicts': 0.2000000001,
+                                                               'says_nothing': 0.1999999999}},
+                      CHOICES3) is None)
+check('validate_choice tolerates ties at the argmax',
+      validate_choice({'choice': 'contradicts', 'probabilities': {'supports': 0.5, 'contradicts': 0.5,
+                                                                  'says_nothing': 0.0}},
+                      CHOICES3) is None)
+check('validate_choice rejects negative, NaN and non-numeric probabilities',
+      validate_choice({'choice': 'supports', 'probabilities': {'supports': -0.5, 'contradicts': 1.5}},
+                      CHOICES3) is not None
+      and validate_choice({'choice': 'supports', 'probabilities': {'supports': float('nan')}},
+                          CHOICES3) is not None
+      and validate_choice({'choice': 'supports', 'probabilities': {'supports': 'high'}},
+                          CHOICES3) is not None)
+check('validate_choice rejects a non-object answer',
+      validate_choice(None, CHOICES3) is not None and validate_choice('supports', CHOICES3) is not None)
+check('validate_choice rejects a choice missing from its own probability map',
+      validate_choice({'choice': 'supports', 'probabilities': {'contradicts': 0.9}}, CHOICES3) is not None)
+
+# The triage seam rejects an invalid response to the deterministic IDF fallback with a
+# visible reason; usage is still real (tokens were spent) and never a value.
+bad_triage = lambda state, questions: {  # noqa: E731
+    'model': 'stub-bad',
+    'answers': {'first_pack': {'choice': 'not-a-pack', 'confidence': 0.99,
+                               'probabilities': {'not-a-pack': 1.0}}},
+    'usage': {'input_tokens': 3, 'output_tokens': 1},
+}
+rejected_triage = triage_suggest(POLICY_ALLOW, 'realtime socket subscription leak', client=bad_triage)
+check('triage rejects an invalid model response to the IDF fallback with the reason',
+      rejected_triage['source'] == 'idf' and rejected_triage['suggested'] == rejected_triage['ranked'][0]
+      and 'rejected' in rejected_triage.get('note', '')
+      and rejected_triage['usage'] == {'input_tokens': 3, 'output_tokens': 1})
+check('triage rejects a response with no answers instead of raising',
+      triage_suggest(POLICY_ALLOW, 'realtime socket subscription leak',
+                     client=lambda state, questions: {'model': 'stub-bad', 'usage': {}})['source'] == 'idf')
+
+# The claims seam flags an argmax-mismatched relation answer as invalid_choice.
+mismatch_client = lambda state, questions: {  # noqa: E731
+    'model': 'stub-1',
+    'answers': {'relation': {'type': 'choice', 'choice': 'contradicts', 'confidence': 0.99,
+                             'probabilities': {'supports': 0.9, 'contradicts': 0.05,
+                                               'says_nothing': 0.05}}},
+    'usage': {},
+}
+mismatch_out = check_claims(croot, {'claims': [{'id': 'c8', 'claim': 'x', 'evidence_ref': 'E-000001'}]},
+                            client=mismatch_client)
+check('an argmax-mismatched relation answer is flagged invalid_choice, never surfaced',
+      mismatch_out['results'][0]['verdict'] == 'invalid_choice'
+      and mismatch_out['results'][0]['auto'] is False
+      and 'argmax' in mismatch_out['results'][0].get('note', ''))
+
+# Replay normalizes a rejected answer to invalid_choice too, so an invalid stored record
+# replays deterministically instead of reporting a spurious drift/mismatch.
+invroot = Path(tempfile.mkdtemp())
+for d in ['00_control', '11_runtime']:
+    (invroot / d).mkdir(parents=True, exist_ok=True)
+(invroot / '00_control/engagement.yaml').write_text('external_judgment: "ALLOWED"\n')
+(invroot / '11_runtime/events.jsonl').write_text('')
+(invroot / 'proof.txt').write_text('HTTP 200 observed with title Example Domain\n')
+ControlPlane(invroot).register_evidence('proof.txt', kind='raw', source='test')
+screen_clean(invroot, 'E-000001')
+_w14_check(invroot, {'claims': [{'id': 'inv1', 'claim': 'HTTP 200 was observed',
+                                 'evidence_ref': 'E-000001'}]}, client=mismatch_client)
+_replay_inv = _w14_replay(invroot, client=mismatch_client)
+check('replay reproduces an invalid_choice guard decision deterministically',
+      _replay_inv['replayed'] == 1 and _replay_inv['matched'] == 1
+      and _replay_inv['mismatched'] == 0)
+
+# 6m. Fix (Standards M1): a verify answer that `validate_choice` rejects is NOT a
+# supported verdict — the raw choice never feeds `supported`/`auto` and the stored
+# judgment records the fail-closed decision (which replay reproduces).
+_foroot = Path(tempfile.mkdtemp())
+for d in ['00_control', '11_runtime']:
+    (_foroot / d).mkdir(parents=True, exist_ok=True)
+(_foroot / '00_control/engagement.yaml').write_text('external_judgment: "ALLOWED"\n')
+(_foroot / '11_runtime/events.jsonl').write_text('')
+(_foroot / 'proof.txt').write_text('HTTP 200 observed with title Example Domain\n')
+ControlPlane(_foroot).register_evidence('proof.txt', kind='raw', source='test')
+screen_clean(_foroot, 'E-000001')
+_fo_calls: list = []
+
+
+def _failopen_client(state, questions):
+    _fo_calls.append(sorted(questions))
+    if 'verify' in questions:
+        return {'model': 'jev-fo',
+                'answers': {'verify': {'type': 'choice', 'choice': 'supported',
+                                       'confidence': 0.95,
+                                       'probabilities': {'supported': 0.9, 'unsupported': 0.9}}},
+                'usage': {}}
+    return {'model': 'jev-fo', 'answers': {'relation': {'type': 'choice', 'choice': 'supports',
+              'confidence': 0.9, 'probabilities': {'supports': 0.9, 'contradicts': 0.05,
+                                                   'says_nothing': 0.05}}}, 'usage': {}}
+
+
+_fo_out = check_claims(_foroot, {'claims': [{'id': 'fo1', 'claim': 'HTTP 200 was observed',
+                                             'evidence_ref': 'E-000001'}]},
+                       client=_failopen_client, verify=True)
+_fo_res = _fo_out['results'][0]
+check('an invalid verify answer is not-supported: the rejected choice never decides',
+      _fo_res['verify']['supported'] is False and _fo_res['auto'] is False
+      and 'invalid_choice' in _fo_res['verify'] and 'simplex' in _fo_res['verify']['invalid_choice']
+      and sum(1 for c in _fo_calls if c == ['relation']) == 2
+      and sum(1 for c in _fo_calls if c == ['verify']) == 2)
+_fo_rows = [json.loads(line) for line in
+            (_foroot / '11_runtime/jev-judgments.jsonl').read_text().splitlines() if line.strip()]
+_fo_row = [r for r in _fo_rows if r.get('claim_id') == 'fo1'][-1]
+check('the judgment ledger records the fail-closed verify decision',
+      _fo_row['verify_supported'] is False and _fo_row['auto'] is False)
+_replay_fo = _w14_replay(_foroot, client=_failopen_client)
+check('replay reproduces the fail-closed verify decision deterministically',
+      _replay_fo['replayed'] == 1 and _replay_fo['matched'] == 1
+      and _replay_fo['mismatched'] == 0)
+# New V2/V6 seams share 11_runtime/jev-judgments.jsonl (their records carry `seam`);
+# claims replay must ignore them instead of counting them as drifted.
+_w14_shared = _foroot / '11_runtime/jev-judgments.jsonl'
+_w14_shared.write_text(_w14_shared.read_text() + json.dumps(
+    {'seam': 'novelty', 'input_digest': 'x', 'input': {'candidate': {}}, 'verdict': 'same'}) + '\n')
+_replay_shared = _w14_replay(_foroot, client=_failopen_client)
+check('claims replay ignores other seams in the shared judgment ledger',
+      _replay_shared['replayed'] == 1 and _replay_shared['drifted'] == 0
+      and _replay_shared['matched'] == 1)
+
+# 9. v8.3 V7: already-covered proof — the v8.2 W14 verify-clause + replay are green
+#    end to end through the CLI seam too (claims-check runs the verify judge, records
+#    the judgment ledger, and the stored records replay deterministically).
+_v7root = Path(tempfile.mkdtemp())
+for d in ['00_control', '02_surface', '03_hypotheses/active', '03_hypotheses/archive', '04_cycles',
+          '10_learning', '11_runtime']:
+    (_v7root / d).mkdir(parents=True, exist_ok=True)
+(_v7root / '00_control/engagement.yaml').write_text('external_judgment: "ALLOWED"\n')
+(_v7root / '02_surface/endpoints.yaml').write_text('endpoints: []\n')
+(_v7root / '11_runtime/events.jsonl').write_text('')
+(_v7root / '11_runtime/run-status.yaml').write_text('engagement_status: "BOOTSTRAP"\n')
+(_v7root / '11_runtime/tool-registry.yaml').write_text('tools: []\n')
+(_v7root / '11_runtime/lab-status.yaml').write_text('status: UNKNOWN\n')
+(_v7root / '10_learning/freshness.yaml').write_text('components: []\n')
+(_v7root / '10_learning/unknowns.yaml').write_text('unknowns: []\n')
+(_v7root / '10_learning/assumptions.yaml').write_text('assumptions: []\n')
+(_v7root / 'proof.txt').write_text('HTTP 200 observed with title Example Domain\n')
+ControlPlane(_v7root).register_evidence('proof.txt', kind='raw', source='test')
+screen_clean(_v7root, 'E-000001')
+_v7packet = _v7root / 'packet.json'
+_v7packet.write_text(json.dumps({'claims': [{'id': 'v7', 'claim': 'HTTP 200 was observed',
+                                             'evidence_ref': 'E-000001'}]}))
+_v7_calls: list = []
+
+
+def _v7_post(payload, **kwargs):
+    _v7_calls.append(sorted(payload['questions']))
+    if 'verify' in payload['questions']:
+        return {'model': 'jev-v7', 'answers': {'verify': {'choice': 'supported', 'confidence': 0.9}},
+                'usage': {'input_tokens': 3, 'output_tokens': 1}}
+    return {'model': 'jev-v7', 'answers': {'relation': {'choice': 'supports', 'confidence': 0.92,
+              'probabilities': {'supports': 0.92, 'contradicts': 0.04, 'says_nothing': 0.04}}},
+            'usage': {'input_tokens': 4, 'output_tokens': 1}}
+
+
+with mock.patch('ts_claims.post_json', _v7_post), \
+        mock.patch.dict(os.environ, {'TYPESAFE_API_KEY': 'k'}):
+    _v7buf = io.StringIO()
+    with contextlib.redirect_stdout(_v7buf):
+        _v7rc = run_cli([str(TOOLS / 'researchctl.py'), str(_v7root), 'claims-check',
+                         str(_v7packet)])
+_v7out = json.loads(_v7buf.getvalue())
+check('v8.3 V7: claims-check CLI runs the verify judge and records the judgments',
+      _v7rc == 0 and _v7_calls == [['relation'], ['verify']]
+      and _v7out['results'][0]['verify']['supported'] is True
+      and _v7out['results'][0]['auto'] is True
+      and (_v7root / '11_runtime/jev-judgments.jsonl').is_file())
+def _v7_client(state, questions):
+    """Client-shaped mock (state, questions) for the offline replay path."""
+    if 'verify' in questions:
+        return {'model': 'jev-v7', 'answers': {'verify': {'choice': 'supported', 'confidence': 0.9}},
+                'usage': {}}
+    return {'model': 'jev-v7', 'answers': {'relation': {'choice': 'supports', 'confidence': 0.92}},
+            'usage': {}}
+
+
+check('v8.3 V7: the stored judgment replays deterministically with a mocked provider',
+      _w14_replay(_v7root, client=_v7_client)['matched'] == 1
+      and _w14_replay(_v7root, client=_v7_client)['mismatched'] == 0)
+with mock.patch.dict(os.environ, {'TYPESAFE_API_KEY': 'k'}), \
+        mock.patch('ts_claims.post_json', _v7_post):
+    _v7deny = check_claims(POLICY_DENY, {'claims': [{'id': 'v7d', 'claim': 'x',
+                                                     'evidence_ref': 'E-000001'}]}, verify=True)
+check('v8.3 V7: the DENIED-default gate still short-circuits claims-check before any call',
+      _v7deny['source'] == 'unavailable' and _v7deny['results'] == [])
 
 print(f'\n{len(passed)}/{len(passed)} passed')
