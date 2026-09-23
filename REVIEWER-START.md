@@ -34,7 +34,7 @@ are in the request you received.
 | `tools/audit.py` | 1435 | What the machine audit actually checks (and what it does not): reviewed-cycle binding, audit content, budget caps, closure-proof parsing, `--emit-proof` |
 | `dsh-plugin/index.js` | 2689 | Enforcement R1–R7: write protection, raw-egress gate, single-use preflight tokens, executor-side scope, browser-launch gate, capture redaction, broker-minted token consumption (R7) |
 | `tools/test_control_plane.py` | 3966 | Executable spec for the seam |
-| `tools/leases.py` | 844 | Work-lease registry + completion predicate (goal deferral): acquire/heartbeat/expiry/release, fail-closed reads, the five-conjunct reconcile |
+| `tools/leases.py` | 860 | Work-lease registry + completion predicate (goal deferral): acquire/heartbeat/expiry/release, fail-closed reads, the five-conjunct reconcile |
 | `tools/test_scope_parity.py` | 131 | Cross-language scope parity: Python `scope_check` vs the enforcer `scopeReasonFor` (SKIPs when node is unavailable) |
 | `tools/test_replay.py` | 368 | Executor replay diff (two identical runs over a canned local server) + capture integrity (secret scan, masker idempotence) in one harness |
 | `tools/test_broker.py` | 1308 | Executable spec for the policy broker (real daemon on a temp home, real Unix socket: protocol, policy, mint/consume, fail-closed paths, control-plane integration) |
@@ -90,9 +90,9 @@ check whether the audit's PASS is earned.
   secret-pattern source rendered into all three maskers), `state.py` (45),
   `new_cycle.py` (16),
   `harness_check.py` (178) — per-profile presence/drift + restart-pending check for the
-  installed enforcer plugin (index.js + the goal-deferral module) — `leases.py` (844,
+  installed enforcer plugin (index.js + the goal-deferral module) — `leases.py` (860,
   work-lease registry + completion predicate), `lease_run.py` (160, the lease-guarded
-  launcher) and `test_leases.py` (866, registry + wrapper + predicate + cross-language
+  launcher) and `test_leases.py` (878, registry + wrapper + predicate + cross-language
   parity) — and the v8.3 verification organs: `ts_cost.py` (181),
   `ts_screen.py` (402), `ts_ground.py` (593), `ts_novelty.py` (300),
   `ts_rank.py` (353), `ts_label.py` (268), `ts_honesty.py` (227) — each backed by a
