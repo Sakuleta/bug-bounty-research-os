@@ -55,7 +55,7 @@ const fakeLocator = ({ box, hitError = null, visible = true } = {}) => ({
 function loopHarness(overrides = {}) {
   const calls = { dispatch: [], authorize: [], gate: [], guard: [], capture: [], record: [], verify: [] }
   const events = []
-  const snapshotEntries = [entry('e1')]
+  const snapshotEntries = overrides.entries || [entry('e1')]
   const base = {
     maxSteps: 4,
     boundary: buildBoundary({ root: '/tmp/bua-boundary', entries: snapshotEntries }),
@@ -536,6 +536,145 @@ function runCli(root, extraArgs = []) {
     check('B2 wiring: the refusal names the occlusion guard and never dispatches',
       String(summary.blocked_reason).includes('guard_repeat_cap_reached')
       && String(summary.blocked_reason).includes('occlusion'))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+// ===================================================================================
+// 5. Per-action authorization: preflight token, human gate, scope intersection
+// ===================================================================================
+{
+  const { deps, calls, events } = loopHarness({
+    authorize: async (ctx) => { calls.authorize.push(ctx); return { ok: false, reason: 'no prepared preflight token' } },
+  })
+  const summary = await runLoop(deps)
+  check('B3 loop: a dispatch without a preflight token is refused',
+    calls.dispatch.length === 0 && summary.status === 'blocked'
+    && summary.events.some((e) => e.guard === 'authorization'))
+  check('B3 loop: the authorization refusal names its reason',
+    events[0].reason.includes('no prepared preflight token'))
+}
+
+{
+  // A submit control classifies consequential: the gate is consulted, and without a
+  // resolved gate naming the action nothing dispatches.
+  const { deps, calls } = loopHarness({
+    entries: [entry('e1', { type: 'submit', text: 'Submit' })],
+    gate: async (ctx) => { calls.gate.push(ctx); return { ok: false, reason: 'no RESOLVED human gate names A-000001' } },
+  })
+  const summary = await runLoop(deps)
+  check('B3 loop: a consequential action consults the human gate',
+    calls.gate.length === GUARD_RETRY_CAP && calls.gate[0].actionId === 'A-000001')
+  check('B3 loop: a consequential action without a resolved gate never dispatches',
+    calls.dispatch.length === 0 && summary.status === 'blocked'
+    && summary.events.some((e) => e.guard === 'human_gate'))
+}
+
+{
+  const { deps, calls } = loopHarness({
+    entries: [entry('e1', { type: 'submit', text: 'Submit' })],
+    plan: (() => {
+      const plans = [
+        { ok: true, source: 'typesafe', operation: { op: 'CLICK', handle: 'e1' } },
+        { ok: true, source: 'typesafe', operation: { op: 'DONE' } },
+      ]
+      let i = 0
+      return async () => plans[Math.min(i++, plans.length - 1)]
+    })(),
+  })
+  const summary = await runLoop(deps)
+  check('B3 loop: a consequential action with a resolved gate dispatches',
+    calls.dispatch.length === 1 && calls.gate.length === 1)
+  check('B3 loop: the consequential receipt records the gate as resolved',
+    calls.record[0].actionClass === 'consequential'
+    && summary.history[0].gate === 'resolved'
+    && summary.action_classes.consequential === 1)
+}
+
+{
+  const { deps, calls } = loopHarness({
+    scopeRecheck: async () => ({ ok: false, reason: 'out-of-scope dispatch refused (out_of_scope)' }),
+  })
+  const summary = await runLoop(deps)
+  check('B3 loop: an out-of-scope write is refused and recorded, never followed',
+    calls.dispatch.length === 0 && calls.authorize.length === 0
+    && summary.events.some((e) => e.guard === 'scope' && e.reason.includes('out-of-scope')))
+}
+
+{
+  const { deps, calls } = loopHarness({
+    plan: (() => {
+      const plans = [
+        { ok: true, source: 'typesafe', operation: { op: 'CLICK', handle: 'e1' } },
+        { ok: true, source: 'typesafe', operation: { op: 'DONE' } },
+      ]
+      let i = 0
+      return async () => plans[Math.min(i++, plans.length - 1)]
+    })(),
+  })
+  await runLoop(deps)
+  check('B3 loop: every dispatched action registers its own evidence before its receipt',
+    calls.capture.length === 1 && calls.capture[0].token.action_id === 'A-000001'
+    && calls.record[0].capture.evidence === 'E-000001')
+  check('B3 loop: the receipt carries the consumed token (nonce link for the audit)',
+    calls.record[0].token.nonce === 'n1' && calls.record[0].actionClass === 'state-changing')
+}
+
+// ===================================================================================
+// 6. The interactive arm's real authorization wiring (no token, no dispatch)
+// ===================================================================================
+{
+  const dispatched = []
+  const page = {
+    on() {}, mainFrame: () => ({}), url: () => 'https://t.example/app',
+    title: async () => 'stub', screenshot: async () => {},
+    viewportSize: () => viewport, locator: () => ({ all: async () => [] }),
+    goto: async () => ({ status: () => 200 }),
+  }
+  const context = {
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    async route() {}, async routeWebSocket() {}, async addInitScript() {},
+    async newCDPSession() { return { send: async () => ({}), on() {} } },
+  }
+  const root = tempWorkspace()
+  try {
+    const summary = await runInteractive({
+      root,
+      args: {
+        url: 'https://t.example/app', principal: 'researcher-A', action: 'A-000001',
+        profile: 'lab/bua-profile', preflight: 'preflight.json', 'out-dir': 'artifacts', steps: '2',
+      },
+      chromium: { launchPersistentContext: async () => context },
+      ctl: (args) => (args[0] === 'prepare'
+        ? { error: 'cycle budget exhausted (2/2)' }
+        : { ok: true }),
+      scopeVerdict: () => ({ in_scope: true, gate: 'assets', host: 't.example' }),
+      token: { action_id: 'A-000001', nonce: 'n1', tool_family: 'browser',
+               preflight: { account: 'researcher-A' } },
+      snapshot: async () => ({ generation: 1, entries: [entry('e1')],
+                               locators: new Map([['e1', fakeLocator()]]),
+                               url: 'https://t.example/app', title: 'stub' }),
+      plan: async () => ({ ok: true, source: 'typesafe', operation: { op: 'CLICK', handle: 'e1' } }),
+      scopeRecheck: async () => ({ ok: true }),
+      dispatch: async (ctx) => { dispatched.push(ctx); return { ok: true } },
+      log: () => {},
+    })
+    check('B3 wiring: a prepare refusal stops the run before any dispatch',
+      dispatched.length === 0 && summary.status === 'blocked'
+      && summary.events.some((e) => e.guard === 'authorization'))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+{
+  const root = tempWorkspace()
+  try {
+    const refused = runCli(root)
+    check('B3 CLI: an action id with no prepared token refuses the run (exit 5, no browser)',
+      refused.status === 5 && refused.out.includes('no prepared preflight token')
+      && !refused.out.includes('playwright-core'))
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

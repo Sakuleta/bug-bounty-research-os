@@ -905,7 +905,11 @@ function makeCtl(root, exec = execFileSync) {
       let parsed = null
       try { parsed = JSON.parse(String(e.stdout || '')) } catch { /* not JSON */ }
       if (parsed && typeof parsed === 'object') return parsed
-      throw new Refusal(1, `researchctl ${args[0]} failed: ${maskText(String(e.message || e))}`)
+      // A refusal (`researchctl` prints `error: …` to stderr and exits 1) is an answer,
+      // not a crash: return it so every caller refuses with the seam's own reason.
+      const detail = String(e.stderr || '').split('\n')
+        .filter((line) => line.trim()).slice(-1)[0] || String(e.message || e)
+      return { ok: false, error: maskText(detail) }
     }
   }
 }
@@ -954,7 +958,7 @@ export async function runInteractive({ root, args, chromium, ctl, scopeVerdict, 
     const consumed = ctl(['token-consume', args.action, shapeRel])
     if (!consumed || consumed.ok !== true) {
       throw new Refusal(5, `entry preflight token ${args.action} was refused: ` +
-        String((consumed && consumed.reason) || 'unknown token') + ' — no token, no dispatch')
+        String((consumed && (consumed.reason || consumed.error)) || 'unknown token') + ' — no token, no dispatch')
     }
     entryToken = consumed.token
   }
@@ -1245,11 +1249,11 @@ export async function runInteractive({ root, args, chromium, ctl, scopeVerdict, 
       return prepareRel
     })()])
     if (!prepared || !prepared.action_id) {
-      return { ok: false, reason: 'prepare refused the action: ' + String((prepared && prepared.error) || 'unknown') }
+      return { ok: false, reason: 'prepare refused the action: ' + String((prepared && (prepared.error || prepared.reason)) || 'unknown') }
     }
     const consumed = ctl(['token-consume', prepared.action_id, shapeRel])
     if (!consumed || consumed.ok !== true) {
-      return { ok: false, reason: 'preflight token was refused: ' + String((consumed && consumed.reason) || 'unknown') }
+      return { ok: false, reason: 'preflight token was refused: ' + String((consumed && (consumed.reason || consumed.error)) || 'unknown') }
     }
     return { ok: true, token: consumed.token || prepared }
   }

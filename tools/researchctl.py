@@ -198,6 +198,16 @@ def main() -> int:
     p = sub.add_parser("prepare")
     p.add_argument("json")
     p.set_defaults(fn="prepare")
+    tc = sub.add_parser("token-consume", help="consume a prepared preflight token exactly "
+                                              "once, bound to the exact action shape "
+                                              "(controller-driven arms; no token, no dispatch)")
+    tc.add_argument("action_id")
+    tc.add_argument("shape_json")
+    tc.set_defaults(fn="token-consume")
+    gc = sub.add_parser("gate-check", help="does a RESOLVED human gate name this action id? "
+                                           "(the dispatch-time gate for consequential actions)")
+    gc.add_argument("action_id")
+    gc.set_defaults(fn="gate-check")
     sc = sub.add_parser("scope-check")
     sc.add_argument("url")
     sc.set_defaults(fn="scope-check")
@@ -362,6 +372,10 @@ def main() -> int:
             out = cp.record_action(load_json(ns.json))
         elif ns.fn == "prepare":
             out = cp.prepare_action(load_json(ns.json))
+        elif ns.fn == "token-consume":
+            out = cp.consume_token(ns.action_id, load_json(ns.shape_json))
+        elif ns.fn == "gate-check":
+            out = cp.gate_for_action(ns.action_id)
         elif ns.fn == "scope-check":
             out = scope_verdict(Path(ns.root), ns.url)
         elif ns.fn == "scope-set":

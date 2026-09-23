@@ -3743,3 +3743,131 @@ check("a secret-shaped value in the screening ledger errors the audit",
 _after_clean = run_audit(_hgroot)
 check("the side ledgers audit clean again once the secret-shaped value is removed",
       _after_clean.returncode == 0)
+
+
+# =====================================================================================
+# v8.4 B3: single-use preflight consumption + the consequential-action human gate.
+# The interactive arm has no executor plugin to consume its tokens, so the control plane
+# exposes the same single-use gate as a seam: `consume_token` refuses an unknown, reused,
+# expired, wrong-family or wrong-shape token, and `gate_for_action` answers the
+# consequential question — is there a RESOLVED human gate naming this action id?
+# =====================================================================================
+_BROWSER_SHAPE = {"url": "https://example.test/app", "principal": "researcher-A"}
+
+
+def _b3_action(shape=None) -> dict:
+    return {**_w7_action(), "tool_family": "browser",
+            "request_shape": shape or dict(_BROWSER_SHAPE)}
+
+
+_nr3, _nc3 = _w7_root()
+_tok3 = _nc3.prepare_action(_b3_action())
+_consumed3 = _nc3.consume_token(_tok3["action_id"], dict(_BROWSER_SHAPE))
+check("B3 consume: a prepared browser token consumes with its exact shape",
+      _consumed3["action_id"] == _tok3["action_id"]
+      and _consumed3["preflight"]["tool_family"] == "browser"
+      and _consumed3["nonce"] == _tok3["nonce"])
+try:
+    _nc3.consume_token(_tok3["action_id"], dict(_BROWSER_SHAPE))
+    check("B3 consume: a consumed token is refused (single-use)", False)
+except ValueError as exc:
+    check("B3 consume: a consumed token is refused (single-use)", "single-use" in str(exc))
+
+_nr3s, _nc3s = _w7_root()
+_tok3s = _nc3s.prepare_action(_b3_action())
+try:
+    _nc3s.consume_token(_tok3s["action_id"], {"url": "https://example.test/other",
+                                              "principal": "researcher-A"})
+    check("B3 consume: a token bound to another shape is refused", False)
+except ValueError as exc:
+    check("B3 consume: a token bound to another shape is refused", "different action shape" in str(exc))
+
+_nr3f, _nc3f = _w7_root()
+_tok3f = _nc3f.prepare_action(_b3_action())
+try:
+    _nc3f.consume_token(_tok3f["action_id"], dict(_BROWSER_SHAPE), family="http")
+    check("B3 consume: a token of another tool family is refused", False)
+except ValueError as exc:
+    check("B3 consume: a token of another tool family is refused", "tool_family" in str(exc))
+
+_nr3u, _nc3u = _w7_root()
+try:
+    _nc3u.consume_token("A-000099", dict(_BROWSER_SHAPE))
+    check("B3 consume: an unknown action id is refused (no token, no dispatch)", False)
+except ValueError as exc:
+    check("B3 consume: an unknown action id is refused (no token, no dispatch)",
+          "no prepared preflight token" in str(exc))
+
+_nr3e, _nc3e = _w7_root()
+_tok3e = _nc3e.prepare_action(_b3_action())
+with (_nr3e / "11_runtime/action-tokens.jsonl").open("a", encoding="utf-8") as _fh:
+    _fh.write(json.dumps({"action_id": _tok3e["action_id"], "nonce": _tok3e["nonce"],
+                          "expires_at": "2020-01-01T00:00:00Z"}) + "\n")
+try:
+    _nc3e.consume_token(_tok3e["action_id"], dict(_BROWSER_SHAPE))
+    check("B3 consume: an expired token is refused", False)
+except ValueError as exc:
+    check("B3 consume: an expired token is refused", "expired" in str(exc))
+
+# Consumption is durable and counts as used: the budget does not regain headroom just
+# because a token was consumed without (yet) a matching ACTION_RECORDED.
+_nr3b, _nc3b = _w7_root(cap_cycle=1, cap_total=1)
+_tok3b = _nc3b.prepare_action(_b3_action())
+_nc3b.consume_token(_tok3b["action_id"], dict(_BROWSER_SHAPE))
+try:
+    _nc3b.prepare_action(_b3_action())
+    check("B3 consume: a consumed-but-unrecorded token still occupies budget", False)
+except ValueError as exc:
+    check("B3 consume: a consumed-but-unrecorded token still occupies budget",
+          "budget exhausted" in str(exc))
+_nc3b.record_action({**_b3_action(), "id": _tok3b["action_id"], "token_nonce": _tok3b["nonce"]})
+check("B3 consume: the genuine receipt on the consumed token records",
+      any(e.get("type") == "ACTION_RECORDED" and e.get("entity_id") == _tok3b["action_id"]
+          for e in _nc3b._read_events()))
+
+# ---- the consequential-action gate --------------------------------------------------
+_nr3g, _nc3g = _w7_root()
+_tok3g = _nc3g.prepare_action(_b3_action())
+check("B3 gate: a consequential action without a gate resolves nothing",
+      _nc3g.gate_for_action(_tok3g["action_id"])["resolved"] is False)
+_nc3g.request_gate("G-0003", {"cycle_id": "C-0001",
+                              "what_is_needed": "Scope review of the upcoming browser run",
+                              "why_human_only": "Only the researcher can approve a submission",
+                              "resume_after": "Gate resolution"})
+_nc3g.resolve_gate("G-0003", decision="APPROVED", reference="ticket-1")
+check("B3 gate: a resolved gate that never names the action dispositions nothing",
+      _nc3g.gate_for_action(_tok3g["action_id"])["resolved"] is False)
+_nc3g.request_gate("G-0004", {"cycle_id": "C-0001",
+                              "what_is_needed": f"Approve the submit action {_tok3g['action_id']}",
+                              "why_human_only": "Only the researcher can approve a submission",
+                              "resume_after": "Gate resolution"})
+_nc3g.resolve_gate("G-0004", decision="APPROVED", reference="ticket-2")
+_gate3 = _nc3g.gate_for_action(_tok3g["action_id"])
+check("B3 gate: a resolved gate naming the action resolves it",
+      _gate3["resolved"] is True and _gate3["gate"] == "G-0004")
+try:
+    _nc3g.gate_for_action("A-000099")
+    check("B3 gate: an unknown action id is refused", False)
+except ValueError as exc:
+    check("B3 gate: an unknown action id is refused", "no prepared preflight token" in str(exc))
+
+# ---- the CLI seam the interactive arm calls ----------------------------------------
+(_nr3s / "shape.json").write_text(json.dumps({"url": "https://example.test/other",
+                                              "principal": "researcher-A"}))
+_sub3 = subprocess.run([sys.executable, str(TOOLS / "researchctl.py"), str(_nr3s),
+                        "token-consume", _tok3s["action_id"], str(_nr3s / "shape.json")],
+                       capture_output=True, text=True)
+check("B3 CLI: token-consume refuses a wrong shape with a non-zero exit",
+      _sub3.returncode == 1 and "different action shape" in _sub3.stderr)
+(_nr3s / "shape.json").write_text(json.dumps(_BROWSER_SHAPE))
+_sub3b = subprocess.run([sys.executable, str(TOOLS / "researchctl.py"), str(_nr3s),
+                         "token-consume", _tok3s["action_id"], str(_nr3s / "shape.json")],
+                        capture_output=True, text=True)
+check("B3 CLI: token-consume prints the consumed token as JSON",
+      _sub3b.returncode == 0 and json.loads(_sub3b.stdout)["action_id"] == _tok3s["action_id"])
+_sub3c = subprocess.run([sys.executable, str(TOOLS / "researchctl.py"), str(_nr3g),
+                         "gate-check", _tok3g["action_id"]], capture_output=True, text=True)
+check("B3 CLI: gate-check reports the resolved gate",
+      _sub3c.returncode == 0 and json.loads(_sub3c.stdout)["gate"] == "G-0004")
+
+print(f"\n{len(passed)} checks passed")
