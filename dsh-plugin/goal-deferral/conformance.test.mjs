@@ -9,7 +9,7 @@
  * state and never emits a continuation.
  */
 import { execFileSync } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as adapter from './index.js'
@@ -88,7 +88,9 @@ function harness(options = {}) {
       return () => listeners.set(evt, (listeners.get(evt) || []).filter((f) => f !== fn))
     },
   }
-  const gate = apply(ctx, options.apply || {})
+  // The conformance harness is offline: reconcile dispatches are a no-op unless a case
+  // injects one (`reconcile: null` opts into the real default dispatcher).
+  const gate = apply(ctx, { reconcile: () => {}, ...(options.apply || {}) })
   return {
     gate, goals, calls, listeners,
     guardReason: (exec) => guards.map((g) => g(exec)).find((r) => r !== undefined),
@@ -282,6 +284,45 @@ try {
 } finally {
   chmodSync(join(unreadableRoot, '.leases'), 0o700)
 }
+
+// ---- R11: bounded reconcile dispatch (apply + createGoalDeferral) -------------
+const dispatchRoot = workspace('dispatch', { 'run-1': [leaseRecord('unknown-recovery-required', { version: 2 })] })
+const dispatchCalls = []
+const h18 = harness({
+  apply: {
+    root: dispatchRoot, runId: 'run-1', now: () => NOW,
+    reconcile: (verdict) => dispatchCalls.push({ runId: verdict.runId, state: verdict.state }),
+  },
+})
+check('apply dispatches exactly one bounded reconciliation for a stable unknown lease',
+  dispatchCalls.length === 1 && dispatchCalls[0].runId === 'run-1'
+  && dispatchCalls[0].state === 'unknown-recovery-required')
+h18.gate.notify('jobs-changed')
+h18.gate.notify('jobs-changed')
+check('a stable unknown state never re-dispatches (bounded)', dispatchCalls.length === 1)
+writeRecords(dispatchRoot, 'run-1', [leaseRecord('active', { version: 3 })])
+h18.gate.notify('jobs-changed')
+writeRecords(dispatchRoot, 'run-1', [leaseRecord('unknown-recovery-required', { version: 4 })])
+h18.gate.notify('jobs-changed')
+check('re-entering the unknown state re-arms exactly one more dispatch',
+  dispatchCalls.length === 2)
+
+// The default dispatcher runs `researchctl lease-reconcile <run>` in the run root.
+const defaultRoot = workspace('dispatch-default', { 'run-1': [leaseRecord('unknown-recovery-required', { version: 2 })] })
+mkdirSync(join(defaultRoot, 'tools'), { recursive: true })
+writeFileSync(join(defaultRoot, 'tools', 'researchctl.py'),
+  'import pathlib, sys\n'
+  + 'pathlib.Path(__file__).with_name("dispatch.log").write_text(" ".join(sys.argv[1:]))\n')
+const h19 = harness({ apply: { root: defaultRoot, runId: 'run-1', now: () => NOW, reconcile: null } })
+let defaultLog = null
+for (let attempt = 0; attempt < 50 && defaultLog === null; attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  try {
+    defaultLog = readFileSync(join(defaultRoot, 'tools', 'dispatch.log'), 'utf8')
+  } catch {}
+}
+check('the default dispatcher invokes researchctl lease-reconcile for the run',
+  defaultLog === `${defaultRoot} lease-reconcile run-1`)
 
 rmSync(sandbox, { recursive: true, force: true })
 console.log(failures.length ? `\nFAIL: ${failures.length} check(s): ${failures.join('; ')}` : '')

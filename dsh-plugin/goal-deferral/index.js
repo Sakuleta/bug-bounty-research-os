@@ -30,9 +30,16 @@
  * `.leases/`. Without one it installs nothing to block (a workspace that never used
  * leases is not deferred).
  *
+ * Bounded reconciliation: a stable `unknown-recovery-required` state wakes at most
+ * one reconciliation dispatch (the default is an async `execFile` of the run
+ * workspace's own `tools/researchctl.py <root> lease-reconcile <run>`; injectable
+ * via `options.reconcile`). Re-entering the unknown state re-arms exactly one more.
+ * A failed or unavailable CLI is logged and the lease stays blocking — the dispatch
+ * is bounded, never a retry loop.
+ *
  * Dependency-free: node stdlib only.
  */
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { TextDecoder } from 'node:util'
@@ -254,6 +261,31 @@ function verdictKey(verdict) {
 }
 
 /**
+ * The default bounded-reconcile dispatcher: `execFile` of the run workspace's own
+ * `tools/researchctl.py <root> lease-reconcile <run>` (dependency-free; async so the
+ * host is never blocked). One attempt per invocation — the bound is the gate's. A
+ * failed/unavailable CLI is logged and the lease stays blocking (fail closed).
+ * Returns null when no root is configured (discovery-only mode has no stable path).
+ */
+export function defaultReconcileDispatcher(root, runId) {
+  if (!root) return null
+  return (verdict) => {
+    const target = runId || verdict.runId
+    if (!target) return
+    execFile('python3', [join(root, 'tools', 'researchctl.py'), root, 'lease-reconcile', target],
+      { timeout: 60000 }, (error, _stdout, stderr) => {
+        if (error) {
+          console.error(`research-os-goal-deferral: bounded reconciliation for ${target} did not `
+            + `clear (${error.code ?? error.message}) — the lease stays blocking; `
+            + `${String(stderr).trim()}`)
+        } else {
+          console.error(`research-os-goal-deferral: bounded reconciliation cleared ${target}`)
+        }
+      })
+  }
+}
+
+/**
  * The veto gate. `blockedReason()`/`snapshot()` read fresh (pull consumers always see
  * the current registry); `onBlockerChange` delivers the current verdict immediately on
  * subscribe and re-reads on every notification (subscribe-then-reread, no lost wake-up).
@@ -264,8 +296,27 @@ export function createGoalDeferral(options = {}) {
   const now = typeof options.now === 'function' ? options.now : () => Date.now() / 1000
   const readVerdict = options.readVerdict || readLeaseVerdict
   const resolveRoot = options.resolveRoot || defaultResolveRoot
+  const reconcile = typeof options.reconcile === 'function' ? options.reconcile : null
   const listeners = new Set()
   let lastKey = null
+  let lastUnknownKey = null
+
+  /** Bounded wake: at most one dispatch per stable unknown state (re-entry re-arms). */
+  function maybeDispatchReconcile(verdict) {
+    if (!reconcile) return
+    if (verdict.state !== 'unknown-recovery-required') {
+      lastUnknownKey = null
+      return
+    }
+    const key = verdictKey(verdict)
+    if (key === lastUnknownKey) return
+    lastUnknownKey = key
+    try {
+      reconcile(verdict)
+    } catch (error) {
+      console.error('research-os-goal-deferral: bounded reconcile dispatch failed: ' + error)
+    }
+  }
 
   function snapshot(exec) {
     const target = staticRoot || resolveRoot(exec)
@@ -289,6 +340,7 @@ export function createGoalDeferral(options = {}) {
       listeners.add(listener)
       const verdict = snapshot(null)
       lastKey = verdictKey(verdict)
+      maybeDispatchReconcile(verdict)
       try {
         listener(verdict, { source: 'initial', initial: true })
       } catch (error) {
@@ -298,6 +350,7 @@ export function createGoalDeferral(options = {}) {
     },
     notify(source = 'notify') {
       const verdict = snapshot(null)
+      maybeDispatchReconcile(verdict)
       const key = verdictKey(verdict)
       if (key === lastKey) return verdict
       lastKey = key
@@ -393,7 +446,10 @@ export function apply(ctx, options = {}) {
     }
     const root = options.root || process.env.RESEARCH_OS_LEASE_ROOT || null
     const runId = options.runId || process.env.RESEARCH_OS_LEASE_RUN || null
-    const gate = createGoalDeferral({ ...options, root, runId })
+    const reconcile = typeof options.reconcile === 'function'
+      ? options.reconcile
+      : defaultReconcileDispatcher(root, runId)
+    const gate = createGoalDeferral({ ...options, root, runId, reconcile })
     const jobs = typeof ctx.get === 'function' ? ctx.get('jobs') : undefined
     if (jobs) gate.observeJobs(jobs)
     gate.observeChildren(ctx)
@@ -405,6 +461,7 @@ export function apply(ctx, options = {}) {
           + `(${error}) (failing closed)`
       }
     })
+    gate.notify('apply') // bounded wake for a stable unknown state at install time
     console.error('research-os-goal-deferral: active (veto-only; it never pauses/resumes goals '
       + 'and never emits continuations)')
     return gate
