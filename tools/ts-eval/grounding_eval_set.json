@@ -17,6 +17,23 @@
     ]
   },
   {
+    "id": "cf-fresh-verifier",
+    "question": "Does the Cloudflare security-audit skill validate candidate findings with a fresh verifier that tries to refute them?",
+    "truth": "yes",
+    "snippets": [
+      {
+        "text": "Six-phase audit: candidate validation runs a fresh verifier whose task is to refute each candidate before it can be reported, not to confirm it.",
+        "source": "https://github.com/cloudflare/security-audit-skill",
+        "date": "2026-09-21"
+      },
+      {
+        "text": "The independent record-verification phase re-verifies with material replacements, so a finding survives only if the fresh check holds.",
+        "source": "https://github.com/cloudflare/security-audit-skill",
+        "date": "2026-09-21"
+      }
+    ]
+  },
+  {
     "id": "cf-no-live-probing",
     "question": "Does the Cloudflare security-audit skill permit contacting deployed endpoints?",
     "truth": "no",
@@ -62,6 +79,23 @@
       },
       {
         "text": "README: an interactive browser agent loop — snapshot.js builds an indexed element table, model.choose() sends one TypeSafe request, agent.py executes via browser.py over raw CDP (browser_harness).",
+        "source": "https://github.com/browser-use/jev-ultrafast",
+        "date": "2026-09-22"
+      }
+    ]
+  },
+  {
+    "id": "jev-ultrafast-fanout",
+    "question": "Does the jev-ultrafast demo send one TypeSafe request per step using speculative fan-out (an operation Choice plus target Choices over the same state)?",
+    "truth": "yes",
+    "snippets": [
+      {
+        "text": "model.choose() sends one TypeSafe request with speculative fan-out: an operation Choice plus one *_target Choice per operation, all evaluated against the same state.",
+        "source": "https://github.com/browser-use/jev-ultrafast",
+        "date": "2026-09-22"
+      },
+      {
+        "text": "Strict response validation on the fan-out: the probability simplex must be ≈1 and the picked choice must be the argmax (validate_choice).",
         "source": "https://github.com/browser-use/jev-ultrafast",
         "date": "2026-09-22"
       }

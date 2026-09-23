@@ -52,20 +52,30 @@ it quotes") moved the three benign false positives to clear.
 ### 4. Grounded judgments — `grounding_eval_set.json` + `grounding_eval.py` + `grounding_results.json` (v8.3)
 
 Labeled freshness questions whose answers live in the 2026 research corpus (GPT-6
-release, the Cloudflare skill's no-live-probing stance, the TypeSafe API's missing
-websearch knob, jev-ultrafast's browser-harness dependency). Before-web: one verdict
-question over an empty state; after-web: the shipped `ts_ground.ground_state` with the
-item's committed, dated snippets inserted verbatim (a `FakeProvider`, so the after-web
-arm is reproducible). Measured: confidently-wrong verdicts 4/4 → 0/4 and correct
-verdicts 0/4 → 4/4 (the ungrounded model answers `unclear` at ~1.0 confidence on every
-question; grounded, all four are correct and clear the code thresholds).
+release, the Cloudflare skill's fresh-verifier refutation phase, the Cloudflare skill's
+no-live-probing stance, the TypeSafe API's missing websearch knob, jev-ultrafast's
+browser-harness dependency, jev-ultrafast's speculative fan-out). Before-web: one
+verdict question over an empty state; after-web: the shipped `ts_ground.ground_state`
+with the item's committed, dated snippets inserted verbatim (a `FakeProvider`, so the
+after-web arm is reproducible). Measured (fresh run, all six cases): confidently-wrong
+verdicts 6/6 → 0/6 and correct verdicts 0/6 → 6/6 — the ungrounded model answers
+`unclear` at ~1.0 confidence on every question, grounded all six are correct, five clear
+the 0.8 verdict threshold (`after_auto`) and one correct verdict at 0.79 stays flagged
+for review. Two rows had one retrieved snippet excluded by the screening battery
+(`after_excluded`), which the rows record rather than hide.
 
-Two out-of-scope cases were removed from the set and the committed rows because the
-sprint's no-go list forbids that project in any form (`SPRINT-v8.3-SPEC.md`; flagged by
-the spec-axis review as MF-2); the aggregate counts above are recomputed deterministically
-over the retained committed rows, and the removal is recorded in `grounding_results.json`
-under `removed_for_no_go`. Two in-scope replacement questions and a fresh paired run land
-with the grounding-fix commit.
+Two cases from a project the sprint excludes in any form were removed from the set and
+the committed rows (`SPRINT-v8.3-SPEC.md`; flagged by the spec-axis review as MF-2); the
+removal is recorded in `grounding_results.json` under `removed_for_no_go` and replaced
+by the two in-scope questions above, and the whole set was then re-run live with the
+grounding-fix code (cycle-id allowlist, question redaction, judgment digests,
+single-counted screening cost). Rerun command:
+
+```sh
+mkdir -p /tmp/grounding-eval/00_control
+printf 'external_judgment: "ALLOWED"\ngrounding: "ALLOWED"\n' > /tmp/grounding-eval/00_control/engagement.yaml
+TYPESAFE_API_KEY=... python3 tools/ts-eval/grounding_eval.py --force --root /tmp/grounding-eval
+```
 
 The committed payload records the eval-integrity posture (scored OS runs keep grounding
 off unless the engagement explicitly allows it; this eval's after-web arm runs under the

@@ -129,6 +129,15 @@ def main(*, root: Path | None = None, force: bool = False) -> None:
         "after_confident_yesno_wrong": after_yesno_wrong,
         "before_correct": before_correct, "after_correct": after_correct,
         "ship": ship, "rows": rows,
+        # Provenance for the no-go removal (v8.3 review MF-2): the two out-of-scope cases
+        # were deleted from the set and replaced by in-scope freshness questions; this
+        # block keeps the removal auditable across re-runs (the guard test pins it).
+        "removed_for_no_go": {
+            "cases": ["laya-apache", "laya-base-near-chance"],
+            "reason": ("SPRINT-v8.3-SPEC.md keeps this project out in any form; the "
+                       "spec-axis review flagged the two cases (MF-2)"),
+            "replaced_by": ["cf-fresh-verifier", "jev-ultrafast-fanout"],
+        },
         "posture": {
             "before_arm": "off (no search_results)",
             "after_arm": "on (committed fixture retrieval, verbatim insertion)",
