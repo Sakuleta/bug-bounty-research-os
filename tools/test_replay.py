@@ -43,7 +43,8 @@ sys.path.insert(0, str(TOOLS))
 from control_plane import ControlPlane, redact, secret_pattern_hits  # noqa: E402
 
 TOOL_FILES = ("control_plane.py", "researchctl.py", "knowledge_index.py",
-              "build_context.py", "ts_triage.py", "ts_claims.py", "ts_http.py")
+              "build_context.py", "ts_triage.py", "ts_claims.py", "ts_http.py",
+              "ts_cost.py")
 
 NODE_RUNNER = (
     "import {runControlledRequest} from " + json.dumps(ENFORCER.as_uri()) + ";"

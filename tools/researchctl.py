@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from pathlib import Path
 import sys
 
@@ -20,6 +21,7 @@ from control_plane import (  # noqa: E402
 )
 from ts_triage import suggest as triage_suggest  # noqa: E402
 from ts_claims import check_claims, check_draft  # noqa: E402
+from ts_cost import record_seam_cost  # noqa: E402
 
 BROKER_SCRIPT = Path(__file__).resolve().parent / "broker" / "broker.py"
 
@@ -309,11 +311,20 @@ def main() -> int:
         elif ns.fn == "scope-sync":
             out = cp.sync_scope()
         elif ns.fn == "triage":
+            started = time.monotonic()
             out = triage_suggest(Path(ns.root), ns.question)
+            record_seam_cost(cp.root, decision="triage", out=out, cycle_id=cp.active_cycle(),
+                             latency_ms=int((time.monotonic() - started) * 1000))
         elif ns.fn == "claims-check":
+            started = time.monotonic()
             out = check_claims(Path(ns.root), load_json(ns.packet_json), verify=True)
+            record_seam_cost(cp.root, decision="claims-check", out=out, cycle_id=cp.active_cycle(),
+                             latency_ms=int((time.monotonic() - started) * 1000))
         elif ns.fn == "claims-draft":
+            started = time.monotonic()
             out = check_draft(Path(ns.root), ns.draft, triage=ns.triage)
+            record_seam_cost(cp.root, decision="claims-draft", out=out, cycle_id=cp.active_cycle(),
+                             latency_ms=int((time.monotonic() - started) * 1000))
         elif ns.fn == "freshness-record":
             out = cp.record_freshness(load_json(ns.json))
         elif ns.fn == "freshness-status":

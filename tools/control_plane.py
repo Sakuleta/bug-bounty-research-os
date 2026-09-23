@@ -32,6 +32,7 @@ from knowledge_index import (
     selection_query,
     top_packs,
 )
+from ts_cost import cost_summary
 
 CYCLE_EDGES = {
     "PLANNED": {"READY", "BLOCKED"},
@@ -2593,7 +2594,12 @@ class ControlPlane:
         return out
 
     def budget_status(self) -> dict[str, Any]:
-        """Limits, counted actions and remaining capacity — the `budget status` seam."""
+        """Limits, counted actions and remaining capacity — the `budget status` seam.
+
+        `spend` is the Jev cost ledger summary, reported BESIDE the action budget and
+        deliberately not folded into `remaining`: the caps count actions, and an
+        estimated dollar figure must never consume or relax action capacity.
+        """
         limits = budget_limits(self.root)
         if isinstance(limits, str):
             raise ValueError(
@@ -2615,6 +2621,7 @@ class ControlPlane:
                 "cycles": {cid: left(cap_cycle, used) for cid, used in counts["cycles"].items()},
                 "engagement": left(cap_total, counts["engagement"]),
             },
+            "spend": cost_summary(self.root),
         }
 
     def set_budget(self, payload: dict[str, Any], actor: str = "controller") -> dict[str, Any]:
@@ -3476,6 +3483,19 @@ class ControlPlane:
         self.refresh()
         return event
 
+    def active_cycle(self) -> str | None:
+        """Latest non-closed cycle touched by an event — the run-status `current_cycle` rule.
+
+        The one derivation shared by `refresh()` and the cost-ledger CLI wiring, so
+        `current_cycle` cannot mean two things.
+        """
+        active = {cid for cid in self.all_cycle_ids()
+                  if self.cycle_status(cid) not in {None, "CLOSED"}}
+        for e in reversed(self._read_events()):
+            if e.get("entity_type") == "cycle" and e.get("entity_id") in active:
+                return str(e.get("entity_id"))
+        return None
+
     def refresh(self) -> dict[str, Any]:
         events = self._read_events()
         cycle_ids = self.all_cycle_ids()
@@ -3483,12 +3503,7 @@ class ControlPlane:
         pending_gates = [gid for gid in self.all_gate_ids() if (self.gate(gid) or {}).get("status") != "RESOLVED"]
         active_h = [hid for hid in self.all_hypothesis_ids()
                     if self.hypothesis_status(hid) not in {None, "CLOSED", "VERIFIED", "FALSE_POSITIVE", "NOT_APPLICABLE"}]
-        current = None
-        active_set = set(active_cycles)
-        for e in reversed(events):
-            if e.get("entity_type") == "cycle" and e.get("entity_id") in active_set:
-                current = e.get("entity_id")
-                break
+        current = self.active_cycle()
         if active_cycles:
             status = "ACTIVE"
         elif cycle_ids and all(self.cycle_status(cid) == "CLOSED" for cid in cycle_ids):
