@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parent
+REPO = TOOLS.parent
 sys.path.insert(0, str(TOOLS))
 import leases  # noqa: E402
 
@@ -466,6 +467,109 @@ check("researchctl lease-reconcile exits 0, releases and records the commit",
       clear.returncode == 0 and payload2["clear"] is True and payload2["released"] is True
       and payload2["commit"] == leases.verdict(r18, "sweep-1")["commit"]
       and "CLEAR" in clear.stderr)
+
+# ---------------- D4: cross-language verdict parity (JS reader vs Python) -------
+
+ADAPTER = REPO / "dsh-plugin" / "goal-deferral" / "index.js"
+PARITY_RUNNER = (
+    "import {readLeaseVerdict} from " + json.dumps(ADAPTER.as_uri()) + ";"
+    "const [root, runId, now] = process.argv.slice(1);"
+    "const v = readLeaseVerdict(root, runId === '-' ? null : runId, {now: Number(now)});"
+    "process.stdout.write(JSON.stringify({state: v.state, blocked: v.blocked}))"
+)
+
+
+def js_verdict(fixture_root: Path, run_id: str | None, now: float) -> dict:
+    proc = subprocess.run(
+        ["node", "--input-type=module", "-e", PARITY_RUNNER,
+         str(fixture_root), run_id or "-", str(now)],
+        capture_output=True, text=True, timeout=60)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or f"node exit {proc.returncode}")
+    return json.loads(proc.stdout)
+
+
+if shutil.which("node") is None:
+    print("SKIP (node unavailable) — lease verdict parity NOT verified")
+else:
+    parity: list[tuple[str, Path, str | None, float]] = []
+
+    def parity_case(label: str, fixture_root: Path, run_id: str | None, now: float):
+        parity.append((label, fixture_root, run_id, now))
+
+    p_active = root()
+    leases.acquire(p_active, "run", interval_seconds=1000.0, now=100.0)
+    parity_case("active", p_active, "run", 200.0)
+    parity_case("active expired", p_active, "run", 4000.0)
+    p_awaiting = root()
+    leases.acquire(p_awaiting, "run", interval_seconds=1000.0, now=100.0)
+    leases.mark_awaiting(p_awaiting, "run", exit_code=3, now=110.0)
+    parity_case("awaiting-reconciliation", p_awaiting, "run", 200.0)
+    p_unknown = root()
+    leases.acquire(p_unknown, "run", interval_seconds=1000.0, now=100.0)
+    leases.mark_unknown(p_unknown, "run", reason="boom", now=110.0)
+    parity_case("unknown-recovery-required", p_unknown, "run", 200.0)
+    p_released = root()
+    leases.acquire(p_released, "run", interval_seconds=1000.0, now=100.0)
+    leases.mark_awaiting(p_released, "run", exit_code=0, now=110.0)
+    leases.release(p_released, "run", commit="a" * 40, now=120.0)
+    parity_case("released", p_released, "run", 200.0)
+    p_no_lease = root()
+    leases.registry_dir(p_no_lease).mkdir(parents=True)
+    parity_case("no-lease", p_no_lease, "run", 200.0)
+    parity_case("missing registry", root(), "run", 200.0)
+    p_corrupt = root()
+    leases.acquire(p_corrupt, "run", interval_seconds=1000.0, now=100.0)
+    with open(leases.lease_path(p_corrupt, "run"), "a", encoding="utf-8") as handle:
+        handle.write("{oops}\n")
+    parity_case("corrupt line", p_corrupt, "run", 200.0)
+    p_empty = root()
+    leases.registry_dir(p_empty).mkdir(parents=True)
+    leases.lease_path(p_empty, "run").write_text("")
+    parity_case("empty file", p_empty, "run", 200.0)
+    p_chain = root()
+    leases.acquire(p_chain, "run", interval_seconds=1000.0, now=100.0)
+    with open(leases.lease_path(p_chain, "run"), "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"seq": 2, "version": 1, "state": "released"}) + "\n")
+    parity_case("non-increasing version", p_chain, "run", 200.0)
+    p_state = root()
+    leases.acquire(p_state, "run", interval_seconds=1000.0, now=100.0)
+    with open(leases.lease_path(p_state, "run"), "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"seq": 2, "version": 2, "state": "sneaky"}) + "\n")
+    parity_case("unknown state string", p_state, "run", 200.0)
+    p_wide = root()
+    leases.acquire(p_wide, "run-a", interval_seconds=1000.0, now=100.0)
+    leases.acquire(p_wide, "run-b", interval_seconds=1000.0, now=100.0)
+    leases.mark_awaiting(p_wide, "run-b", exit_code=0, now=110.0)
+    leases.release(p_wide, "run-b", commit="b" * 40, now=120.0)
+    parity_case("workspace-wide with one held run", p_wide, None, 200.0)
+    p_wide_clear = root()
+    leases.acquire(p_wide_clear, "run-a", interval_seconds=1000.0, now=100.0)
+    leases.mark_awaiting(p_wide_clear, "run-a", exit_code=0, now=130.0)
+    leases.release(p_wide_clear, "run-a", commit="c" * 40, now=140.0)
+    parity_case("workspace-wide all released", p_wide_clear, None, 200.0)
+    p_wide_corrupt = root()
+    leases.acquire(p_wide_corrupt, "run-a", interval_seconds=1000.0, now=100.0)
+    with open(leases.lease_path(p_wide_corrupt, "run-a"), "a", encoding="utf-8") as handle:
+        handle.write("junk\n")
+    parity_case("workspace-wide with a corrupt file", p_wide_corrupt, None, 200.0)
+
+    for label, fixture_root, run_id, now in parity:
+        try:
+            js = js_verdict(fixture_root, run_id, now)
+        except RuntimeError as exc:
+            check(f"parity: {label} (node error: {exc})", False)
+            continue
+        py = leases.verdict_all(fixture_root, now=now) if run_id is None \
+            else leases.verdict(fixture_root, run_id, now=now)
+        check(f"parity: {label} (python {py['state']} / node {js['state']})",
+              py["state"] == js["state"] and py["blocked"] == js["blocked"])
+
+    raise_check("parity: an unsafe run id is refused by python",
+                lambda: leases.verdict(p_active, "../escape"), leases.LeaseError)
+    unsafe = js_verdict(p_active, "../escape", 200.0)
+    check("parity: an unsafe run id blocks the node reader",
+          unsafe["blocked"] is True and unsafe["state"] == "unknown-recovery-required")
 
 print(f"\n{len(passed)}/{len(passed) + len(failures)} passed")
 for path in ROOTS:
