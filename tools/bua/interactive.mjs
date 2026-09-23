@@ -56,7 +56,8 @@ import { pathToFileURL } from 'node:url'
 import {
   authorityAmbiguous, decideRequest, findOsRoot, hasSecretShape, hostKey, insideRoot,
   makeHopCollector, makeScopeCache, makeServiceWorkerHandler, makeWebSocketHandler, maskText,
-  maskUrlSecrets, observeWorkerWebSocket, serviceWorkerInitScript, scopeCheckVerdict,
+  maskUrlSecrets, observeWorkerWebSocket, resolveProfileDir, serviceWorkerInitScript,
+  scopeCheckVerdict,
 } from './interactive-helpers.mjs'
 
 // ---- named caps (the step/model budgets an interactive run may never exceed) --------
@@ -1054,7 +1055,7 @@ export async function runInteractive({ root, args, chromium, ctl = makeCtl(root)
                                        gate, guard, scopeRecheck, freshLogin, log = console.log }) {
   const outDirRel = args['out-dir']
   insideRoot(root, outDirRel, '--out-dir')
-  insideRoot(root, args.profile, '--profile')
+  resolveProfileDir(root, args.profile)
   const outDir = join(root, outDirRel)
   mkdirSync(outDir, { recursive: true })
   const preflight = loadPreflight(root, args.preflight)

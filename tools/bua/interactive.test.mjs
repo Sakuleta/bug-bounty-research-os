@@ -1329,6 +1329,31 @@ function runCli(root, extraArgs = []) {
   }
 }
 {
+  // Sprint BUA MF-7: containment must be real, not lexical — a workspace symlink can
+  // point outside, and a profile inside the workspace but outside lab/ is not a
+  // dedicated lab profile either.
+  const outside = mkdtempSync(join(tmpdir(), 'bua-profile-outside-'))
+  const root = tempWorkspace()
+  try {
+    mkdirSync(join(root, 'lab'), { recursive: true })
+    mkdirSync(join(root, 'artifacts'), { recursive: true })
+    symlinkSync(outside, join(root, 'lab', 'linked-profile'), 'dir')
+    const linked = runCli(root, ['--profile', 'lab/linked-profile'])
+    check('BUA MF-7: a profile symlink that escapes the workspace is refused (exit 2)',
+      linked.status === 2 && linked.out.includes('lab/'))
+    const outsideLab = runCli(root, ['--profile', 'artifacts/profile'])
+    check('BUA MF-7: a profile inside the workspace but outside lab/ is refused (exit 2)',
+      outsideLab.status === 2 && outsideLab.out.includes('lab/'))
+    const lexicalEscape = runCli(root, ['--profile', join('..', basename(outside))])
+    check('BUA MF-7: the lexical escape is still refused',
+      lexicalEscape.status === 2 && lexicalEscape.out.includes('inside the workspace'))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+    rmSync(outside, { recursive: true, force: true })
+  }
+}
+
+{
   // Profile plumbing: the profile the controller passed is the profile the browser opens.
   const launched = []
   const page = {

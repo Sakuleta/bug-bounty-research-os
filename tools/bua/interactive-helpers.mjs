@@ -11,8 +11,8 @@
  * suite pins the behavior this arm relies on.
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
-import { join, resolve, sep } from 'node:path'
+import { existsSync, realpathSync } from 'node:fs'
+import { join, relative, resolve, sep } from 'node:path'
 
 /** The helper module's own usage refusal: the read-only runner's `usage` exits the
  *  process, but this module must stay importable, so it throws a coded error instead —
@@ -348,6 +348,38 @@ export function insideRoot(root, rel, flag) {
   const abs = resolve(root, rel)
   if (abs !== resolve(root) && !abs.startsWith(resolve(root) + sep)) {
     usage(`${flag} must stay inside the workspace (got ${rel})`)
+  }
+  return abs
+}
+
+/** Resolve `--profile` to a real directory under the workspace's lab root.
+ *
+ *  Lexical containment is not containment: a workspace symlink (`lab/profile -> /tmp/x`)
+ *  passes a string-prefix check while pointing outside, so the nearest existing ancestor
+ *  of the profile path is realpath-resolved and must stay under `<root>/lab`. A profile
+ *  inside the workspace but outside `lab/` is refused too — the interactive arm runs on a
+ *  dedicated per-engagement lab profile only (never a shared/personal one). */
+export function resolveProfileDir(root, rel) {
+  const abs = insideRoot(root, rel, '--profile')
+  const rootAbs = resolve(root)
+  const labAbs = join(rootAbs, 'lab')
+  if (abs !== labAbs && !abs.startsWith(labAbs + sep)) {
+    usage(`--profile must stay under the workspace lab/ root (got ${rel})`)
+  }
+  let rootReal
+  try { rootReal = realpathSync(rootAbs) } catch { usage(`the workspace root is not resolvable (got ${rel})`) }
+  const labReal = join(rootReal, 'lab')
+  let probe = abs
+  while (!existsSync(probe)) {
+    const parent = resolve(probe, '..')
+    if (parent === probe) break
+    probe = parent
+  }
+  let real
+  try { real = realpathSync(probe) } catch { usage(`--profile is not resolvable (got ${rel})`) }
+  const target = probe === abs ? real : join(real, relative(probe, abs))
+  if (target !== labReal && !target.startsWith(labReal + sep)) {
+    usage(`--profile resolves outside the workspace lab/ root (got ${rel})`)
   }
   return abs
 }
