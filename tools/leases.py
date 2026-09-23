@@ -816,29 +816,45 @@ def reconcile(root: str | os.PathLike[str], run_id: str, *, now: float | None = 
     """
     root = Path(root)
     timestamp = _now(now)
-    if not registry_dir(root).is_dir():
-        # No registry to lock (and no state to release): report the missing input.
-        result = completion_predicate(root, run_id, now=timestamp)
-        result["recovery_required"] = result["verdict"]["state"] == "unknown-recovery-required"
-        result["attempts"] = 1
-        return result
-    with _lock(root):
-        current = verdict(root, run_id, now=timestamp)
-        result = _predicate_from_verdict(root, run_id, current)
-        if result["clear"] and not result["already_released"]:
-            try:
-                record = _write_transition_locked(
-                    root, run_id, state="released", event="release", now=timestamp,
-                    commit=result["commit"], reason="completion predicate clear",
-                    lease_id=current.get("lease_id"), require=("awaiting-reconciliation",))
-                result["released"] = True
-                result["release"] = record
-            except LeaseError:
-                # The state changed under the lock (e.g. a wrapper SIGTERM mark_unknown):
-                # re-read and report the blocked result — the automated path must never
-                # fall back to the reason-required manual-release lane.
-                current = verdict(root, run_id, now=timestamp)
-                result = _predicate_from_verdict(root, run_id, current)
-        result["recovery_required"] = result["verdict"]["state"] == "unknown-recovery-required"
-        result["attempts"] = 1
-        return result
+    try:
+        os.listdir(registry_dir(root))
+    except OSError:
+        # Missing or unreadable registry: there is no lock to take (and none should be
+        # created) — report the read-only verdict, which blocks (never clear).
+        return _reconcile_readonly(root, run_id, timestamp)
+    try:
+        with _lock(root):
+            return _reconcile_locked(root, run_id, timestamp)
+    except OSError:
+        # The registry could not be locked. Nothing was written; report the read-only
+        # verdict, which blocks.
+        return _reconcile_readonly(root, run_id, timestamp)
+
+
+def _reconcile_readonly(root: Path, run_id: str, timestamp: float) -> dict[str, Any]:
+    result = completion_predicate(root, run_id, now=timestamp)
+    result["recovery_required"] = result["verdict"]["state"] == "unknown-recovery-required"
+    result["attempts"] = 1
+    return result
+
+
+def _reconcile_locked(root: Path, run_id: str, timestamp: float) -> dict[str, Any]:
+    current = verdict(root, run_id, now=timestamp)
+    result = _predicate_from_verdict(root, run_id, current)
+    if result["clear"] and not result["already_released"]:
+        try:
+            record = _write_transition_locked(
+                root, run_id, state="released", event="release", now=timestamp,
+                commit=result["commit"], reason="completion predicate clear",
+                lease_id=current.get("lease_id"), require=("awaiting-reconciliation",))
+            result["released"] = True
+            result["release"] = record
+        except LeaseError:
+            # The state changed under the lock (e.g. a wrapper SIGTERM mark_unknown):
+            # re-read and report the blocked result — the automated path must never
+            # fall back to the reason-required manual-release lane.
+            current = verdict(root, run_id, now=timestamp)
+            result = _predicate_from_verdict(root, run_id, current)
+    result["recovery_required"] = result["verdict"]["state"] == "unknown-recovery-required"
+    result["attempts"] = 1
+    return result

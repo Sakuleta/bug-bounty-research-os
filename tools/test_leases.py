@@ -706,6 +706,18 @@ check("a mark_unknown before reconcile refuses (the manual lane is the only way 
       and outcome_race["state"] == "unknown-recovery-required"
       and outcome_race["recovery_required"] is True)
 
+# 21d. reconcile on an unreadable registry reports blocked — the lock cannot be taken,
+# so only the read-only verdict runs (never an error, never a release).
+r_unread_rec = make_run(root())
+try:
+    os.chmod(leases.registry_dir(r_unread_rec), 0o000)
+    outcome_unread = leases.reconcile(r_unread_rec, "sweep-1")
+    check("reconcile on an unreadable registry reports blocked, never a release",
+          outcome_unread["clear"] is False and outcome_unread["released"] is False
+          and outcome_unread["recovery_required"] is True)
+finally:
+    os.chmod(leases.registry_dir(r_unread_rec), 0o700)
+
 # 22. The CLI seam: exit 3 while blocked, exit 0 on clear, no 11_runtime side effect.
 r17 = make_run(root(), cells=("cell-a", "cell-missing"), manifests_for=("cell-a",))
 blocked = subprocess.run([sys.executable, str(RESEARCHCTL), str(r17), "lease-reconcile", "sweep-1"],
