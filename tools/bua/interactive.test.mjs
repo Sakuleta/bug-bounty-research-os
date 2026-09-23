@@ -27,6 +27,7 @@ import {
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
 let passed = 0
+let skipped = 0
 const failures = []
 
 function check(label, cond) {
@@ -37,6 +38,14 @@ function check(label, cond) {
     failures.push(label)
     console.log('FAIL: ' + label)
   }
+}
+
+// A provisioned-but-not-committed dependency (node_modules) must not fail the suite:
+// checks that can only run against it SKIP loudly instead of passing silently.
+// Mirrors the `SKIP (playwright/chromium unavailable)` idiom in run.e2e.test.mjs.
+function skip(label, cause) {
+  skipped += 1
+  console.log('SKIP (' + cause + ') — ' + label)
 }
 
 // ---- fixtures ---------------------------------------------------------------------
@@ -508,9 +517,9 @@ function runCli(root, extraArgs = []) {
 // ---- platform contract: the guard may only call Locator methods that exist ---------
 {
   const typesPath = join(REPO_ROOT, 'node_modules', 'playwright-core', 'types', 'types.d.ts')
-  check('B2 contract: playwright-core ships the type surface the contract is pinned against',
-    existsSync(typesPath))
   if (existsSync(typesPath)) {
+    check('B2 contract: playwright-core ships the type surface the contract is pinned against',
+      existsSync(typesPath))
     const types = readFileSync(typesPath, 'utf8')
     const start = types.indexOf('export interface Locator {')
     const end = types.indexOf('\n}', start)
@@ -528,6 +537,12 @@ function runCli(root, extraArgs = []) {
       source.includes('click({ trial: true'))
     check('B2 contract: the retired hitTargetCheck API is gone from the arm',
       !source.includes('hitTargetCheck'))
+  } else {
+    const typesSkip = 'playwright-core types not provisioned: node_modules/playwright-core/types/types.d.ts' +
+      ' is missing (run npm ci)'
+    skip('B2 contract: playwright-core ships the type surface the contract is pinned against', typesSkip)
+    skip('B2 contract: every Locator method the arm calls exists in playwright-core\'s interface Locator',
+      typesSkip)
   }
 }
 
@@ -2273,7 +2288,7 @@ print(json.dumps(tok))
   }
 }
 
-console.log(`\n${passed}/${passed + failures.length} passed`)
+console.log(`\n${passed}/${passed + failures.length} passed` + (skipped ? `, ${skipped} skipped` : ''))
 if (failures.length) {
   console.log('FAILURES: ' + failures.join(' | '))
   process.exit(1)
