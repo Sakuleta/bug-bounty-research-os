@@ -385,7 +385,7 @@ function parseArgs(argv) {
  *  engagement binding or the runtime directory marks the workspace (mirroring
  *  dsh-plugin/index.js, so deleting the OS_VERSION marker cannot disarm the
  *  runner); a directory with none of them is not a workspace (fail closed). */
-function findOsRoot(cwd) {
+export function findOsRoot(cwd) {
   let dir = resolve(cwd)
   for (let i = 0; i < 12; i++) {
     if (existsSync(join(dir, '11_runtime', 'events.jsonl'))
@@ -399,7 +399,7 @@ function findOsRoot(cwd) {
 }
 
 /** Keep workspace-owned paths inside the workspace. */
-function insideRoot(root, rel, flag) {
+export function insideRoot(root, rel, flag) {
   const abs = resolve(root, rel)
   if (abs !== resolve(root) && !abs.startsWith(resolve(root) + sep)) {
     usage(`${flag} must stay inside the workspace (got ${rel})`)
@@ -410,7 +410,7 @@ function insideRoot(root, rel, flag) {
 /** The authoritative scope seam. `researchctl scope-check` exits non-zero on a denied
  *  target with the verdict still on stdout (researchctl.py returns 3 when in_scope is
  *  false); any other spawn/parse failure throws and every caller fails closed. */
-function scopeCheckVerdict(url, root) {
+export function scopeCheckVerdict(url, root) {
   try {
     return JSON.parse(execFileSync(
       'python3',
