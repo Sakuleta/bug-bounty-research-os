@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from control_plane import external_judgment_allowed  # noqa: E402
 from knowledge_index import parse_index, rank_packs  # noqa: E402
-from ts_http import model_name, post_json  # noqa: E402
+from ts_http import model_name, post_json, validate_choice  # noqa: E402
 
 NONE = "none"
 POLICY_NOTE = "external judgment denied by engagement policy"
@@ -74,7 +74,9 @@ def suggest(root: Path, question: str, *, client=None, live: bool = True, timeou
     Returns {"source": "typesafe"|"idf", "suggested": pack|None, "ranked": [...],
     "probabilities": {...}, "confidence": float|None, "model": str|None, "usage": {...}}.
     `client` injects a callable (state, questions) -> response for tests; `live=False`
-    forces the deterministic IDF fallback.
+    forces the deterministic IDF fallback. A response that fails `validate_choice`
+    (unknown choice, simplex or argmax violation) is rejected: the deterministic order
+    is returned with the reason in `note`, never the invalid value.
     """
     order = idf_order(root, question)
     if not live or not external_judgment_allowed(root):
@@ -99,7 +101,16 @@ def suggest(root: Path, question: str, *, client=None, live: bool = True, timeou
     }}
     call = client or (lambda s, q: _http_call(s, q, timeout))
     resp = call({"research_question": question, "candidate_pack": cards}, questions)
-    answer = resp["answers"]["first_pack"]
+    answer = (resp.get("answers") or {}).get("first_pack")
+    problem = validate_choice(answer, names + [NONE])
+    if problem:
+        # Rejected, never surfaced: the invalid answer is not a ranking, so the seam
+        # reports the deterministic order with the rejection visible. Tokens were
+        # really spent, so the usage stays on the result for the cost ledger.
+        return {"source": "idf", "suggested": order[0] if order else None, "ranked": order,
+                "probabilities": {}, "confidence": None, "model": resp.get("model"),
+                "usage": resp.get("usage", {}),
+                "note": f"model response rejected: {problem}"}
     probs = answer.get("probabilities", {})
     ranked = sorted(names, key=lambda n: -probs.get(n, 0.0))
     choice = answer.get("choice")

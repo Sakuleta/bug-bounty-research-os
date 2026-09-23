@@ -22,7 +22,7 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 API = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_MODEL = "jev-latest"
@@ -92,3 +92,56 @@ def post_json(payload: dict, *, api_key: str, timeout: int = 60, url: str = API,
                 continue
             raise
     raise RuntimeError("unreachable: retry loop exhausted without a return or raise")
+
+
+# Choice answers are validated before they become values (ported from jev-ultrafast's
+# `validate_choice`): a probability simplex that is not ≈1 or a choice that is not the
+# argmax is a model/reporting error, never a verdict. Tolerance absorbs float noise.
+CHOICE_TOLERANCE = 0.05
+
+
+def validate_choice(answer: Any, choices: Iterable[str], *,
+                    tolerance: float = CHOICE_TOLERANCE) -> str | None:
+    """None when `answer` is a valid choice over `choices`; else the rejection reason.
+
+    Shape-aware and fail-closed: `choice` must be one of `choices`, and `probabilities`
+    — when present and non-empty — must map the choice to a finite, non-negative number
+    that is at or tied for the argmax. The simplex sum is checked only when the map
+    covers the whole answer space (a partial map has no total to check; the IDF and
+    `unavailable` shapes carry no probabilities at all and never reach this function).
+    Returning a reason means "reject": callers must fall back or flag, never take the
+    value. Ties at the argmax are allowed (the model must at least pick a maximum).
+    """
+    if not isinstance(answer, dict):
+        return f"answer is not an object (got {type(answer).__name__})"
+    choice = answer.get("choice")
+    allowed = list(choices)
+    if not isinstance(choice, str) or not choice.strip() or choice not in allowed:
+        return f"choice {choice!r} is not one of {', '.join(allowed)}"
+    probs = answer.get("probabilities")
+    if probs is None or probs == {}:
+        return None
+    if not isinstance(probs, dict):
+        return f"probabilities is not an object (got {type(probs).__name__})"
+    values: dict[str, float] = {}
+    for key, value in probs.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return f"probability {key!r} is not a number ({value!r})"
+        number = float(value)
+        if number != number or number in (float("inf"), float("-inf")):
+            return f"probability {key!r} is not finite ({value!r})"
+        if number < 0:
+            return f"probability {key!r} is negative ({number})"
+        values[str(key)] = number
+    if choice not in values:
+        return f"choice {choice!r} carries no probability in the returned map"
+    if set(values) >= set(allowed):
+        total = sum(values.values())
+        if abs(total - 1.0) > tolerance:
+            return f"probability simplex sums to {total:.4f} (expected 1.0 ± {tolerance})"
+    best = max(values.values())
+    if values[choice] < best - 1e-9:
+        argmax = [k for k, v in values.items() if v >= best - 1e-9]
+        return (f"choice {choice!r} is not the argmax ({values[choice]:.4f}; "
+                f"max {best:.4f} at {', '.join(sorted(argmax))})")
+    return None

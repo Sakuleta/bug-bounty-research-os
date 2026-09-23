@@ -972,4 +972,95 @@ check('backlog B10: a judgment-ledger write failure is surfaced, not swallowed',
 check('backlog B10: the happy path reports recorded judgments',
       _w14_out.get('judgments_recorded') is True)
 
+# 8. v8.3 V4: validate_choice — a model answer is validated before it becomes a value.
+#    Rejection is never coercion: callers fall back or flag, they never take the bad value.
+from ts_http import validate_choice  # noqa: E402
+
+CHOICES3 = ('supports', 'contradicts', 'says_nothing')
+check('validate_choice accepts a full simplex whose choice is the argmax',
+      validate_choice({'choice': 'supports',
+                       'probabilities': {'supports': 0.9, 'contradicts': 0.05, 'says_nothing': 0.05}},
+                      CHOICES3) is None)
+check('validate_choice accepts a partial probability map (legacy/IDF-adjacent shapes)',
+      validate_choice({'choice': 'supports', 'probabilities': {'supports': 0.9}}, CHOICES3) is None)
+check('validate_choice accepts absent probabilities and the none option',
+      validate_choice({'choice': 'none'}, ('none', 'pack-a')) is None)
+check('validate_choice rejects a choice outside the answer space',
+      'not one of' in str(validate_choice({'choice': 'maybe'}, CHOICES3)))
+check('validate_choice rejects a simplex violation',
+      'simplex' in str(validate_choice({'choice': 'supports',
+                                        'probabilities': {'supports': 0.5, 'contradicts': 0.2,
+                                                          'says_nothing': 0.1}}, CHOICES3)))
+check('validate_choice rejects an argmax mismatch',
+      'argmax' in str(validate_choice({'choice': 'contradicts',
+                                       'probabilities': {'supports': 0.8, 'contradicts': 0.15,
+                                                         'says_nothing': 0.05}}, CHOICES3)))
+check('validate_choice tolerates float noise around the simplex',
+      validate_choice({'choice': 'supports', 'probabilities': {'supports': 0.6,
+                                                               'contradicts': 0.2000000001,
+                                                               'says_nothing': 0.1999999999}},
+                      CHOICES3) is None)
+check('validate_choice tolerates ties at the argmax',
+      validate_choice({'choice': 'contradicts', 'probabilities': {'supports': 0.5, 'contradicts': 0.5}},
+                      CHOICES3) is None)
+check('validate_choice rejects negative, NaN and non-numeric probabilities',
+      validate_choice({'choice': 'supports', 'probabilities': {'supports': -0.5, 'contradicts': 1.5}},
+                      CHOICES3) is not None
+      and validate_choice({'choice': 'supports', 'probabilities': {'supports': float('nan')}},
+                          CHOICES3) is not None
+      and validate_choice({'choice': 'supports', 'probabilities': {'supports': 'high'}},
+                          CHOICES3) is not None)
+check('validate_choice rejects a non-object answer',
+      validate_choice(None, CHOICES3) is not None and validate_choice('supports', CHOICES3) is not None)
+check('validate_choice rejects a choice missing from its own probability map',
+      validate_choice({'choice': 'supports', 'probabilities': {'contradicts': 0.9}}, CHOICES3) is not None)
+
+# The triage seam rejects an invalid response to the deterministic IDF fallback with a
+# visible reason; usage is still real (tokens were spent) and never a value.
+bad_triage = lambda state, questions: {  # noqa: E731
+    'model': 'stub-bad',
+    'answers': {'first_pack': {'choice': 'not-a-pack', 'confidence': 0.99,
+                               'probabilities': {'not-a-pack': 1.0}}},
+    'usage': {'input_tokens': 3, 'output_tokens': 1},
+}
+rejected_triage = triage_suggest(POLICY_ALLOW, 'realtime socket subscription leak', client=bad_triage)
+check('triage rejects an invalid model response to the IDF fallback with the reason',
+      rejected_triage['source'] == 'idf' and rejected_triage['suggested'] == rejected_triage['ranked'][0]
+      and 'rejected' in rejected_triage.get('note', '')
+      and rejected_triage['usage'] == {'input_tokens': 3, 'output_tokens': 1})
+check('triage rejects a response with no answers instead of raising',
+      triage_suggest(POLICY_ALLOW, 'realtime socket subscription leak',
+                     client=lambda state, questions: {'model': 'stub-bad', 'usage': {}})['source'] == 'idf')
+
+# The claims seam flags an argmax-mismatched relation answer as invalid_choice.
+mismatch_client = lambda state, questions: {  # noqa: E731
+    'model': 'stub-1',
+    'answers': {'relation': {'type': 'choice', 'choice': 'contradicts', 'confidence': 0.99,
+                             'probabilities': {'supports': 0.9, 'contradicts': 0.05,
+                                               'says_nothing': 0.05}}},
+    'usage': {},
+}
+mismatch_out = check_claims(croot, {'claims': [{'id': 'c8', 'claim': 'x', 'evidence_ref': 'E-000001'}]},
+                            client=mismatch_client)
+check('an argmax-mismatched relation answer is flagged invalid_choice, never surfaced',
+      mismatch_out['results'][0]['verdict'] == 'invalid_choice'
+      and mismatch_out['results'][0]['auto'] is False
+      and 'argmax' in mismatch_out['results'][0].get('note', ''))
+
+# Replay normalizes a rejected answer to invalid_choice too, so an invalid stored record
+# replays deterministically instead of reporting a spurious drift/mismatch.
+invroot = Path(tempfile.mkdtemp())
+for d in ['00_control', '11_runtime']:
+    (invroot / d).mkdir(parents=True, exist_ok=True)
+(invroot / '00_control/engagement.yaml').write_text('external_judgment: "ALLOWED"\n')
+(invroot / '11_runtime/events.jsonl').write_text('')
+(invroot / 'proof.txt').write_text('HTTP 200 observed with title Example Domain\n')
+ControlPlane(invroot).register_evidence('proof.txt', kind='raw', source='test')
+_w14_check(invroot, {'claims': [{'id': 'inv1', 'claim': 'HTTP 200 was observed',
+                                 'evidence_ref': 'E-000001'}]}, client=mismatch_client)
+_replay_inv = _w14_replay(invroot, client=mismatch_client)
+check('replay reproduces an invalid_choice guard decision deterministically',
+      _replay_inv['replayed'] == 1 and _replay_inv['matched'] == 1
+      and _replay_inv['mismatched'] == 0)
+
 print(f'\n{len(passed)}/{len(passed)} passed')

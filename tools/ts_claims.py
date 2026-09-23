@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from control_plane import ControlPlane, external_judgment_allowed  # noqa: E402
-from ts_http import model_name, post_json  # noqa: E402
+from ts_http import model_name, post_json, validate_choice  # noqa: E402
 
 AUTO_ACCEPT = 0.8
 EXCERPT_CAP = 6000
@@ -286,7 +286,10 @@ def replay_judgments(root: Path, *, client, path: str | Path | None = None) -> d
             }}
             resp = client({"claim": record.get("claim"), "evidence": evidence}, questions)
             answer = (resp.get("answers") or {}).get("relation") or {}
-            verdict = str(answer.get("choice", ""))
+            problem = validate_choice(answer, VALID_CHOICES)
+            # A rejected answer replays as the same invalid_choice label the write path
+            # recorded, so replay compares guard decisions instead of raw strings.
+            verdict = str(answer.get("choice", "")) if problem is None else INVALID_CHOICE
             try:
                 confidence = float(answer.get("confidence", 0.0) or 0.0)
             except (TypeError, ValueError):
@@ -369,10 +372,12 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
                 usage = tresp.get("usage", {})
                 usage_in += int(usage.get("input_tokens", 0) or 0)
                 usage_out += int(usage.get("output_tokens", 0) or 0)
-                t_answer = tresp["answers"]["passage"]
+                t_answer = (tresp.get("answers") or {}).get("passage") or {}
                 t_conf = float(t_answer.get("confidence", 0.0) or 0.0)
                 choice = str(t_answer.get("choice", ""))
-                if choice == NONE:
+                problem = validate_choice(t_answer, [str(i) for i in range(1, len(passages) + 1)]
+                                          + [NONE])
+                if choice == NONE and problem is None:
                     results.append({
                         "id": cid, "claim": claim, "evidence_ref": ref,
                         "verdict": "says_nothing", "confidence": t_conf,
@@ -382,12 +387,13 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
                     })
                     resp = tresp
                     continue
-                if choice.isdigit() and 1 <= int(choice) <= len(passages):
+                if choice.isdigit() and 1 <= int(choice) <= len(passages) and problem is None:
                     evidence = passages[int(choice) - 1]
                     extra.update(passage_index=int(choice), triage_confidence=t_conf,
                                  triage_auto=t_conf >= auto_accept)
                 else:
-                    extra["note"] = (f"triage: unrecognized selection {choice!r}; "
+                    detail = f" ({problem})" if problem else ""
+                    extra["note"] = (f"triage: unrecognized selection {choice!r}{detail}; "
                                      "the relation ran on the full excerpt")
         questions = {"relation": {
             "type": "choice",
@@ -401,16 +407,18 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
         }}
         verify_state: dict = {}
         attempts = 0
+        invalid_reason: str | None = None
         while True:
             attempts += 1
             resp = call({"claim": claim, "evidence": evidence}, questions)
             usage = resp.get("usage", {})
             usage_in += int(usage.get("input_tokens", 0) or 0)
             usage_out += int(usage.get("output_tokens", 0) or 0)
-            answer = resp["answers"]["relation"]
+            answer = (resp.get("answers") or {}).get("relation") or {}
             confidence = float(answer.get("confidence", 0.0) or 0.0)
             choice = str(answer.get("choice", ""))
-            valid = choice in VALID_CHOICES
+            invalid_reason = validate_choice(answer, VALID_CHOICES)
+            valid = invalid_reason is None
             if not verify or not valid:
                 break
             vresp = call({"claim": claim, "verdict": choice, "evidence": evidence},
@@ -426,6 +434,12 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
             supported = str(vanswer.get("choice", "")) == "supported"
             verify_state = {"supported": supported, "confidence": vconfidence,
                             "attempts": attempts}
+            vproblem = validate_choice(vanswer, VERIFY_CHOICES)
+            if vproblem:
+                # The verify answer failed validation: it is still treated as
+                # not-supported (fail closed), but the reason is visible instead of
+                # the invalid choice being silently coerced.
+                verify_state["invalid_choice"] = vproblem
             if supported or attempts >= VERIFY_MAX_RELATION_ATTEMPTS:
                 break
         result = {
@@ -441,7 +455,9 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
                 result["note"] = ("verify-clause: the cited evidence does not support "
                                   f"the {choice} verdict after {attempts} attempts; flagged for review")
         if not valid:
-            result["note"] = f"unrecognized relation choice {choice!r}; flagged for review"
+            result["note"] = (f"unrecognized relation choice {choice!r}"
+                              + (f" ({invalid_reason})" if invalid_reason else "")
+                              + "; flagged for review")
         result.update(extra)
         results.append(result)
         judgments.append({
