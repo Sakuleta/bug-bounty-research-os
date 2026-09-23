@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  DEFAULT_MAX_STEPS, GUARD_RETRY_CAP, REPLAN_CAP, TYPE_TEXT_MAX, buildBoundary,
+  DEFAULT_MAX_STEPS, GUARD_RETRY_CAP, REPLAN_CAP, TYPE_TEXT_MAX, buildActionShape, buildBoundary,
   classifyAction, guardDispatch, isSubmitControl, parseOperation, planContext, resolveLoginTargets,
   resolveOperation, resolveUploadPath,
   runInteractive, runLoop,
@@ -60,6 +60,9 @@ const fakeLocator = ({ box, covered = false, probeError = null, visible = true }
         '  - <div class="overlay">…</div> subtree intercepts pointer events')
     }
   },
+  fill: async () => {},
+  selectOption: async () => {},
+  setInputFiles: async () => {},
 })
 
 // ===================================================================================
@@ -1405,6 +1408,143 @@ print(json.dumps(tok))
     check('B5 e2e: the summary artifact carries the scope-guard flags and the blocked reason',
       artifact.blocked_reason.includes('denied') && Array.isArray(artifact.blocked_requests)
       && artifact.blocked_requests.length === 0)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+// ---- the per-action preflight binds op + target + scope verdict (MF-4) -------------
+{
+  const click = buildActionShape({ op: { op: 'CLICK', handle: 'e1' }, snapshotUrl: 'https://t.example/app',
+                                   principal: 'researcher-A' })
+  const type = buildActionShape({ op: { op: 'TYPE', handle: 'e2', text: 'x' }, snapshotUrl: 'https://t.example/app',
+                                  principal: 'researcher-A' })
+  const nav = buildActionShape({ op: { op: 'NAVIGATE', url: 'https://t.example/next' },
+                                 snapshotUrl: 'https://t.example/app', principal: 'researcher-A' })
+  check('BUA M8: the action shape carries the browser base and the op/target/scope binding',
+    click.url === 'https://t.example/app' && click.principal === 'researcher-A'
+    && click.headers['x-research-os-bua-op'] === 'CLICK'
+    && click.headers['x-research-os-bua-target'] === 'e1'
+    && click.headers['x-research-os-bua-scope'] === 'IN_SCOPE')
+  check('BUA M8: two different operations on one page produce different shapes',
+    JSON.stringify(click) !== JSON.stringify(type)
+    && click.headers['x-research-os-bua-target'] !== type.headers['x-research-os-bua-target'])
+  check('BUA M8: a NAVIGATE binds its own url and no handle',
+    nav.url === 'https://t.example/next' && nav.headers['x-research-os-bua-target'] === '')
+  check('BUA M8: the digest-input keys are lowercase (canonical form)',
+    Object.keys(click.headers).every((k) => k === k.toLowerCase()))
+}
+
+{
+  // Sprint BUA M8/MF-4 end to end: the payload the runner really generates passes the
+  // real `researchctl prepare` (scope_status derived by the runner, op+target+scope in
+  // the hashed shape), and two operations on one page hash differently.
+  const root = mkdtempSync(join(tmpdir(), 'bua-preflight-e2e-'))
+  try {
+    mkdirSync(join(root, '11_runtime'), { recursive: true })
+    mkdirSync(join(root, '00_control'), { recursive: true })
+    mkdirSync(join(root, '12_knowledge', 'fixture'), { recursive: true })
+    writeFileSync(join(root, '11_runtime', 'events.jsonl'), '')
+    writeFileSync(join(root, '12_knowledge', 'fixture', 'fixture.md'), '# Fixture pack\n')
+    writeFileSync(join(root, '12_knowledge', 'INDEX.yaml'),
+      'packs:\n  fixture:\n    load_when: [interactive, fixture]\n    files: [fixture.md]\n')
+    writeFileSync(join(root, '00_control', 'engagement.yaml'),
+      'scope:\n  assets:\n  - "t.example"\n' +
+      'budget:\n  max_actions_per_cycle: 10\n  max_actions_per_engagement: 50\n')
+    writeFileSync(join(root, 'preflight.json'), JSON.stringify({
+      cycle_id: 'C-0001', target: 'https://t.example', account: 'researcher-A',
+      object_owner: 'researcher-A', purpose: 'interactive preflight binding',
+      hypothesis: 'H-0001', expected_secure: 'denied', expected_vulnerable: 'allowed',
+      side_effect: 'none', stop_condition: 'stop on unsafe behavior',
+      text_values: ['probe-text'],
+    }))
+    symlinkSync(join(REPO_ROOT, 'tools'), join(root, 'tools'), 'dir')
+    writeFileSync(join(root, 'fixture.py'), `
+import json, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / 'tools'))
+from control_plane import ControlPlane
+root = Path(sys.argv[1])
+cp = ControlPlane(root)
+cp.create_cycle('C-0001', {
+    'id': 'C-0001', 'type': 'DISCOVERY', 'objective': 'interactive preflight fixture',
+    'allowed_scope': ['t.example'], 'stop_conditions': ['stop'], 'controls': [],
+    'status': 'PLANNED',
+    'knowledge_triage': [{'pack': 'fixture', 'verdict': 'SKIP',
+                          'reason': 'fixture triage covers this pack'}],
+})
+(root / '04_cycles/C-0001').mkdir(parents=True, exist_ok=True)
+(root / '04_cycles/C-0001/objective.md').write_text(
+    '# Cycle Objective\\n\\n## Question\\nDoes behavior differ by principal?\\n\\n'
+    '## Minimal test\\nTwo-principal differential on a researcher-owned object.\\n')
+cp.transition_cycle('C-0001', 'READY', reason='ready')
+cp.transition_cycle('C-0001', 'RUNNING', reason='run')
+cp.create_hypothesis('H-0001', {'cycle_id': 'C-0001', 'observation': 'fixture',
+                                'hypothesis': 'fixture', 'secure_prediction': 'denied',
+                                'vulnerable_prediction': 'allowed'})
+tok = cp.prepare_action({
+    'cycle_id': 'C-0001', 'target': 'https://t.example/app', 'scope_status': 'IN_SCOPE',
+    'account': 'researcher-A', 'object_owner': 'researcher-A',
+    'purpose': 'interactive preflight binding', 'hypothesis': 'H-0001',
+    'expected_secure': 'denied', 'expected_vulnerable': 'allowed',
+    'side_effect': 'none', 'stop_condition': 'stop on unsafe behavior',
+    'tool_family': 'browser',
+    'request_shape': {'url': 'https://t.example/app', 'principal': 'researcher-A'},
+})
+print(json.dumps(tok))
+`)
+    const entryToken = JSON.parse(execFileSync('python3', [join(root, 'fixture.py'), root],
+                                               { encoding: 'utf8' }))
+
+    const entries = [entry('e1'), entry('e2', { tag: 'input', type: 'text', ops: ['CLICK', 'TYPE'] })]
+    const page = {
+      on() {}, mainFrame: () => ({}), url: () => 'https://t.example/app',
+      title: async () => 'App', screenshot: async () => {},
+      viewportSize: () => viewport, locator: () => ({ all: async () => [] }),
+      goto: async () => ({ status: () => 200 }),
+    }
+    const context = {
+      on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+      async route() {}, async routeWebSocket() {}, async addInitScript() {},
+      async newCDPSession() { return { send: async () => ({}), on() {} } },
+    }
+    const plan = (() => {
+      const plans = [
+        { ok: true, source: 'typesafe', operation: { op: 'CLICK', handle: 'e1' } },
+        { ok: true, source: 'typesafe', operation: { op: 'TYPE', handle: 'e2', text: 'probe-text' } },
+        { ok: true, source: 'typesafe', operation: { op: 'DONE' } },
+      ]
+      let i = 0
+      return async () => plans[Math.min(i++, plans.length - 1)]
+    })()
+    const summary = await runInteractive({
+      root,
+      args: {
+        url: 'https://t.example/app', principal: 'researcher-A', action: entryToken.action_id,
+        profile: 'lab/bua-profile', preflight: 'preflight.json', 'out-dir': 'artifacts',
+        steps: '3',
+      },
+      chromium: { launchPersistentContext: async () => context },
+      snapshot: async () => ({ generation: 1, entries,
+                               locators: new Map([['e1', fakeLocator()], ['e2', fakeLocator()]]),
+                               url: 'https://t.example/app', title: 'App' }),
+      plan,
+      verify: async () => ({ ok: true, evidence: 'E-000009', capture: 'shot.png' }),
+      log: () => {},
+    })
+    check('BUA M8 e2e: the runner-generated payload passes the real prepare seam',
+      summary.history.length === 2 && summary.history.every((h) => h.status === 'recorded'))
+    const tokens = readFileSync(join(root, '11_runtime', 'action-tokens.jsonl'), 'utf8')
+      .split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l))
+    const digests = tokens.filter((t) => t.argument_digest).map((t) => t.argument_digest)
+    check('BUA M8 e2e: two different operations on one page hash differently',
+      digests.length >= 3 && new Set(digests).size === digests.length)
+    const prepared = tokens.filter((t) => t.preflight && t.preflight.action_class)
+    check('BUA M8 e2e: the minted tokens carry the op binding in their hashed shape',
+      prepared.length === 2 && prepared.every((t) => t.preflight.scope_status === 'IN_SCOPE'
+        && t.preflight.request_shape.headers['x-research-os-bua-op']))
+    check('BUA M8 e2e: the receipts carry the derived scope status (record_action accepted them)',
+      readdirSync(join(root, 'artifacts')).filter((f) => f.endsWith('.receipt.json')).length === 2)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

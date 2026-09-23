@@ -346,6 +346,28 @@ export function resolveUploadPath(root, rel) {
   return { ok: true, path: real }
 }
 
+/** The digest-bound shape of one runner-initiated action. The browser token's
+ *  `{url, principal}` base stays, and the canonical `headers` slot carries the action
+ *  type, the executor-issued target (handle/file) and the runner-derived scope verdict —
+ *  so a token prepared for one operation can never authorize another on the same page.
+ *  `canonical_request_shape` hashes exactly these bytes; the DSH executor never consumes
+ *  these controller-driven tokens (they are consumed through `researchctl token-consume`
+ *  immediately before the dispatch), so the plugin's `{url, principal}` digest is
+ *  untouched. The runner sets `scope_status` from its own verdict: the loop's scope
+ *  re-check refused anything not in scope immediately before this shape was built. */
+export function buildActionShape({ op, snapshotUrl, principal, scopeStatus = 'IN_SCOPE' }) {
+  const url = op && op.op === 'NAVIGATE' ? op.url : snapshotUrl
+  return {
+    url: String(url == null ? '' : url),
+    principal: String(principal == null ? '' : principal),
+    headers: {
+      'x-research-os-bua-op': String((op && op.op) || ''),
+      'x-research-os-bua-target': String((op && (op.handle || op.file)) || ''),
+      'x-research-os-bua-scope': String(scopeStatus || ''),
+    },
+  }
+}
+
 /** The boundary context: the executor's snapshot index plus the executor-owned label
  *  spaces (text options, upload files, login flows, block reasons). Throws on a refused
  *  upload file or text value — a run with an unusable boundary must not start. */
@@ -1359,13 +1381,18 @@ export async function runInteractive({ root, args, chromium, ctl = makeCtl(root)
       entryToken = null
       return { ok: true, token: spent }
     }
-    const shape = { url: op.op === 'NAVIGATE' ? op.url : (snapAt.url || args.url), principal: args.principal }
+    // The token binds the exact action: op + executor-issued target + the runner-derived
+    // scope verdict ride the hashed shape, and the prepare payload carries the required
+    // `scope_status` from that same verdict (the scope re-check refused anything not in
+    // scope immediately before authorize runs).
+    const shape = buildActionShape({ op, snapshotUrl: snapAt.url || args.url,
+                                     principal: args.principal, scopeStatus: 'IN_SCOPE' })
     const shapeRel = join(outDirRel, `${label}-shape-s${step}.json`)
     writeFileSync(join(root, shapeRel), JSON.stringify(shape) + '\n')
     const prepareRel = join(outDirRel, `${label}-prepare-s${step}.json`)
     writeFileSync(join(root, prepareRel), JSON.stringify({
       ...preflight, target: shape.url, tool_family: 'browser', action_class: actionClass,
-      request_shape: shape,
+      scope_status: 'IN_SCOPE', request_shape: shape,
     }) + '\n')
     const prepared = ctl(['prepare', prepareRel])
     if (!prepared || !prepared.action_id) {
