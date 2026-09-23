@@ -354,6 +354,10 @@ def ground_state(root: Path, question: str, *, provider: Provider | None = None,
                          "judgment was produced; raise GROUND_MAX_CALLS_PER_CYCLE or "
                          "start a new cycle")}
     usage_total: dict[str, int] = {}
+    # The spend ledger must not double count: `screen_text` already ledgers one `screen`
+    # row per screening call, so the `ground` row prices the judgment call only, while
+    # `usage_total` (the result/manifest figure) still reports the true total spend.
+    judgment_usage: dict[str, int] = {}
     excluded: list[dict[str, Any]] = []
     kept: list[dict[str, Any]] = []
     screening_client = client
@@ -391,6 +395,7 @@ def ground_state(root: Path, question: str, *, provider: Provider | None = None,
         questions = {**_support_questions(len(kept)), **_verdict_question()}
         resp = call(state, questions)
         _usage_add(usage_total, resp.get("usage"))
+        _usage_add(judgment_usage, resp.get("usage"))
         model = resp.get("model")
         answers = resp.get("answers") if isinstance(resp.get("answers"), dict) else {}
         for i, snippet in enumerate(kept, 1):
@@ -439,14 +444,16 @@ def ground_state(root: Path, question: str, *, provider: Provider | None = None,
         "sources": [{"source": s["source"], "date": s["date"]} for s in kept],
         "excluded": excluded, "relevant": relevant, "verdict": verdict,
         "confidence": confidence, "auto": auto, "model": model,
-        "usage": usage_total, "posture": posture, "endpoint": API,
+        "usage": usage_total, "judgment_usage": judgment_usage,
+        "posture": posture, "endpoint": API,
         "calls": calls_used,
     }
     ledger = root / GROUNDING_REL
     ledger.parent.mkdir(parents=True, exist_ok=True)
     with ledger.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-    record_seam_cost(root, decision="ground", out=out, cycle_id=cycle_id)
+    record_seam_cost(root, decision="ground", out={**out, "usage": judgment_usage},
+                     cycle_id=cycle_id)
     return out
 
 

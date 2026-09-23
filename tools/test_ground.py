@@ -349,6 +349,34 @@ check("the redacted question is what the ledger and the cycle cache carry",
       and "[REDACTED]" in sec_ledger[-1]["question"]
       and "[REDACTED]" in sec_cache["entries"][list(sec_cache["entries"])[0]]["question"])
 
+# 13. Fix (Spec MF-4): screening spend is ledgered by `screen_text` per call; the ground
+#     row carries the judgment usage only. The ledger therefore sums exactly the tokens
+#     actually spent, while the result still reports the true total.
+from ts_cost import cost_rows  # noqa: E402
+
+cost_root = workspace('external_judgment: "ALLOWED"\ngrounding: "ALLOWED"\n')
+
+
+def cost_client(state, questions):
+    if "content" in state:  # the screening battery (10 in + 2 out per snippet)
+        return {"model": "stub-screen",
+                "answers": {name: {"type": "noul", "noul": 0.02} for name in questions},
+                "usage": {"input_tokens": 10, "output_tokens": 2}}
+    return ground_client(state, questions)  # the judgment call (50 in + 5 out)
+
+
+cost_out = ground_state(cost_root, "Was version 6.0 released?", provider=FakeProvider(SNIPPETS),
+                        client=cost_client, cycle_id="C-9201")
+cost_rows_out = cost_rows(cost_root)
+screen_rows = [r for r in cost_rows_out if r["decision"] == "screen"]
+ground_rows = [r for r in cost_rows_out if r["decision"] == "ground"]
+check("screening usage is ledgered once (per call), not re-folded into the ground row",
+      len(screen_rows) == 2 and len(ground_rows) == 1
+      and ground_rows[0]["input_tokens"] == 50 and ground_rows[0]["output_tokens"] == 5
+      and sum(r["input_tokens"] + r["output_tokens"] for r in cost_rows_out) == 2 * 12 + 55)
+check("the grounded result still reports the true total spend",
+      cost_out["usage"] == {"input_tokens": 70, "output_tokens": 9})
+
 # 9. CLI wiring: `researchctl ground <question> --cycle C-…` runs the seam.
 import contextlib  # noqa: E402
 import io  # noqa: E402
