@@ -542,7 +542,8 @@ export function resolveOperation(operation, ctx) {
  *  capture/receipt, with DONE requiring a fresh verification and BLOCKED a first-class
  *  outcome. Every deps entry is injectable so the loop is tested without a browser. */
 export async function runLoop(deps) {
-  const maxSteps = Number.isInteger(deps.maxSteps) && deps.maxSteps > 0 ? deps.maxSteps : DEFAULT_MAX_STEPS
+  const requested = Number.isInteger(deps.maxSteps) && deps.maxSteps > 0 ? deps.maxSteps : DEFAULT_MAX_STEPS
+  const maxSteps = Math.min(requested, MAX_STEPS_CAP)
   const events = []
   const history = []
   const guardFails = new Map()
@@ -1230,6 +1231,7 @@ export async function runInteractive({ root, args, chromium, ctl = makeCtl(root)
       try {
         await page.screenshot({ path: join(root, shotRel) })
         screenshot = shotRel
+        summary.screenshot = shotRel
       } catch { screenshot = null }
     }
     const registered = ctl(['evidence', 'register', captureRel, 'bua-interactive-action',
@@ -1263,21 +1265,19 @@ export async function runInteractive({ root, args, chromium, ctl = makeCtl(root)
     }
     return { ok: true, id: recorded.entity_id }
   }
-  const realAuthorize = async ({ op, snapshot: snapAt, actionClass }) => {
+  const realAuthorize = async ({ op, snapshot: snapAt, step, actionClass }) => {
     if (op.op === 'NAVIGATE' && entryToken && String(entryToken.preflight && entryToken.preflight.target || args.url) === String(op.url)) {
       return { ok: true, token: entryToken }
     }
     const shape = { url: op.op === 'NAVIGATE' ? op.url : (snapAt.url || args.url), principal: args.principal }
-    const shapeRel = join(outDirRel, `${label}-shape-${Date.now()}.json`)
+    const shapeRel = join(outDirRel, `${label}-shape-s${step}.json`)
     writeFileSync(join(root, shapeRel), JSON.stringify(shape) + '\n')
-    const prepared = ctl(['prepare', (() => {
-      const prepareRel = join(outDirRel, `${label}-prepare-${Date.now()}.json`)
-      writeFileSync(join(root, prepareRel), JSON.stringify({
-        ...preflight, target: shape.url, tool_family: 'browser', action_class: actionClass,
-        request_shape: shape,
-      }) + '\n')
-      return prepareRel
-    })()])
+    const prepareRel = join(outDirRel, `${label}-prepare-s${step}.json`)
+    writeFileSync(join(root, prepareRel), JSON.stringify({
+      ...preflight, target: shape.url, tool_family: 'browser', action_class: actionClass,
+      request_shape: shape,
+    }) + '\n')
+    const prepared = ctl(['prepare', prepareRel])
     if (!prepared || !prepared.action_id) {
       return { ok: false, reason: 'prepare refused the action: ' + String((prepared && (prepared.error || prepared.reason)) || 'unknown') }
     }
@@ -1411,7 +1411,7 @@ async function main() {
     if (!Number.isInteger(steps) || steps < 1 || steps > MAX_STEPS_CAP) {
       usage(`--steps must be an integer 1..${MAX_STEPS_CAP} (MAX_STEPS cap)`)
     }
-    await runInteractive({ root, args: { ...args, steps: String(steps) }, ctl: makeCtl(root) })
+    await runInteractive({ root, args: { ...args, steps: String(steps) } })
   } catch (e) {
     if (e instanceof Refusal) {
       console.error('bua-interactive: ' + maskText(e.message))
