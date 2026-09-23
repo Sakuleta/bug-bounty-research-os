@@ -67,6 +67,21 @@ r = run("claims_eval.py", "--force", "--root", str(ALLOWED_ROOT))
 check("claims refuses without TYPESAFE_API_KEY even when allowed",
       r.returncode != 0 and "TYPESAFE_API_KEY" in r.stdout + r.stderr)
 
+# screen_eval.py / grounding_eval.py / novelty_eval.py / rank_eval.py / label_eval.py /
+# honesty_eval.py: same guard chain — no --force -> refuse; --force + DENIED -> refuse;
+# --force + ALLOWED but no key -> refuse. Each must exit non-zero before any network call.
+for script in ("screen_eval.py", "grounding_eval.py", "novelty_eval.py", "rank_eval.py",
+               "label_eval.py", "honesty_eval.py"):
+    r = run(script)
+    check(f"{script} refuses to run live without --force",
+          r.returncode != 0 and "--force" in r.stdout + r.stderr)
+    r = run(script, "--force", "--root", str(DENIED_ROOT))
+    check(f"{script} refuses when the engagement policy denies external judgment",
+          r.returncode != 0 and "denied" in (r.stdout + r.stderr).lower())
+    r = run(script, "--force", "--root", str(ALLOWED_ROOT))
+    check(f"{script} refuses without TYPESAFE_API_KEY even when allowed",
+          r.returncode != 0 and "TYPESAFE_API_KEY" in r.stdout + r.stderr)
+
 # Output rule: committed artifacts are never overwritten without --force; with --force
 # the write is a replace of a temp file (the target is replaced, never half-written).
 sys.path.insert(0, str(HERE))

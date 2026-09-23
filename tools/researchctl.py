@@ -217,6 +217,13 @@ def main() -> int:
     frs = fr.add_subparsers(dest="op", required=True)
     x = frs.add_parser("record"); x.add_argument("json"); x.set_defaults(fn="freshness-record")
     x = frs.add_parser("status"); x.set_defaults(fn="freshness-status")
+    scr = sub.add_parser("screen", help="run the fixed injection battery over a registered "
+                                        "evidence artifact's store copy; a flagged verdict "
+                                        "quarantines a review copy and withholds the text "
+                                        "from external judgment (never dropped)")
+    scr.add_argument("evidence_ref", help="registered E-* id (screen web-fetch output, BUA "
+                                          "captures and excerpts by registering them first)")
+    scr.set_defaults(fn="screen")
     bu = sub.add_parser("budget")
     bus = bu.add_subparsers(dest="op", required=True)
     x = bus.add_parser("status", help="limits, counted actions (recorded + outstanding tokens) and remaining")
@@ -329,6 +336,9 @@ def main() -> int:
             out = cp.record_freshness(load_json(ns.json))
         elif ns.fn == "freshness-status":
             out = cp.freshness_report()
+        elif ns.fn == "screen":
+            from ts_screen import screen_evidence
+            out = screen_evidence(Path(ns.root), ns.evidence_ref)
         elif ns.fn == "budget-status":
             out = cp.budget_status()
         elif ns.fn == "budget-set":
@@ -390,6 +400,12 @@ def main() -> int:
                   f"errors={len(out.get('errors', []))} (aid, not a gate)", file=sys.stderr)
             if ns.fail_on_flag and s["flagged"]:
                 return 1
+        if ns.fn == "screen":
+            verdict = ("FLAGGED" if out.get("flagged") else
+                       ("clean" if out.get("flagged") is False else "unavailable"))
+            print(f"screen {ns.evidence_ref}: {verdict} "
+                  f"(flagged_questions={out.get('flagged_questions') or []}, "
+                  f"quarantine={out.get('quarantine_path')})", file=sys.stderr)
         if (ns.fn == "budget-set" and isinstance(out, dict)
                 and out.get("payload", {}).get("below_current_count")):
             print("warning: the new caps are below the current recorded action counts — "

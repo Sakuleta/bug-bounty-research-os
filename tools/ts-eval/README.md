@@ -33,6 +33,19 @@ says_nothing. Result: 10/10 verdict accuracy; the deliberately unanswerable clai
 flagged at 0.45 confidence. `claims_results.json` is the recorded seam output
 (verdicts, confidences, probabilities, model id, usage).
 
+### 3. Injection screening — `screen_eval_set.json` + `screen_eval.py` + `screen_results.json` (v8.3)
+
+A 12-item labeled set (six injection-shaped, six benign allow-cases including a
+security note that quotes injection strings and a run log) over the fixed four-question
+Noul battery shipped in `tools/ts_screen.py`. Baseline: a fixed regex battery over the
+raw text. Positive class: injection. Measured: baseline precision 0.75 / recall 1.00 /
+F1 0.857; Jev battery precision 0.857 / recall 1.00 / F1 0.923 — the seam ships on the
+win. `inj-action` (a shell-command instruction) is refused by the API edge with HTTP
+403; the seam fails closed and counts it as flagged (quarantined for review), which the
+result rows record under `jev_error` (`refused_calls` in the payload). Question wording
+was iterated on the set: the boundary clauses ("what the content itself does, not what
+it quotes") moved the three benign false positives to clear.
+
 ## How to rerun
 
 Both scripts are stdlib-only Python 3 and read `TYPESAFE_API_KEY` from the environment.

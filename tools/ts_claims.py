@@ -53,18 +53,29 @@ def _unavailable(note: str, auto_accept: float) -> dict:
             "model": None, "usage": {}, "note": note}
 
 
-def evidence_excerpt(root: Path, ref: str, cap: int = EXCERPT_CAP) -> str:
+def evidence_excerpt(root: Path, ref: str, cap: int = EXCERPT_CAP, *,
+                     constrained: bool = True) -> str:
     """Registered evidence text, bounded, read from the content-addressed store copy.
 
     The store copy under 11_runtime/evidence-store/ is the registered artifact (audits
     verify it; review quotes must match it); the living path is mutable and must never
     be what the seam reasons over. A legacy record without a store_path falls back to
     its readable living path, never a guessed filename.
+
+    With `constrained=True` (the default) a screening verdict that flagged this ref
+    short-circuits to the constrained view (the flag + the quarantine pointer, text
+    withheld) — flagged content never flows into external judgment as-is. Screening
+    itself reads with `constrained=False` so the store copy is what gets screened.
     """
     index = ControlPlane(root).evidence_index()
     meta = index.get(ref)
     if not meta:
         raise ValueError(f"unknown evidence ref: {ref}")
+    if constrained:
+        from ts_screen import constrained_view  # lazy: ts_screen imports this module
+        view = constrained_view(Path(root), ref)
+        if view is not None:
+            return view
     store_rel = str(meta.get("store_path") or "")
     path = (root / store_rel) if store_rel else (root / str(meta.get("path", "")))
     if not path.is_file():
