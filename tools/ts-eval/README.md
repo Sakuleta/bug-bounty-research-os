@@ -61,6 +61,17 @@ payload records the eval-integrity posture (scored OS runs keep grounding off un
 the engagement explicitly allows it; this eval's after-web arm runs under the explicit
 `grounding: "ALLOWED"` opt-in).
 
+### 5. Novelty/duplicate aid — `novelty_eval_set.json` + `novelty_eval.py` + `novelty_results.json` (v8.3)
+
+Nine labeled finding-shaped pairs (three same, four different, two unclear). Baseline:
+keyword overlap (the seam's blocking threshold) means `same`, else `different` — a
+deterministic similarity heuristic that cannot express uncertainty. Seam:
+`ts_novelty.check_novelty` (blocking first, then one pairwise Choice per blocked
+candidate; `unclear` to the human lane; an empty proposal list means `different`).
+Measured: baseline 6/9, seam 8/9 — the seam ships. The one miss is an `unclear`-labeled
+pair the model called `different` at 0.88 confidence (recorded in the rows; the human
+lane only fires when the model is uncertain or below the confidence threshold).
+
 ## How to rerun
 
 Both scripts are stdlib-only Python 3 and read `TYPESAFE_API_KEY` from the environment.

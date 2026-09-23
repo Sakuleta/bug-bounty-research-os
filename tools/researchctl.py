@@ -224,6 +224,11 @@ def main() -> int:
     gr.add_argument("question")
     gr.add_argument("--cycle", default=None)
     gr.set_defaults(fn="ground")
+    nv = sub.add_parser("novelty", help="advisory novelty/duplicate aid: pairwise Choice over "
+                                        "blocked candidates (unclear routes to the human lane; "
+                                        "the deterministic audit stays the only PASS)")
+    nv.add_argument("candidate_json", help='{"id": "...", "text": "..."} candidate')
+    nv.set_defaults(fn="novelty")
     scr = sub.add_parser("screen", help="run the fixed injection battery over a registered "
                                         "evidence artifact's store copy; a flagged verdict "
                                         "quarantines a review copy and withholds the text "
@@ -349,6 +354,9 @@ def main() -> int:
         elif ns.fn == "ground":
             from ts_ground import ground_state
             out = ground_state(Path(ns.root), ns.question, cycle_id=ns.cycle)
+        elif ns.fn == "novelty":
+            from ts_novelty import check_novelty
+            out = check_novelty(Path(ns.root), load_json(ns.candidate_json))
         elif ns.fn == "budget-status":
             out = cp.budget_status()
         elif ns.fn == "budget-set":
