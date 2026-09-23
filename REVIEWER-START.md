@@ -31,9 +31,9 @@ are in the request you received.
 | `START.md` | 153 | The engagement entry contract: loop, gates, closure |
 | `AGENTS.md` | 299 | The operational flow an agent must follow |
 | `tools/control_plane.py` | 3825 | **The single policy seam**: event schema (incl. `os_version` stamping), state machine, projections (incl. `knowledge-usage`/`knowledge-proposals`), guards, audit/freshness/evidence/technique/budget records, `KNOWLEDGE_PROPOSED`/`KNOWLEDGE_RESOLVED`, and the broker integration (`set_scope` policy push, `prepare` minting signed single-use tokens through `tools/broker/`, `scope_check` delegation) |
-| `tools/audit.py` | 1412 | What the machine audit actually checks (and what it does not): reviewed-cycle binding, audit content, budget caps, closure-proof parsing, `--emit-proof` |
+| `tools/audit.py` | 1432 | What the machine audit actually checks (and what it does not): reviewed-cycle binding, audit content, budget caps, closure-proof parsing, `--emit-proof` |
 | `dsh-plugin/index.js` | 2673 | Enforcement R1–R7: write protection, raw-egress gate, single-use preflight tokens, executor-side scope, browser-launch gate, capture redaction, broker-minted token consumption (R7) |
-| `tools/test_control_plane.py` | 3714 | Executable spec for the seam |
+| `tools/test_control_plane.py` | 3745 | Executable spec for the seam |
 | `tools/test_scope_parity.py` | 131 | Cross-language scope parity: Python `scope_check` vs the enforcer `scopeReasonFor` (SKIPs when node is unavailable) |
 | `tools/test_replay.py` | 368 | Executor replay diff (two identical runs over a canned local server) + capture integrity (secret scan, masker idempotence) in one harness |
 | `tools/test_broker.py` | 1308 | Executable spec for the policy broker (real daemon on a temp home, real Unix socket: protocol, policy, mint/consume, fail-closed paths, control-plane integration) |
@@ -72,12 +72,12 @@ check whether the audit's PASS is earned.
 
 ## Tier 4 — remaining tools, knowledge, skills, schemas
 
-- Tools: `researchctl.py` (505), CLI over the seam (incl. the broker commands:
+- Tools: `researchctl.py` (514), CLI over the seam (incl. the broker commands:
   `scope-set` policy push, broker-minted `prepare`, `scope-check` delegation,
   `review-issue` review vouchers, `identity-binding` readout,
   `broker serve`/`status`), `cycle.py` (159), `build_context.py` (164),
   `knowledge_index.py` (165), `ts_triage.py` (141),
-  `ts_claims.py` (553, incl. the verify-clause judge, judgment ledger and offline
+  `ts_claims.py` (664, incl. the verify-clause judge, judgment ledger and offline
   replay), `bua/run.mjs` (774), browser runner, `provision.py` (50),
   `validate_workspace.py` (117, OS-checkout vs engagement-snapshot contract),
   `secret-patterns.json` + `generate_secret_patterns.py` (92, the single
@@ -85,8 +85,8 @@ check whether the audit's PASS is earned.
   `new_cycle.py` (16),
   `harness_check.py` (146) — per-profile presence/drift + restart-pending check for the
   installed enforcer plugin — and the v8.3 verification organs: `ts_cost.py` (181),
-  `ts_screen.py` (293), `ts_ground.py` (476), `ts_novelty.py` (208),
-  `ts_rank.py` (190), `ts_label.py` (188), `ts_honesty.py` (159) — each backed by a
+  `ts_screen.py` (402), `ts_ground.py` (593), `ts_novelty.py` (296),
+  `ts_rank.py` (285), `ts_label.py` (268), `ts_honesty.py` (227) — each backed by a
   paired eval under `tools/ts-eval/` — and the other `test_*.py` suites, incl.
   `test_harness_check.py` (136) and `test_replay.py` (368, also the capture-integrity
   harness for a workspace argument). Out-of-workspace layers: `broker/broker.py` (781,

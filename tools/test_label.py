@@ -132,6 +132,11 @@ check("researchctl technique confirm records the confirmed payload exactly once"
       rc_confirm == 0 and len(events) == 1
       and events[0]["payload"]["result"] == "FALSE_POSITIVE"
       and DRAFT_MARKER not in events[0]["payload"])
+check("the confirmed payload keeps the label provenance (model + confidence + digest)",
+      events[0]["payload"]["label_provenance"]["model"] == "stub-label"
+      and events[0]["payload"]["label_provenance"]["confidence"] == 0.93
+      and len(events[0]["payload"]["label_provenance"]["input_digest"]) == 64
+      and events[0]["payload"]["label_provenance"]["posture"] == "on")
 check("the cycle is not closed by the confirmation (the human still closes)",
       cp.cycle_status("C-0001") == "PLANNED")
 check("the draft ran as an aid and ledgered its usage",
@@ -155,5 +160,52 @@ def bad_client(state, questions):
 bad = draft_technique_payload(ALLOWED, "C-0001", client=bad_client)
 check("an invalid result choice leaves the field unset with the reason in the draft",
       bad["result"] is None and "rejected" in bad[DRAFT_MARKER]["notes"]["result"])
+
+# 6. v8.3 fix: the draft writes a replayable judgment record (input snapshot + digest,
+#    endpoint, posture) and replay re-runs the per-field questions offline.
+from ts_claims import read_judgments  # noqa: E402
+from ts_label import replay_label  # noqa: E402
+
+rp_root, rp_cp = workspace()
+rp_draft = draft_technique_payload(rp_root, "C-0001", client=label_client)
+rp_rows = read_judgments(rp_root, seam="label")
+check("the label judgment is recorded with input digest, endpoint and posture",
+      len(rp_rows) == 1 and len(rp_rows[0]["input_digest"]) == 64
+      and rp_rows[0]["endpoint"] == "https://api.typesafe.ai/v1/systemone"
+      and rp_rows[0]["posture"] == "on" and rp_rows[0]["verdict"] == "FALSE_POSITIVE"
+      and rp_rows[0]["technique_family"] == "fixture"
+      and "WAF block" in rp_rows[0]["input"]["transcript"])
+check("the draft marker carries the model, confidence and input digest for the confirm",
+      rp_draft[DRAFT_MARKER]["model"] == "stub-label"
+      and rp_draft[DRAFT_MARKER]["confidence"] == 0.93
+      and rp_draft[DRAFT_MARKER]["input_digest"] == rp_rows[0]["input_digest"])
+rp_replay = replay_label(rp_root, client=label_client)
+check("replay reproduces the per-field label decisions deterministically",
+      rp_replay["replayed"] == 1 and rp_replay["matched"] == 1
+      and rp_replay["mismatched"] == 0 and rp_replay["drifted"] == 0)
+
+
+def flipped_label(state, questions):
+    answers = {}
+    for name in questions:
+        if name == "result":
+            answers[name] = {"type": "choice", "choice": "NEGATIVE", "confidence": 0.9,
+                             "probabilities": {"CONFIRMED": 0.02, "FALSE_POSITIVE": 0.02,
+                                               "NOT_APPLICABLE": 0.02, "INCONCLUSIVE": 0.02,
+                                               "NEGATIVE": 0.92}}
+        elif name == "technique_family":
+            answers[name] = {"type": "choice", "choice": "other", "confidence": 0.9,
+                             "probabilities": {"fixture": 0.1, "other": 0.9}}
+        else:
+            answers[name] = {"type": "noul", "noul": 0.4}
+    return {"model": "stub-label", "answers": answers, "usage": {}}
+
+
+check("replay with a flipped answer argues the mismatch",
+      replay_label(rp_root, client=flipped_label)["mismatched"] == 1)
+rp_denied, _ = workspace('external_judgment: "DENIED"\n')
+draft_technique_payload(rp_denied, "C-0001", client=label_client)
+check("a DENIED seam writes no judgment record (nothing was judged)",
+      read_judgments(rp_denied, seam="label") == [])
 
 print(f"\n{len(passed)}/{len(passed)} passed")

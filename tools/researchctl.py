@@ -330,7 +330,15 @@ def main() -> int:
                 raise ValueError(
                     f"{ns.draft_json} is not a technique draft (no {DRAFT_MARKER} marker) — "
                     "confirm only drafts produced by `researchctl technique draft`")
-            payload.pop(DRAFT_MARKER)
+            draft_meta = payload.pop(DRAFT_MARKER)
+            if isinstance(draft_meta, dict):
+                # Keep the replayable provenance on the confirmed record: the model and
+                # confidence whose draft the controller confirmed, plus the input digest,
+                # endpoint and posture (the _draft marker itself is never recorded).
+                payload["label_provenance"] = {
+                    key: draft_meta.get(key) for key in
+                    ("model", "confidence", "input_digest", "endpoint", "posture",
+                     "has_learning", "notes")}
             out = cp.evaluate_technique(payload)
         elif ns.fn == "knowledge-usage":
             out = cp.knowledge_usage()

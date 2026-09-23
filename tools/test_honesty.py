@@ -148,6 +148,34 @@ check("the check writes no lifecycle event (advisory only)",
 check("the check ledgers its usage as an estimated cost row",
       any(r["decision"] == "honesty" and r["estimated"] for r in cost_rows(ALLOWED)))
 
+# 6. v8.3 fix: each pack judgment is a replayable record (input snapshot + digest,
+#    endpoint, posture); replay re-runs the use question offline.
+from ts_claims import read_judgments  # noqa: E402
+from ts_honesty import replay_honesty  # noqa: E402
+
+rp_root, rp_cp = workspace()
+rp_out = check_knowledge_use(rp_root, "C-0001", client=honesty_client(0.2))
+rp_rows = read_judgments(rp_root, seam="honesty")
+check("the pack judgment is recorded with input digest, endpoint and posture",
+      len(rp_rows) == 1 and len(rp_rows[0]["input_digest"]) == 64
+      and rp_rows[0]["endpoint"] == "https://api.typesafe.ai/v1/systemone"
+      and rp_rows[0]["posture"] == "on" and rp_rows[0]["verdict"] == "warning"
+      and rp_rows[0]["input"]["pack"] == "fixture"
+      and "cache key" in rp_rows[0]["input"]["cycle_outputs"])
+check("the honesty result carries the posture and the endpoint",
+      rp_out["posture"] == "on"
+      and rp_out["endpoint"] == "https://api.typesafe.ai/v1/systemone")
+rp_replay = replay_honesty(rp_root, client=honesty_client(0.2))
+check("replay reproduces the honesty warning decision deterministically",
+      rp_replay["replayed"] == 1 and rp_replay["matched"] == 1
+      and rp_replay["mismatched"] == 0 and rp_replay["drifted"] == 0)
+check("replay with a flipped score argues the mismatch",
+      replay_honesty(rp_root, client=honesty_client(0.9))["mismatched"] == 1)
+rp_denied, _ = workspace('external_judgment: "DENIED"\n')
+check_knowledge_use(rp_denied, "C-0001", client=honesty_client(0.2))
+check("a DENIED seam writes no judgment record (nothing was judged)",
+      read_judgments(rp_denied, seam="honesty") == [])
+
 # 5. CLI wiring: `researchctl knowledge honesty --cycle C-0001`.
 import contextlib  # noqa: E402
 import io  # noqa: E402
