@@ -91,36 +91,37 @@ def main() -> int:
         return 2
 
     try:
-        leases.acquire(root, ns.run, owner_label=ns.owner, session=ns.session,
-                       command=shlex.join(cmd), interval_seconds=ns.interval)
+        lease = leases.acquire(root, ns.run, owner_label=ns.owner, session=ns.session,
+                               command=shlex.join(cmd), interval_seconds=ns.interval)
     except leases.LeaseError as exc:
         print(f"lease-run: refusing to launch — {exc}", file=sys.stderr)
         return 1
+    lease_id = lease["lease_id"]
 
     _install_signal_handlers()
     try:
         proc = subprocess.Popen(cmd, start_new_session=True)
     except OSError as exc:
-        leases.mark_unknown(root, ns.run, reason=f"spawn failed: {exc}")
+        leases.mark_unknown(root, ns.run, reason=f"spawn failed: {exc}", lease_id=lease_id)
         print(f"lease-run: spawn failed: {exc} (lease marked unknown-recovery-required)",
               file=sys.stderr)
         return 127
 
     # Record the process group as the first heartbeat: the reconcile predicate needs
     # it, and a wrapper crash before this record leaves it unverifiable (fail closed).
-    _heartbeat(root, ns.run, proc.pid)
+    _heartbeat(root, ns.run, proc.pid, lease_id)
 
     while True:
         try:
             proc.wait(timeout=ns.interval)
             break
         except subprocess.TimeoutExpired:
-            _heartbeat(root, ns.run, proc.pid)
+            _heartbeat(root, ns.run, proc.pid, lease_id)
         except _WrapperSignal as sig:
             _kill_group(proc)
             try:
                 leases.mark_unknown(
-                    root, ns.run,
+                    root, ns.run, lease_id=lease_id,
                     reason=f"wrapper received signal {sig.signum}; the process tree was killed "
                            "and the results are unreconciled")
             except leases.LeaseError as exc:
@@ -131,7 +132,7 @@ def main() -> int:
 
     exit_code = proc.returncode if proc.returncode >= 0 else 128 - proc.returncode
     try:
-        leases.mark_awaiting(root, ns.run, exit_code=exit_code)
+        leases.mark_awaiting(root, ns.run, exit_code=exit_code, lease_id=lease_id)
     except leases.LeaseError as exc:
         # The exit is real but the registry is unverifiable: say so loudly; the lease
         # blocks (unknown) rather than reading as success.
@@ -141,7 +142,7 @@ def main() -> int:
     return exit_code
 
 
-def _heartbeat(root: Path, run_id: str, pgid: int) -> None:
+def _heartbeat(root: Path, run_id: str, pgid: int, lease_id: str) -> None:
     """Renew the lease; a broken registry warns and keeps supervising.
 
     A heartbeat that cannot be recorded means the lease will expire into
@@ -149,7 +150,7 @@ def _heartbeat(root: Path, run_id: str, pgid: int) -> None:
     already fail-closed; killing a live measurement here would only lose work.
     """
     try:
-        leases.heartbeat(root, run_id, pgid=pgid)
+        leases.heartbeat(root, run_id, pgid=pgid, lease_id=lease_id)
     except leases.LeaseError as exc:
         print(f"lease-run: heartbeat for run {run_id} could not be recorded ({exc}) — the "
               "lease will expire into unknown-recovery-required", file=sys.stderr)

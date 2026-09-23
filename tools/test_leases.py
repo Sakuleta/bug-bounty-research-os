@@ -61,6 +61,17 @@ def raise_check(name: str, fn, expected: type[BaseException]) -> None:
     check(name, False)
 
 
+def git_fixture(r: Path) -> str:
+    """A real git work tree with one commit; returns the commit sha."""
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@e", "PATH": os.environ.get("PATH", "")}
+    subprocess.run(["git", "init", "-q"], cwd=r, check=True, env=env, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "results"], cwd=r, check=True,
+                   env=env, capture_output=True)
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=r, check=True, env=env,
+                          capture_output=True, text=True).stdout.strip()
+
+
 # ---------------- D1: registry ----------------
 
 # 1. Acquire -> active verdict with lineage, monotonic version and a safe expiry.
@@ -79,7 +90,7 @@ check("expiry is strictly greater than 2x the heartbeat interval",
       and v["expires_at"] == 1000.0 + 120.0 * leases.EXPIRY_MULTIPLIER)
 
 # 2. Heartbeat -> version bump, advanced window, file grows append-only.
-hb = leases.heartbeat(r, "s1-demo", now=1030.0)
+hb = leases.heartbeat(r, "s1-demo", lease_id=rec["lease_id"], now=1030.0)
 v2 = leases.verdict(r, "s1-demo", now=1030.0)
 check("heartbeat bumps the version and advances the expiry window",
       v2["version"] == 2 and hb["heartbeat_at"] == 1030.0
@@ -97,41 +108,71 @@ check("expiry never deletes or rewrites the registry (append-only)",
 
 # 4. Heartbeat on a non-active lease refuses (fail closed).
 raise_check("heartbeat on an expired (unknown) lease refuses",
-            lambda: leases.heartbeat(r, "s1-demo", now=2000.0), leases.LeaseError)
+            lambda: leases.heartbeat(r, "s1-demo", lease_id=rec["lease_id"], now=2000.0),
+            leases.LeaseError)
 
-# 5. Acquire on a held lease refuses; after expiry it takes over with a new lease id.
+# 5. Acquire on a held lease refuses; an expired lease is recovery-required, never an
+# implicit takeover — the explicit recovery lane is release-with-reason first.
 raise_check("acquire refuses while a lease is still held",
             lambda: leases.acquire(r, "s1-demo", now=1030.0), leases.LeaseHeld)
-rec2 = leases.acquire(r, "s1-demo", owner_label="retry", interval_seconds=60.0, now=2000.0)
-v4 = leases.verdict(r, "s1-demo", now=2000.0)
-check("acquire after expiry takes over: new lease id, version continues",
-      rec2["lease_id"] != rec["lease_id"] and v4["version"] == 3 and v4["state"] == "active")
+raise_check("acquire refuses an expired lease (recovery is explicit, never an implicit takeover)",
+            lambda: leases.acquire(r, "s1-demo", now=2000.0), leases.LeaseHeld)
+raise_check("release of the expired lease without a reason refuses",
+            lambda: leases.release(r, "s1-demo", commit="a" * 40,
+                                   lease_id=rec["lease_id"], now=2000.0), leases.LeaseError)
+sha = git_fixture(r)
+leases.release(r, "s1-demo", commit=sha, reason="operator recovered the expired lease",
+               lease_id=rec["lease_id"], now=2000.0)
+rec2 = leases.acquire(r, "s1-demo", owner_label="retry", interval_seconds=60.0, now=2001.0)
+v4 = leases.verdict(r, "s1-demo", now=2001.0)
+check("after explicit recovery a new generation acquires (new lease id, version continues)",
+      rec2["lease_id"] != rec["lease_id"] and v4["version"] == 4 and v4["state"] == "active"
+      and v4["lease_id"] == rec2["lease_id"])
 
 # 6. Process-exit and release path: awaiting -> released with the commit recorded.
-awaiting = leases.mark_awaiting(r, "s1-demo", exit_code=0, now=2010.0)
+awaiting = leases.mark_awaiting(r, "s1-demo", exit_code=0, lease_id=rec2["lease_id"], now=2010.0)
 v5 = leases.verdict(r, "s1-demo", now=2010.0)
 check("mark_awaiting records the exit code and stays held",
       awaiting["state"] == "awaiting-reconciliation" and v5["state"] == "awaiting-reconciliation"
       and v5["blocked"] is True and v5["exit_code"] == 0)
 raise_check("release refuses a commit that is not a 40-hex sha",
-            lambda: leases.release(r, "s1-demo", commit="HEAD"), leases.LeaseError)
-sha = "a" * 40
-released = leases.release(r, "s1-demo", commit=sha, reason="predicate clear", now=2020.0)
+            lambda: leases.release(r, "s1-demo", commit="HEAD", lease_id=rec2["lease_id"]),
+            leases.LeaseError)
+released = leases.release(r, "s1-demo", commit=sha, reason="predicate clear",
+                          lease_id=rec2["lease_id"], now=2020.0)
 v6 = leases.verdict(r, "s1-demo", now=2020.0)
 check("release records the commit and clears the run",
       released["state"] == "released" and v6["state"] == "released" and v6["blocked"] is False
-      and v6["commit"] == sha and v6["version"] == 5)
+      and v6["commit"] == sha and v6["version"] == 6)
 raise_check("release of an already released lease refuses",
-            lambda: leases.release(r, "s1-demo", commit=sha), leases.LeaseError)
+            lambda: leases.release(r, "s1-demo", commit=sha, lease_id=rec2["lease_id"]),
+            leases.LeaseError)
+
+# 6b. Writers are generation-bound: a stale wrapper cannot mutate the new generation.
+stale = leases.acquire(r, "s1-demo", owner_label="third", interval_seconds=60.0, now=2100.0)
+raise_check("a stale-generation heartbeat refuses (generation-bound writers)",
+            lambda: leases.heartbeat(r, "s1-demo", lease_id=rec2["lease_id"], now=2101.0),
+            leases.LeaseError)
+raise_check("a stale-generation mark_awaiting refuses",
+            lambda: leases.mark_awaiting(r, "s1-demo", exit_code=137,
+                                         lease_id=rec2["lease_id"], now=2101.0), leases.LeaseError)
+raise_check("a stale-generation release refuses",
+            lambda: leases.release(r, "s1-demo", commit=sha, reason="stale",
+                                   lease_id=rec2["lease_id"], now=2101.0), leases.LeaseError)
+check("the current generation's writer is accepted",
+      leases.mark_awaiting(r, "s1-demo", exit_code=0,
+                           lease_id=stale["lease_id"], now=2102.0)["lease_id"] == stale["lease_id"])
 
 # 7. Release from unknown requires an explicit reason (manual recovery path).
 r2 = root()
-leases.acquire(r2, "stale-run", interval_seconds=10.0, now=0.0)
+rec_stale = leases.acquire(r2, "stale-run", interval_seconds=10.0, now=0.0)
 check("a stale lease blocks until explicitly recovered",
       leases.verdict(r2, "stale-run", now=31.0)["state"] == "unknown-recovery-required")
 raise_check("release of an unknown lease without a reason refuses",
-            lambda: leases.release(r2, "stale-run", commit=sha), leases.LeaseError)
-leases.release(r2, "stale-run", commit=sha, reason="operator verified results", now=40.0)
+            lambda: leases.release(r2, "stale-run", commit=sha, lease_id=rec_stale["lease_id"]),
+            leases.LeaseError)
+leases.release(r2, "stale-run", commit=sha, reason="operator verified results",
+               lease_id=rec_stale["lease_id"], now=40.0)
 check("release of an unknown lease with a reason clears it",
       leases.verdict(r2, "stale-run", now=40.0)["state"] == "released")
 
@@ -150,7 +191,7 @@ raise_check("an empty run id refuses", lambda: leases.verdict(empty, ""), leases
 
 # 9. Corrupt line tolerance: reported, counted, never a crash, never clear.
 r3 = root()
-leases.acquire(r3, "corrupt-run", now=1.0)
+rec3 = leases.acquire(r3, "corrupt-run", now=1.0)
 with open(leases.lease_path(r3, "corrupt-run"), "a", encoding="utf-8") as handle:
     handle.write("{not json}\n")
 vc = leases.verdict(r3, "corrupt-run", now=2.0)
@@ -158,7 +199,8 @@ check("a corrupt line is tolerated but blocks with a count",
       vc["state"] == "unknown-recovery-required" and vc["blocked"] is True
       and vc["corrupt_lines"] == 1 and "corrupt line" in vc["reason"])
 raise_check("mutation refuses a registry with a corrupt line",
-            lambda: leases.heartbeat(r3, "corrupt-run", now=3.0), leases.LeaseError)
+            lambda: leases.heartbeat(r3, "corrupt-run", lease_id=rec3["lease_id"], now=3.0),
+            leases.LeaseError)
 
 # 10. Unverifiable chains: unknown state string, non-increasing version.
 r4 = root()
@@ -168,8 +210,8 @@ with open(leases.lease_path(r4, "tampered"), "a", encoding="utf-8") as handle:
 check("an unknown state string is unverifiable (blocked)",
       leases.verdict(r4, "tampered", now=2.0)["state"] == "unknown-recovery-required")
 r5 = root()
-leases.acquire(r5, "tampered2", now=1.0)
-leases.heartbeat(r5, "tampered2", now=2.0)
+rec5 = leases.acquire(r5, "tampered2", now=1.0)
+leases.heartbeat(r5, "tampered2", lease_id=rec5["lease_id"], now=2.0)
 with open(leases.lease_path(r5, "tampered2"), "a", encoding="utf-8") as handle:
     handle.write(json.dumps({"seq": 3, "version": 1, "state": "released",
                              "commit": "b" * 40}) + "\n")
@@ -213,15 +255,16 @@ finally:
 
 # 12. Workspace-wide verdict: any held lease blocks; all released is clear.
 r8 = root()
-leases.acquire(r8, "run-a", interval_seconds=1000.0, now=1.0)
-leases.acquire(r8, "run-b", interval_seconds=1000.0, now=1.0)
-leases.mark_awaiting(r8, "run-b", exit_code=0, now=2.0)
-leases.release(r8, "run-b", commit="c" * 40, now=3.0)
+rec_a = leases.acquire(r8, "run-a", interval_seconds=1000.0, now=1.0)
+rec_b = leases.acquire(r8, "run-b", interval_seconds=1000.0, now=1.0)
+sha8 = git_fixture(r8)
+leases.mark_awaiting(r8, "run-b", exit_code=0, lease_id=rec_b["lease_id"], now=2.0)
+leases.release(r8, "run-b", commit=sha8, lease_id=rec_b["lease_id"], now=3.0)
 wide = leases.verdict_all(r8, now=3.0)
 check("workspace-wide verdict blocks while any run holds a lease",
       wide["blocked"] is True and wide["state"] == "active" and len(wide["runs"]) == 2)
-leases.mark_awaiting(r8, "run-a", exit_code=0, now=4.0)
-leases.release(r8, "run-a", commit="d" * 40, now=5.0)
+leases.mark_awaiting(r8, "run-a", exit_code=0, lease_id=rec_a["lease_id"], now=4.0)
+leases.release(r8, "run-a", commit=sha8, lease_id=rec_a["lease_id"], now=5.0)
 check("workspace-wide verdict clears when every lease is released",
       leases.verdict_all(r8, now=5.0)["blocked"] is False)
 with open(leases.lease_path(r8, "run-a"), "a", encoding="utf-8") as handle:
@@ -329,16 +372,6 @@ def dead_pgid() -> int:
     return pid
 
 
-def git_fixture(r: Path) -> str:
-    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e", "GIT_COMMITTER_NAME": "t",
-           "GIT_COMMITTER_EMAIL": "t@e", "PATH": os.environ.get("PATH", "")}
-    subprocess.run(["git", "init", "-q"], cwd=r, check=True, env=env, capture_output=True)
-    subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "results"], cwd=r, check=True,
-                   env=env, capture_output=True)
-    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=r, check=True, env=env,
-                          capture_output=True, text=True).stdout.strip()
-
-
 def make_run(r: Path, run: str = "sweep-1", *, cells: tuple[str, ...] = ("cell-a", "cell-b"),
              plan: bool = True, manifests: bool = True,
              manifests_for: tuple[str, ...] | None = None, reports: bool = True,
@@ -369,13 +402,13 @@ def make_run(r: Path, run: str = "sweep-1", *, cells: tuple[str, ...] = ("cell-a
     elif repo:
         git_fixture(r)
     if lease:
-        leases.acquire(r, run, interval_seconds=1000.0)
+        rec = leases.acquire(r, run, interval_seconds=1000.0)
         if state != "active":
             if pgid is None:
                 pgid = dead_pgid()
             if record_pgid:
-                leases.heartbeat(r, run, pgid=pgid)
-            leases.mark_awaiting(r, run, exit_code=0)
+                leases.heartbeat(r, run, pgid=pgid, lease_id=rec["lease_id"])
+            leases.mark_awaiting(r, run, exit_code=0, lease_id=rec["lease_id"])
     return r
 
 
@@ -502,17 +535,18 @@ else:
     parity_case("active", p_active, "run", 200.0)
     parity_case("active expired", p_active, "run", 4000.0)
     p_awaiting = root()
-    leases.acquire(p_awaiting, "run", interval_seconds=1000.0, now=100.0)
-    leases.mark_awaiting(p_awaiting, "run", exit_code=3, now=110.0)
+    rec_pa = leases.acquire(p_awaiting, "run", interval_seconds=1000.0, now=100.0)
+    leases.mark_awaiting(p_awaiting, "run", exit_code=3, lease_id=rec_pa["lease_id"], now=110.0)
     parity_case("awaiting-reconciliation", p_awaiting, "run", 200.0)
     p_unknown = root()
-    leases.acquire(p_unknown, "run", interval_seconds=1000.0, now=100.0)
-    leases.mark_unknown(p_unknown, "run", reason="boom", now=110.0)
+    rec_pu = leases.acquire(p_unknown, "run", interval_seconds=1000.0, now=100.0)
+    leases.mark_unknown(p_unknown, "run", reason="boom", lease_id=rec_pu["lease_id"], now=110.0)
     parity_case("unknown-recovery-required", p_unknown, "run", 200.0)
     p_released = root()
-    leases.acquire(p_released, "run", interval_seconds=1000.0, now=100.0)
-    leases.mark_awaiting(p_released, "run", exit_code=0, now=110.0)
-    leases.release(p_released, "run", commit="a" * 40, now=120.0)
+    sha_released = git_fixture(p_released)
+    rec_pr = leases.acquire(p_released, "run", interval_seconds=1000.0, now=100.0)
+    leases.mark_awaiting(p_released, "run", exit_code=0, lease_id=rec_pr["lease_id"], now=110.0)
+    leases.release(p_released, "run", commit=sha_released, lease_id=rec_pr["lease_id"], now=120.0)
     parity_case("released", p_released, "run", 200.0)
     p_no_lease = root()
     leases.registry_dir(p_no_lease).mkdir(parents=True)
@@ -538,15 +572,17 @@ else:
         handle.write(json.dumps({"seq": 2, "version": 2, "state": "sneaky"}) + "\n")
     parity_case("unknown state string", p_state, "run", 200.0)
     p_wide = root()
+    sha_wide = git_fixture(p_wide)
     leases.acquire(p_wide, "run-a", interval_seconds=1000.0, now=100.0)
-    leases.acquire(p_wide, "run-b", interval_seconds=1000.0, now=100.0)
-    leases.mark_awaiting(p_wide, "run-b", exit_code=0, now=110.0)
-    leases.release(p_wide, "run-b", commit="b" * 40, now=120.0)
+    rec_pwb = leases.acquire(p_wide, "run-b", interval_seconds=1000.0, now=100.0)
+    leases.mark_awaiting(p_wide, "run-b", exit_code=0, lease_id=rec_pwb["lease_id"], now=110.0)
+    leases.release(p_wide, "run-b", commit=sha_wide, lease_id=rec_pwb["lease_id"], now=120.0)
     parity_case("workspace-wide with one held run", p_wide, None, 200.0)
     p_wide_clear = root()
-    leases.acquire(p_wide_clear, "run-a", interval_seconds=1000.0, now=100.0)
-    leases.mark_awaiting(p_wide_clear, "run-a", exit_code=0, now=130.0)
-    leases.release(p_wide_clear, "run-a", commit="c" * 40, now=140.0)
+    sha_clear = git_fixture(p_wide_clear)
+    rec_pwc = leases.acquire(p_wide_clear, "run-a", interval_seconds=1000.0, now=100.0)
+    leases.mark_awaiting(p_wide_clear, "run-a", exit_code=0, lease_id=rec_pwc["lease_id"], now=130.0)
+    leases.release(p_wide_clear, "run-a", commit=sha_clear, lease_id=rec_pwc["lease_id"], now=140.0)
     parity_case("workspace-wide all released", p_wide_clear, None, 200.0)
     p_wide_corrupt = root()
     leases.acquire(p_wide_corrupt, "run-a", interval_seconds=1000.0, now=100.0)

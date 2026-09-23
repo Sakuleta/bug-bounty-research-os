@@ -216,10 +216,20 @@ def _effective_state(latest: dict[str, Any], now: float) -> str:
 def _write_transition(root: Path, run_id: str, *, state: str, event: str,
                       now: float, reason: str = "", exit_code: int | None = None,
                       commit: str | None = None, pgid: int | None = None,
+                      lease_id: str | None = None,
                       require: tuple[str, ...] | None = None,
                       require_reason_for: tuple[str, ...] = ()) -> dict[str, Any]:
     with _lock(root):
         latest, _error, _corrupt, path = _latest_or_error(root, run_id)
+        if lease_id is None:
+            raise LeaseError(
+                f"refusing {event} for run {run_id}: the lease generation is required — pass the "
+                "lease_id from acquire()/verdict(); unbound writers are refused (fail closed)")
+        if lease_id != latest.get("lease_id"):
+            raise LeaseError(
+                f"refusing {event} for run {run_id}: lease generation mismatch (caller holds "
+                f"{lease_id!r}, the current record is {latest.get('lease_id')!r}) — a stale writer "
+                "must not mutate the current lease (fail closed)")
         effective = _effective_state(latest, now)
         if require is not None and effective not in require:
             detail = ""
@@ -264,8 +274,10 @@ def acquire(root: str | os.PathLike[str], run_id: str, *, owner_label: str = "",
             now: float | None = None) -> dict[str, Any]:
     """Acquire the run's lease (call BEFORE spawning the process tree).
 
-    Refuses while a previous lease is still held or sits in
-    `unknown-recovery-required`: recovery is explicit, never an implicit takeover.
+    Refuses while a previous lease is still held or reads as
+    `unknown-recovery-required` (expiry included): recovery is explicit, never an
+    implicit takeover — release the old generation with a reason (or reconcile it)
+    first.
     """
     root = Path(root)
     timestamp = _now(now)
@@ -275,18 +287,16 @@ def acquire(root: str | os.PathLike[str], run_id: str, *, owner_label: str = "",
         path = lease_path(root, run_id)
         if path.exists():
             latest, error, _corrupt, _path = _latest_or_error(root, run_id)
-            if latest["state"] in BLOCKING_STATES:
-                expires_at = latest.get("expires_at")
-                if latest["state"] == "active" and isinstance(expires_at, (int, float)) \
-                        and float(expires_at) <= timestamp:
-                    # A missed-heartbeat lease is expired: acquire may take over, but the
-                    # record keeps the unknown state visible until this new lease ends.
-                    pass
-                else:
-                    raise LeaseHeld(
-                        f"run {run_id} still holds a {latest['state']} lease "
-                        f"(version {latest['version']}); reconcile or expire it first "
-                        f"(fail closed)")
+            effective = _effective_state(latest, timestamp)
+            if effective in BLOCKING_STATES:
+                detail = ""
+                if effective != latest["state"]:
+                    detail = (f" (expired at {latest.get('expires_at')} — it reads "
+                              "unknown-recovery-required)")
+                raise LeaseHeld(
+                    f"run {run_id} still holds a {effective} lease "
+                    f"(version {latest['version']}){detail}; recovery is explicit — reconcile or "
+                    f"release the old generation first (fail closed)")
         else:
             latest = None
         lease_id = f"L-{os.urandom(4).hex()}"
@@ -312,46 +322,49 @@ def acquire(root: str | os.PathLike[str], run_id: str, *, owner_label: str = "",
         return _append(root, run_id, record, path)
 
 
-def heartbeat(root: str | os.PathLike[str], run_id: str, *, pgid: int | None = None,
-              now: float | None = None) -> dict[str, Any]:
+def heartbeat(root: str | os.PathLike[str], run_id: str, *, lease_id: str,
+              pgid: int | None = None, now: float | None = None) -> dict[str, Any]:
     """Renew an `active` lease; refuses on any other state or once it has expired.
 
     A late heartbeat must not silently revive an expired lease: expiry is a
-    recorded fact (`unknown-recovery-required`) and recovery is explicit.
+    recorded fact (`unknown-recovery-required`) and recovery is explicit. The
+    caller must name the lease generation (`lease_id`), so a stale wrapper cannot
+    heartbeat the next generation.
     """
     return _write_transition(Path(root), run_id, state="active", event="heartbeat",
-                             now=_now(now), pgid=pgid, require=("active",))
+                             now=_now(now), pgid=pgid, lease_id=lease_id, require=("active",))
 
 
 def mark_awaiting(root: str | os.PathLike[str], run_id: str, *, exit_code: int,
-                  reason: str = "process exited", now: float | None = None) -> dict[str, Any]:
+                  lease_id: str, reason: str = "process exited",
+                  now: float | None = None) -> dict[str, Any]:
     """Record process exit; the lease stays held until reconciliation."""
     return _write_transition(Path(root), run_id, state="awaiting-reconciliation",
                              event="awaiting-reconciliation", now=_now(now),
-                             exit_code=exit_code, reason=reason,
+                             exit_code=exit_code, reason=reason, lease_id=lease_id,
                              require=("active", "awaiting-reconciliation"))
 
 
-def mark_unknown(root: str | os.PathLike[str], run_id: str, *, reason: str,
+def mark_unknown(root: str | os.PathLike[str], run_id: str, *, reason: str, lease_id: str,
                  now: float | None = None) -> dict[str, Any]:
     """Record an unrecoverable-in-place failure; requires reconciliation."""
     return _write_transition(Path(root), run_id, state="unknown-recovery-required",
-                             event="unknown", now=_now(now), reason=reason,
+                             event="unknown", now=_now(now), reason=reason, lease_id=lease_id,
                              require=("active", "awaiting-reconciliation",
                                       "unknown-recovery-required"))
 
 
-def release(root: str | os.PathLike[str], run_id: str, *, commit: str, reason: str = "",
-            now: float | None = None) -> dict[str, Any]:
+def release(root: str | os.PathLike[str], run_id: str, *, commit: str, lease_id: str,
+            reason: str = "", now: float | None = None) -> dict[str, Any]:
     """Release the lease after the completion predicate cleared, recording the commit.
 
     Releasing an `unknown-recovery-required` lease is the explicit manual recovery
-    path (the predicate never clears it) and requires a reason.
+    path (the automated reconcile path never releases it) and requires a reason.
     """
     if not isinstance(commit, str) or not _SHA_RE.match(commit):
         raise LeaseError(f"release requires a 40-hex results commit (got {commit!r})")
     return _write_transition(Path(root), run_id, state="released", event="release",
-                             now=_now(now), commit=commit, reason=reason,
+                             now=_now(now), commit=commit, reason=reason, lease_id=lease_id,
                              require=("awaiting-reconciliation",
                                       "unknown-recovery-required"),
                              require_reason_for=("unknown-recovery-required",))
@@ -625,6 +638,7 @@ def reconcile(root: str | os.PathLike[str], run_id: str, *, now: float | None = 
     result = completion_predicate(root, run_id, now=now)
     if result["clear"] and not result["already_released"]:
         record = release(root, run_id, commit=result["commit"],
+                         lease_id=result["verdict"].get("lease_id"),
                          reason="completion predicate clear", now=now)
         result["released"] = True
         result["release"] = record
