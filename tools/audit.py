@@ -1035,6 +1035,26 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
     ]
     if stray_env:
         errors.append("credential-style file outside lab/credentials/: " + ", ".join(str(p.relative_to(root)) for p in stray_env[:5]))
+    # v8.3 side ledgers (screening, grounding, grounding cache, judgments, costs) are
+    # written by the new Jev seams and hold redacted excerpts/questions by contract; the
+    # audit re-scans them so a hand edit cannot smuggle a secret-shaped value past the
+    # redaction rule (same invariant as the event ledger and the evidence store).
+    for rel in ("11_runtime/jev-screening.jsonl", "11_runtime/grounding.jsonl",
+                "11_runtime/jev-judgments.jsonl", "11_runtime/jev-costs.jsonl"):
+        ledger_path = root / rel
+        if not ledger_path.is_file():
+            continue
+        hits = secret_pattern_hits(ledger_path.read_text(errors="ignore"))
+        if hits:
+            errors.append(f"{rel} carries a secret-shaped value ({hits[0]}): redact before writing the ledger")
+    grounding_cache = root / "11_runtime" / "grounding-cache"
+    if grounding_cache.is_dir():
+        for cache_path in sorted(grounding_cache.glob("*.json")):
+            hits = secret_pattern_hits(cache_path.read_text(errors="ignore"))
+            if hits:
+                errors.append(
+                    f"{cache_path.relative_to(root)} carries a secret-shaped value "
+                    f"({hits[0]}): redact before writing the cycle cache")
     for eid, meta in index.items():
         rel = str(meta.get("path", ""))
         if rel.startswith("lab/credentials/") or "/profile-" in rel or rel.startswith("lab/browser/profile"):

@@ -10,6 +10,9 @@ touches the ledger — the audit's PASS still comes only from `record_audit`.
 Cheap deterministic blocking runs first (normalized-hash equality plus keyword
 overlap), so judged pairs stay small and a model call is only spent where a relation
 is plausible. Gate: the engagement's `external_judgment` policy (DENIED default).
+Egress discipline: candidate and archived texts are redacted and capped once; both the
+model state and the question instructions quote that same copy, so a secret-shaped value
+cannot ride an unredacted channel.
 """
 from __future__ import annotations
 
@@ -26,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from control_plane import ControlPlane, external_judgment_allowed, redact  # noqa: E402
 from ts_cost import record_seam_cost  # noqa: E402
 from ts_http import model_name, post_json, validate_choice  # noqa: E402
+from ts_screen import SCREEN_CAP  # noqa: E402
 
 PAIR_CHOICES = ("same", "different", "unclear")
 CONFIDENCE_THRESHOLD = 0.8
@@ -111,6 +115,21 @@ def _unavailable(note: str) -> dict[str, Any]:
             "advisory": True, "model": None, "usage": {}, "note": note}
 
 
+def _egress_text(text: Any) -> str:
+    """The one canonical egress copy for candidate/archived text: redact, then cap.
+
+    Both the `state` snippets and the `questions.instructions` copy come from this
+    string, so a secret-shaped value can never ride one channel while the other is
+    redacted. Redaction runs before the cap: a token straddling the truncation point
+    is redacted whole instead of leaving a bare prefix. The cap is the screening
+    convention (`ts_screen.SCREEN_CAP`).
+    """
+    safe = redact(str(text or ""))
+    if len(safe) > SCREEN_CAP:
+        safe = safe[:SCREEN_CAP] + f"\n…[truncated {len(safe) - SCREEN_CAP} chars]"
+    return safe
+
+
 def check_novelty(root: Path, candidate: dict[str, Any], pool: list[dict[str, Any]] | None = None,
                   *, client=None, live: bool = True, timeout: int = 60,
                   threshold: float = CONFIDENCE_THRESHOLD,
@@ -130,13 +149,14 @@ def check_novelty(root: Path, candidate: dict[str, Any], pool: list[dict[str, An
         return _unavailable(NO_KEY_NOTE)
     pool = pool if pool is not None else hypothesis_pool(root)
     blocked = block_candidates(candidate, pool)
+    candidate_text = _egress_text(candidate.get("text"))
     call = client or (lambda s, q: post_json(
         {"state": s, "model": model_name(), "questions": q},
         api_key=os.environ.get("TYPESAFE_API_KEY", ""), timeout=timeout))
     questions = {"pair": {
         "type": "choice",
         "instructions": {
-            "candidate": {"id": candidate.get("id"), "text": candidate.get("text")},
+            "candidate": {"id": candidate.get("id"), "text": candidate_text},
             "question": ("Do `candidate` and `archived` describe the same finding (same root "
                          "cause and primitive), different findings, or is it unclear?"),
         },
@@ -152,9 +172,8 @@ def check_novelty(root: Path, candidate: dict[str, Any], pool: list[dict[str, An
     model = None
     usage_total: dict[str, int] = {}
     for entry in blocked:
-        state = {"candidate": {"id": candidate.get("id"),
-                               "text": redact(str(candidate.get("text") or ""))},
-                 "archived": {"id": entry["id"], "text": redact(entry["text"])}}
+        state = {"candidate": {"id": candidate.get("id"), "text": candidate_text},
+                 "archived": {"id": entry["id"], "text": _egress_text(entry["text"])}}
         resp = call(state, questions)
         model = resp.get("model") or model
         usage = resp.get("usage")

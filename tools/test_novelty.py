@@ -129,7 +129,7 @@ egress: dict = {}
 
 
 def redaction_client(state, questions):
-    egress.update(state)
+    egress["payload"] = json.dumps({"state": state, "questions": questions})
     return pair_client("different", 0.9)(state, questions)
 
 
@@ -138,8 +138,30 @@ check_novelty(ALLOWED, {"id": "H-0098",
                                 "leaked in the export endpoint response."},
               pool=[{"id": "H-0097", "text": "A token leaked from the export endpoint."}],
               client=redaction_client)
+from control_plane import secret_pattern_hits  # noqa: E402
+
 check("the candidate and archived texts are redacted before egress",
-      "[REDACTED]" in egress["candidate"]["text"] and "glpat-" not in egress["candidate"]["text"])
+      "[REDACTED]" in egress["payload"] and "glpat-" not in egress["payload"])
+check("no secret-shaped token in either egress channel (state AND questions.instructions)",
+      secret_pattern_hits(egress["payload"]) == []
+      and "[REDACTED]" in json.loads(egress["payload"])["questions"]["pair"]["instructions"]["candidate"]["text"])
+cap_egress: dict = {}
+
+
+def cap_client(state, questions):
+    cap_egress["payload"] = json.dumps({"state": state, "questions": questions})
+    return pair_client("different", 0.9)(state, questions)
+
+
+check_novelty(ALLOWED, {"id": "H-0096", "text": SAME["text"] + " " + "y" * 20000},
+              pool=[SAME], client=cap_client)
+cap_payload = json.loads(cap_egress["payload"])
+check("the candidate text is capped in both channels with a visible truncation marker",
+      len(cap_payload["state"]["candidate"]["text"]) <= 6400
+      and len(cap_payload["questions"]["pair"]["instructions"]["candidate"]["text"]) <= 6400
+      and "[truncated" in cap_payload["state"]["candidate"]["text"]
+      and cap_payload["state"]["candidate"]["text"] ==
+      cap_payload["questions"]["pair"]["instructions"]["candidate"]["text"])
 
 # 6. The pool comes from the ledger's hypotheses when none is given.
 pool_root = workspace()

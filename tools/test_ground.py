@@ -312,6 +312,43 @@ from ts_ground import _cache_path  # noqa: E402
 check("the cache path of a valid id resolves under the cache directory",
       _cache_path(ALLOWED, "C-0001") == (ALLOWED / "11_runtime/grounding-cache/C-0001.json").resolve())
 
+# 12. Fix (Security M2): the operator question is redacted once at the boundary — the
+#     provider query, the model state, the ledger row and the cycle cache all carry the
+#     same redacted copy (the hygiene audit re-scans those files).
+from ts_ground import Provider  # noqa: E402
+
+REDACT_ROOT = workspace('external_judgment: "ALLOWED"\ngrounding: "ALLOWED"\n')
+SECRET_Q = "is github_pat_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 still valid for TLS?"
+provider_queries: list = []
+
+
+class SpyProvider(Provider):
+    name = "spy"
+
+    def available(self):
+        return True
+
+    def fetch(self, query, *, limit=5, timeout=30, opener=None):
+        provider_queries.append(query)
+        return [dict(s) for s in SNIPPETS]
+
+
+sec_out = ground_state(REDACT_ROOT, SECRET_Q, provider=SpyProvider(), client=ground_client,
+                       cycle_id="C-9101")
+sec_ledger = [json.loads(line) for line in
+              (REDACT_ROOT / "11_runtime/grounding.jsonl").read_text().splitlines() if line.strip()]
+sec_cache = json.loads((REDACT_ROOT / "11_runtime/grounding-cache/C-9101.json").read_text())
+check("the operator question is redacted for the provider and the model state",
+      provider_queries and "github_pat_" not in provider_queries[0]
+      and "[REDACTED]" in provider_queries[0]
+      and "github_pat_" not in json.dumps(sec_out["state"])
+      and "[REDACTED]" in sec_out["state"]["question"])
+check("the redacted question is what the ledger and the cycle cache carry",
+      "github_pat_" not in json.dumps(sec_ledger)
+      and "github_pat_" not in json.dumps(sec_cache)
+      and "[REDACTED]" in sec_ledger[-1]["question"]
+      and "[REDACTED]" in sec_cache["entries"][list(sec_cache["entries"])[0]]["question"])
+
 # 9. CLI wiring: `researchctl ground <question> --cycle C-…` runs the seam.
 import contextlib  # noqa: E402
 import io  # noqa: E402

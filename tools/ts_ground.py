@@ -15,7 +15,10 @@ Eval-integrity: grounding is default off. It needs BOTH the engagement's
 `external_judgment: "ALLOWED"` (the DENIED-default gate) and its own explicit
 `grounding: "ALLOWED"` key; during scored eval runs it stays off and the posture is
 part of every result and every ledger row. Per-cycle cache and an explicit per-cycle
-call cap bound the loop (no unbounded retrieval). Stdlib only.
+call cap bound the loop (no unbounded retrieval). The operator question is redacted
+once at the boundary and that copy is what the provider, the model state, the ledger
+and the cycle cache carry; snippet text stays verbatim (retrieved web content) while
+source/date metadata is redacted too. Stdlib only.
 """
 from __future__ import annotations
 
@@ -32,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from control_plane import cycle_id_ok, external_judgment_allowed  # noqa: E402
+from control_plane import cycle_id_ok, external_judgment_allowed, redact  # noqa: E402
 from ts_cost import record_seam_cost  # noqa: E402
 from ts_http import API, model_name, post_json, validate_choice  # noqa: E402
 from ts_screen import screen_text  # noqa: E402
@@ -102,13 +105,15 @@ def _clean_snippets(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for item in items:
         text = str(item.get("text") or "").strip()
-        source = str(item.get("source") or "").strip()
+        # Source/date are metadata this seam persists (ledger + cache): redact them like
+        # every other egress/ledger copy (a token-shaped query value never lands raw).
+        source = redact(str(item.get("source") or "").strip())
         if not text or not source:
             continue
         if len(text) > SNIPPET_CAP:
             text = text[:SNIPPET_CAP] + f"\n…[truncated {len(text) - SNIPPET_CAP} chars]"
         out.append({"text": text, "source": source,
-                    "date": (str(item["date"]).strip() if item.get("date") else None)})
+                    "date": (redact(str(item["date"]).strip()) if item.get("date") else None)})
     return out
 
 
@@ -314,6 +319,11 @@ def ground_state(root: Path, question: str, *, provider: Provider | None = None,
     (without any model call) when it would exceed the cycle's budget.
     """
     root = Path(root)
+    # Egress/ledger minimization (Security M2): the operator's question is redacted once
+    # at the boundary, and that copy is what the retrieval provider, the model state, the
+    # ledger row and the cycle cache see. A secret-shaped string is never a legitimate
+    # ranking term, and the redaction runs before any hash-keyed caching.
+    question = redact(str(question or ""))
     posture = grounding_posture(root)
     if not live:
         return _unavailable(NO_KEY_NOTE, root, question)
@@ -449,6 +459,8 @@ def judge_question(root: Path, question: str, *, search_results: list[dict[str, 
     that already holds evidence. Code-side thresholding stays with the caller.
     """
     root = Path(root)
+    # Same boundary redaction as `ground_state`: nothing carries the raw question.
+    question = redact(str(question or ""))
     posture = grounding_posture(root)
     if not live or not external_judgment_allowed(root):
         out = _unavailable(POLICY_NOTE, root, question)
