@@ -189,21 +189,25 @@ POLICY_ALLOW = policy_root('external_judgment: "ALLOWED"\n')
 POLICY_DENY = policy_root('external_judgment: "DENIED"  # default posture\n')
 POLICY_UNREADABLE = policy_root(unreadable=True)
 
-stub = lambda state, questions: {  # noqa: E731
-    'model': 'stub-1',
-    'answers': {'first_pack': {'type': 'choice', 'choice': 'realtime', 'confidence': 0.91,
-                               'probabilities': {'realtime': 0.7, 'api-protocols': 0.25, 'none': 0.05}}},
-    'usage': {'input_tokens': 10, 'output_tokens': 2},
-}
+def triage_stub(choice: str, confidence: float, weights: dict) -> object:
+    """A valid triage answer: the probability map covers the whole answer space
+    (every candidate pack + none); unspecified packs sit at 0.0."""
+    def client(state, questions):
+        probs = {name: 0.0 for name in state['candidate_pack']}
+        probs['none'] = 0.0
+        probs.update(weights)
+        return {'model': 'stub-1',
+                'answers': {'first_pack': {'type': 'choice', 'choice': choice,
+                                           'confidence': confidence, 'probabilities': probs}},
+                'usage': {'input_tokens': 10, 'output_tokens': 2}}
+    return client
+
+
+stub = triage_stub('realtime', 0.91, {'realtime': 0.7, 'api-protocols': 0.25, 'none': 0.05})
 ranked = triage_suggest(POLICY_ALLOW, 'realtime socket subscription leak', client=stub)
 check('triage ranks via the client', ranked['source'] == 'typesafe' and ranked['suggested'] == 'realtime'
       and ranked['ranked'][0] == 'realtime' and ranked['probabilities']['api-protocols'] == 0.25)
-none_stub = lambda state, questions: {  # noqa: E731
-    'model': 'stub-1',
-    'answers': {'first_pack': {'type': 'choice', 'choice': 'none', 'confidence': 0.8,
-                               'probabilities': {'realtime': 0.4, 'none': 0.6}}},
-    'usage': {},
-}
+none_stub = triage_stub('none', 0.8, {'realtime': 0.4, 'none': 0.6})
 check('triage none means no pack', triage_suggest(POLICY_ALLOW, 'unknown thing', client=none_stub)['suggested'] is None)
 fallback = triage_suggest(V6ROOT, 'realtime socket subscription leak', live=False)
 check('triage falls back to IDF without live',
@@ -414,7 +418,7 @@ def none_triage_client(state, questions):
     if 'passage' in questions:
         return {'model': 'stub-1',
                 'answers': {'passage': {'choice': 'none', 'confidence': 0.88,
-                                        'probabilities': {'none': 0.88}}},
+                                        'probabilities': {'1': 0.06, '2': 0.06, 'none': 0.88}}},
                 'usage': {}}
     raise AssertionError('the relation question must not run after a none triage')
 
@@ -981,8 +985,13 @@ check('validate_choice accepts a full simplex whose choice is the argmax',
       validate_choice({'choice': 'supports',
                        'probabilities': {'supports': 0.9, 'contradicts': 0.05, 'says_nothing': 0.05}},
                       CHOICES3) is None)
-check('validate_choice accepts a partial probability map (legacy/IDF-adjacent shapes)',
-      validate_choice({'choice': 'supports', 'probabilities': {'supports': 0.9}}, CHOICES3) is None)
+check('validate_choice rejects a partial probability map: the map must be a simplex over '
+      'the whole answer space (fix for the blessed relaxation)',
+      'cover' in str(validate_choice({'choice': 'supports', 'probabilities': {'supports': 0.9}},
+                                     CHOICES3))
+      and 'cover' in str(validate_choice({'choice': 'supports',
+                                          'probabilities': {'supports': 0.9, 'contradicts': 0.05}},
+                                         CHOICES3)))
 check('validate_choice accepts absent probabilities and the none option',
       validate_choice({'choice': 'none'}, ('none', 'pack-a')) is None)
 check('validate_choice rejects a choice outside the answer space',
@@ -1001,7 +1010,8 @@ check('validate_choice tolerates float noise around the simplex',
                                                                'says_nothing': 0.1999999999}},
                       CHOICES3) is None)
 check('validate_choice tolerates ties at the argmax',
-      validate_choice({'choice': 'contradicts', 'probabilities': {'supports': 0.5, 'contradicts': 0.5}},
+      validate_choice({'choice': 'contradicts', 'probabilities': {'supports': 0.5, 'contradicts': 0.5,
+                                                                  'says_nothing': 0.0}},
                       CHOICES3) is None)
 check('validate_choice rejects negative, NaN and non-numeric probabilities',
       validate_choice({'choice': 'supports', 'probabilities': {'supports': -0.5, 'contradicts': 1.5}},

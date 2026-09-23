@@ -79,10 +79,12 @@ check("live=False returns unavailable",
 def pair_client(choice: str, confidence: float):
     def client(state, questions):
         assert set(questions) == {"pair"}, "one pair question per judged candidate"
+        probs = {name: 0.05 for name in questions["pair"]["criteria"]}
+        probs[choice] = 0.9  # a complete simplex: the answer space is three choices
         return {"model": "stub-novelty",
                 "answers": {"pair": {"type": "choice", "choice": choice,
                                      "confidence": confidence,
-                                     "probabilities": {choice: 0.9}}},
+                                     "probabilities": probs}},
                 "usage": {"input_tokens": 20, "output_tokens": 3}}
     return client
 
@@ -174,7 +176,8 @@ cand_file.write_text(json.dumps(CANDIDATE))
 def cli_post(payload, **kwargs):
     return {"model": "stub-novelty",
             "answers": {"pair": {"type": "choice", "choice": "different", "confidence": 0.95,
-                                 "probabilities": {"different": 0.95}}},
+                                 "probabilities": {"same": 0.025, "different": 0.95,
+                                                   "unclear": 0.025}}},
             "usage": {"input_tokens": 5, "output_tokens": 1}}
 
 

@@ -133,7 +133,7 @@ def fake_triage_post(payload, **kwargs):
     triage_payloads.append(payload)
     return {"model": "jev-test-2",
             "answers": {"first_pack": {"choice": "fixture", "confidence": 0.9,
-                                       "probabilities": {"fixture": 0.9}}},
+                                       "probabilities": {"fixture": 0.9, "none": 0.1}}},
             "usage": {"input_tokens": 300, "output_tokens": 30}}
 
 
@@ -165,7 +165,8 @@ check("researchctl triage ledgers its usage as an estimated row",
 def fake_claims_post(payload, **kwargs):
     return {"model": "jev-test-2",
             "answers": {"relation": {"choice": "supports", "confidence": 0.9,
-                                     "probabilities": {"supports": 0.9}},
+                                     "probabilities": {"supports": 0.9, "contradicts": 0.05,
+                                                       "says_nothing": 0.05}},
                         "verify": {"choice": "supported", "confidence": 0.9}},
             "usage": {"input_tokens": 40, "output_tokens": 4}}
 

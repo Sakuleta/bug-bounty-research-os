@@ -81,9 +81,10 @@ def label_client(state, questions):
     answers = {}
     for name in questions:
         if name == "result":
+            probs = {outcome: 0.0 for outcome in questions[name]["criteria"]}
+            probs.update({"FALSE_POSITIVE": 0.93, "CONFIRMED": 0.04, "INCONCLUSIVE": 0.03})
             answers[name] = {"type": "choice", "choice": "FALSE_POSITIVE", "confidence": 0.93,
-                             "probabilities": {"FALSE_POSITIVE": 0.93, "CONFIRMED": 0.04,
-                                               "INCONCLUSIVE": 0.03}}
+                             "probabilities": probs}
         elif name == "technique_family":
             answers[name] = {"type": "choice", "choice": "fixture", "confidence": 0.9,
                              "probabilities": {"fixture": 0.9, "other": 0.1}}

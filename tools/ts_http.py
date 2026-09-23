@@ -105,12 +105,14 @@ def validate_choice(answer: Any, choices: Iterable[str], *,
     """None when `answer` is a valid choice over `choices`; else the rejection reason.
 
     Shape-aware and fail-closed: `choice` must be one of `choices`, and `probabilities`
-    — when present and non-empty — must map the choice to a finite, non-negative number
-    that is at or tied for the argmax. The simplex sum is checked only when the map
-    covers the whole answer space (a partial map has no total to check; the IDF and
-    `unavailable` shapes carry no probabilities at all and never reach this function).
-    Returning a reason means "reject": callers must fall back or flag, never take the
-    value. Ties at the argmax are allowed (the model must at least pick a maximum).
+    — when present and non-empty — must be a probability simplex over the WHOLE answer
+    space: every choice present, no label outside it, the values finite, non-negative
+    and summing to ≈1, and the choice at (or tied for) the argmax. A partial map has no
+    total to check and no simplex to trust, so it is rejected rather than treated as
+    evidence. Answers carrying no probabilities at all (the IDF and `unavailable`
+    shapes) never reach this function. Returning a reason means "reject": callers must
+    fall back or flag, never take the value. Ties at the argmax are allowed (the model
+    must at least pick a maximum).
     """
     if not isinstance(answer, dict):
         return f"answer is not an object (got {type(answer).__name__})"
@@ -135,10 +137,19 @@ def validate_choice(answer: Any, choices: Iterable[str], *,
         values[str(key)] = number
     if choice not in values:
         return f"choice {choice!r} carries no probability in the returned map"
-    if set(values) >= set(allowed):
-        total = sum(values.values())
-        if abs(total - 1.0) > tolerance:
-            return f"probability simplex sums to {total:.4f} (expected 1.0 ± {tolerance})"
+    if set(values) != set(allowed):
+        missing = sorted(set(allowed) - set(values))
+        extra = sorted(set(values) - set(allowed))
+        detail = []
+        if missing:
+            detail.append("missing " + ", ".join(missing))
+        if extra:
+            detail.append("outside the answer space: " + ", ".join(extra))
+        return ("probabilities map does not cover the answer space ("
+                + "; ".join(detail) + ") — a partial map is not a simplex")
+    total = sum(values.values())
+    if abs(total - 1.0) > tolerance:
+        return f"probability simplex sums to {total:.4f} (expected 1.0 ± {tolerance})"
     best = max(values.values())
     if values[choice] < best - 1e-9:
         argmax = [k for k, v in values.items() if v >= best - 1e-9]
