@@ -85,7 +85,7 @@ check whether the audit's PASS is earned.
   `new_cycle.py` (16),
   `harness_check.py` (146) — per-profile presence/drift + restart-pending check for the
   installed enforcer plugin — and the v8.3 verification organs: `ts_cost.py` (181),
-  `ts_screen.py` (293), `ts_ground.py` (476), `ts_novelty.py` (207),
+  `ts_screen.py` (293), `ts_ground.py` (476), `ts_novelty.py` (208),
   `ts_rank.py` (190), `ts_label.py` (188), `ts_honesty.py` (159) — each backed by a
   paired eval under `tools/ts-eval/` — and the other `test_*.py` suites, incl.
   `test_harness_check.py` (136) and `test_replay.py` (368, also the capture-integrity
