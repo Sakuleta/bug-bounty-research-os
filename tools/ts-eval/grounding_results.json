@@ -2,12 +2,12 @@
   "eval": "grounded-judgment",
   "threshold": 0.8,
   "metric": "confidently wrong = verdict != truth with confidence >= threshold; a confident `unclear` counts as a confident non-answer (reported separately as the yes/no-wrong count)",
-  "before_confident_wrong": 6,
+  "before_confident_wrong": 4,
   "after_confident_wrong": 0,
   "before_confident_yesno_wrong": 0,
   "after_confident_yesno_wrong": 0,
   "before_correct": 0,
-  "after_correct": 6,
+  "after_correct": 4,
   "ship": true,
   "rows": [
     {
@@ -35,34 +35,6 @@
       },
       "after_usage": {
         "input_tokens": 2081,
-        "output_tokens": 248
-      }
-    },
-    {
-      "id": "laya-apache",
-      "question": "Is the Laya decision engine released under the Apache 2.0 license?",
-      "truth": "yes",
-      "before_verdict": "unclear",
-      "before_confidence": 1.0,
-      "before_confident_wrong": true,
-      "after_verdict": "yes",
-      "after_confidence": 0.91,
-      "after_confident_wrong": false,
-      "after_auto": true,
-      "after_relevant": 2,
-      "after_excluded": 0,
-      "after_sources": [
-        "https://github.com/NandhaKishorM/laya",
-        "https://www.madewithlaya.com/guides/what-is-laya"
-      ],
-      "before_model": "jev-1.13.0",
-      "after_model": "jev-1.13.0",
-      "before_usage": {
-        "input_tokens": 404,
-        "output_tokens": 41
-      },
-      "after_usage": {
-        "input_tokens": 2099,
         "output_tokens": 248
       }
     },
@@ -148,34 +120,6 @@
         "input_tokens": 2122,
         "output_tokens": 248
       }
-    },
-    {
-      "id": "laya-base-near-chance",
-      "question": "Is Laya's base checkpoint accurate enough for typed decisions without fine-tuning?",
-      "truth": "no",
-      "before_verdict": "unclear",
-      "before_confidence": 1.0,
-      "before_confident_wrong": true,
-      "after_verdict": "no",
-      "after_confidence": 1.0,
-      "after_confident_wrong": false,
-      "after_auto": true,
-      "after_relevant": 1,
-      "after_excluded": 0,
-      "after_sources": [
-        "https://github.com/NandhaKishorM/laya",
-        "https://github.com/NandhaKishorM/laya"
-      ],
-      "before_model": "jev-1.13.0",
-      "after_model": "jev-1.13.0",
-      "before_usage": {
-        "input_tokens": 405,
-        "output_tokens": 41
-      },
-      "after_usage": {
-        "input_tokens": 2148,
-        "output_tokens": 248
-      }
     }
   ],
   "posture": {
@@ -183,5 +127,13 @@
     "after_arm": "on (committed fixture retrieval, verbatim insertion)",
     "grounding_opt_in": true,
     "scored_system_runs": "grounding stays off unless the engagement explicitly allows it; the posture is recorded in the run manifest"
+  },
+  "removed_for_no_go": {
+    "cases": [
+      "laya-apache",
+      "laya-base-near-chance"
+    ],
+    "reason": "v8.3 no-go: Laya stays out (SPRINT-v8.3-SPEC.md) — the review flagged the two Laya cases in the V3 paired eval (REVIEW-v8.3-SPEC.md MF-2)",
+    "aggregates": "recomputed deterministically over the retained committed rows; a full re-run lands with the two in-scope replacement questions"
   }
 }

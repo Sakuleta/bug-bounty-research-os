@@ -82,6 +82,23 @@ for script in ("screen_eval.py", "grounding_eval.py", "novelty_eval.py", "rank_e
     check(f"{script} refuses without TYPESAFE_API_KEY even when allowed",
           r.returncode != 0 and "TYPESAFE_API_KEY" in r.stdout + r.stderr)
 
+# No-go pin: the sprint spec says "Laya stays out" / "Laya in any form" is out of scope
+# (SPRINT-v8.3-SPEC.md). The sprint's eval artifacts must not carry a Laya case, source
+# URL or description — a scope regression is caught here, offline. The results file may
+# keep one provenance note under `removed_for_no_go` naming what was deleted; its `rows`
+# must be clean.
+for artifact in ("grounding_eval_set.json", "README.md"):
+    text = (HERE / artifact).read_text(errors="ignore")
+    hits = [i for i, line in enumerate(text.splitlines(), 1) if "laya" in line.lower()]
+    check(f"no-go: {artifact} mentions no Laya case/source/description", hits == [])
+results_rows = json.dumps(json.loads((HERE / "grounding_results.json").read_text())["rows"])
+check("no-go: grounding_results.json rows carry no Laya case/source/description",
+      "laya" not in results_rows.lower())
+results_meta = json.loads((HERE / "grounding_results.json").read_text())
+check("no-go: the removed cases stay recorded as provenance, not as results",
+      sorted(results_meta.get("removed_for_no_go", {}).get("cases", [])) == ["laya-apache",
+                                                                            "laya-base-near-chance"])
+
 # Output rule: committed artifacts are never overwritten without --force; with --force
 # the write is a replace of a temp file (the target is replaced, never half-written).
 sys.path.insert(0, str(HERE))

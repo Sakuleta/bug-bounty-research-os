@@ -4,17 +4,16 @@
     "question": "Has GPT-6 been released as of September 2026?",
     "truth": "yes",
     "snippets": [
-      {"text": "GPT-6 \"Astra\" shipped on 2026-09-10; the model card lists general availability through the API and the consumer console.", "source": "https://openai.com/index/gpt-6-astra", "date": "2026-09-10"},
-      {"text": "OpenAI release index: GPT-6 Astra — general availability announcement, dated 2026-09-10.", "source": "https://openai.com/news/", "date": "2026-09-11"}
-    ]
-  },
-  {
-    "id": "laya-apache",
-    "question": "Is the Laya decision engine released under the Apache 2.0 license?",
-    "truth": "yes",
-    "snippets": [
-      {"text": "Laya is released on 18 September 2026 under Apache 2.0; the repository carries the standard LICENSE file.", "source": "https://github.com/NandhaKishorM/laya", "date": "2026-09-18"},
-      {"text": "madewithlaya guide: \"released on 18 September 2026 under Apache 2.0\" (community catalog, not affiliated with ConvAI).", "source": "https://www.madewithlaya.com/guides/what-is-laya", "date": "2026-09-21"}
+      {
+        "text": "GPT-6 \"Astra\" shipped on 2026-09-10; the model card lists general availability through the API and the consumer console.",
+        "source": "https://openai.com/index/gpt-6-astra",
+        "date": "2026-09-10"
+      },
+      {
+        "text": "OpenAI release index: GPT-6 Astra — general availability announcement, dated 2026-09-10.",
+        "source": "https://openai.com/news/",
+        "date": "2026-09-11"
+      }
     ]
   },
   {
@@ -22,8 +21,16 @@
     "question": "Does the Cloudflare security-audit skill permit contacting deployed endpoints?",
     "truth": "no",
     "snippets": [
-      {"text": "Universal execution safety: do not contact deployed endpoints. When a question cannot be decided from the local code, mark the candidate needs_validation instead of probing it.", "source": "https://github.com/cloudflare/security-audit-skill", "date": "2026-09-21"},
-      {"text": "The skill requires an OS-enforced sandbox: no external network, allowlisted environment, read-only target, scratch-only writes.", "source": "https://github.com/cloudflare/security-audit-skill", "date": "2026-09-21"}
+      {
+        "text": "Universal execution safety: do not contact deployed endpoints. When a question cannot be decided from the local code, mark the candidate needs_validation instead of probing it.",
+        "source": "https://github.com/cloudflare/security-audit-skill",
+        "date": "2026-09-21"
+      },
+      {
+        "text": "The skill requires an OS-enforced sandbox: no external network, allowlisted environment, read-only target, scratch-only writes.",
+        "source": "https://github.com/cloudflare/security-audit-skill",
+        "date": "2026-09-21"
+      }
     ]
   },
   {
@@ -31,8 +38,16 @@
     "question": "Does the TypeSafe System One API expose a websearch parameter?",
     "truth": "no",
     "snippets": [
-      {"text": "The public docs contain no websearch parameter; the request body is {state, model, questions} and the console orchestrates retrieval client-side: selected evidence goes verbatim into state.search_results.", "source": "https://docs.typesafe.ai/introduction/quickstart", "date": "2026-09-22"},
-      {"text": "Primitives table: choice, score, noul — no search primitive is listed; state is caller-supplied.", "source": "https://docs.typesafe.ai", "date": "2026-09-22"}
+      {
+        "text": "The public docs contain no websearch parameter; the request body is {state, model, questions} and the console orchestrates retrieval client-side: selected evidence goes verbatim into state.search_results.",
+        "source": "https://docs.typesafe.ai/introduction/quickstart",
+        "date": "2026-09-22"
+      },
+      {
+        "text": "Primitives table: choice, score, noul — no search primitive is listed; state is caller-supplied.",
+        "source": "https://docs.typesafe.ai",
+        "date": "2026-09-22"
+      }
     ]
   },
   {
@@ -40,17 +55,16 @@
     "question": "Does the browser-use/jev-ultrafast demo depend on browser-harness?",
     "truth": "yes",
     "snippets": [
-      {"text": "pyproject.toml dependencies: browser-harness==0.1.13 and httpx[http2]; the agent loop executes over raw CDP through browser-harness.", "source": "https://github.com/browser-use/jev-ultrafast", "date": "2026-09-22"},
-      {"text": "README: an interactive browser agent loop — snapshot.js builds an indexed element table, model.choose() sends one TypeSafe request, agent.py executes via browser.py over raw CDP (browser_harness).", "source": "https://github.com/browser-use/jev-ultrafast", "date": "2026-09-22"}
-    ]
-  },
-  {
-    "id": "laya-base-near-chance",
-    "question": "Is Laya's base checkpoint accurate enough for typed decisions without fine-tuning?",
-    "truth": "no",
-    "snippets": [
-      {"text": "Honest limits: base checkpoints score near chance zero-shot on typed-decisions (0.36 vs 0.32 random); the 0.766 figure is the fine-tuned checkpoint.", "source": "https://github.com/NandhaKishorM/laya", "date": "2026-09-18"},
-      {"text": "Ordinal score is the weakest primitive and high-cardinality Choice (>20-50 options) collapses at default token budgets (Banking77 0.425 vs Jev 0.870).", "source": "https://github.com/NandhaKishorM/laya", "date": "2026-09-18"}
+      {
+        "text": "pyproject.toml dependencies: browser-harness==0.1.13 and httpx[http2]; the agent loop executes over raw CDP through browser-harness.",
+        "source": "https://github.com/browser-use/jev-ultrafast",
+        "date": "2026-09-22"
+      },
+      {
+        "text": "README: an interactive browser agent loop — snapshot.js builds an indexed element table, model.choose() sends one TypeSafe request, agent.py executes via browser.py over raw CDP (browser_harness).",
+        "source": "https://github.com/browser-use/jev-ultrafast",
+        "date": "2026-09-22"
+      }
     ]
   }
 ]
