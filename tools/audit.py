@@ -1179,6 +1179,14 @@ def audit(root: Path, closure: bool = False) -> tuple[bool, dict]:
             blank = [r for r in METHOD_SELF_ATTACK_ROWS if not str(matrix.get(r, "")).strip()]
             if blank:
                 errors.append(f"method-self-attack audit {e.get('entity_id')} has blank rows: {', '.join(blank)}")
+            uncovered = (e.get("payload") or {}).get("coverage", {}).get("uncovered") or []
+            if uncovered:
+                shown = ", ".join(str(u) for u in uncovered[:5])
+                more = "…" if len(uncovered) > 5 else ""
+                warnings.append(
+                    f"method-self-attack audit {e.get('entity_id')} leaves {len(uncovered)} derived "
+                    f"coverage unit(s) unnamed ({shown}{more}) — the coverage ledger is advisory; "
+                    "name the subject or record why it is not a miss (33_METHOD_SELF_ATTACK.md)")
 
     # Audit content lite (S3): a declaration is evidence-backed and names the thing it
     # audited. Versioned records are held to the rule; legacy records warn instead.
