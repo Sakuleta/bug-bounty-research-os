@@ -65,17 +65,48 @@ the gate cannot expand the variable, so it refuses rather than allow a possible 
 markers as suspicious even when it only reads (`bash -c "cat 11_runtime/events.jsonl"`
 denies while a direct `cat 11_runtime/events.jsonl` read stays allowed).
 
+## Goal deferral (veto-only, `goal-deferral/`)
+
+`goal-deferral/` is the DSH side of the shared work-lease registry
+(`tools/leases.py`, `.leases/<run>.jsonl` under the run workspace). It is
+**veto-only**: it blocks DSH goal mutation (`create_goal`/`update_goal`) while a
+run's lease is held (`active`, `awaiting-reconciliation` or
+`unknown-recovery-required`), and it never pauses/resumes durable goal state and
+never emits a continuation. The single continuation emitter for a run is the
+OpenCode goal plugin (gate contract: `goal-deferral/opencode-gate-contract.md`).
+
+- Observation: the registry file (same verdict rules as `tools/leases.py`,
+  parity-tested) plus owner-scoped job lifecycle (`ctx.jobs.onJobsChanged` /
+  `onJobDone`) and continuable-child edges (`subagent/start` / `subagent/end`);
+  every edge re-reads the registry (subscribe-then-reread — no lost wake-up).
+- Activation: an explicit `root` / `RESEARCH_OS_LEASE_ROOT` (plus optional
+  `RESEARCH_OS_LEASE_RUN`; without a run id the whole workspace is watched), or
+  per-call discovery of an ancestor directory containing `.leases/`. A workspace
+  that never used leases is not deferred.
+- Fail closed: a missing/unreadable registry, a corrupt line, an unverifiable
+  version chain and an expired `active` lease all block; a stale lease is never
+  success. Internal `apply()` errors fail open like the rest of the plugin.
+- Wiring: the module is part of the installed body (`install.sh` copies it into
+  every profile) and installs through the enforcer's `tools.guard` seam. The real
+  continuation veto belongs in the DSH `goal-round-driver` readiness gate
+  (upstream/overlay, out of this repo's scope) — the adapter owns the predicate,
+  the subscription and the integration coverage.
+
 ## Tests
 
 ```bash
 node conformance.test.mjs          # guard + egress + token-selection cases (mocked harness)
 node executor.integration.test.mjs # full R4 chain against a local lab server (real researchctl)
+node goal-deferral/conformance.test.mjs           # veto matrix (mocked DSH seams + registry fixtures)
+node goal-deferral/deferral.integration.test.mjs  # real lease registry + launch wrapper + fake driver
 ```
 
 ## Install / update
 
 ```bash
-./install.sh
+./install.sh            # installs index.js, package.json and goal-deferral/ into web + ro-smoke
+./install.sh --dry-run  # prints the copies it would make and touches nothing
+# DSH_PROFILES="web" overrides the profile list
 ```
 
 Then **restart the DSH host** (plugin bodies load at startup on this machine; see the

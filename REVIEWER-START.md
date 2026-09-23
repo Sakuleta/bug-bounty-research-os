@@ -29,7 +29,7 @@ are in the request you received.
 |---|---|---|
 | `ARCHITECTURE.md` | 102 | The claimed shape: event log → projections → guards |
 | `START.md` | 153 | The engagement entry contract: loop, gates, closure |
-| `AGENTS.md` | 305 | The operational flow an agent must follow |
+| `AGENTS.md` | 306 | The operational flow an agent must follow |
 | `tools/control_plane.py` | 3998 | **The single policy seam**: event schema (incl. `os_version` stamping), state machine, projections (incl. `knowledge-usage`/`knowledge-proposals`), guards, audit/freshness/evidence/technique/budget records, `KNOWLEDGE_PROPOSED`/`KNOWLEDGE_RESOLVED`, and the broker integration (`set_scope` policy push, `prepare` minting signed single-use tokens through `tools/broker/`, `scope_check` delegation) |
 | `tools/audit.py` | 1435 | What the machine audit actually checks (and what it does not): reviewed-cycle binding, audit content, budget caps, closure-proof parsing, `--emit-proof` |
 | `dsh-plugin/index.js` | 2673 | Enforcement R1–R7: write protection, raw-egress gate, single-use preflight tokens, executor-side scope, browser-launch gate, capture redaction, broker-minted token consumption (R7) |
@@ -88,12 +88,12 @@ check whether the audit's PASS is earned.
   `secret-patterns.json` + `generate_secret_patterns.py` (92, the single
   secret-pattern source rendered into all three maskers), `state.py` (45),
   `new_cycle.py` (16),
-  `harness_check.py` (146) — per-profile presence/drift + restart-pending check for the
+  `harness_check.py` (178) — per-profile presence/drift + restart-pending check for the
   installed enforcer plugin — and the v8.3 verification organs: `ts_cost.py` (181),
   `ts_screen.py` (402), `ts_ground.py` (593), `ts_novelty.py` (300),
   `ts_rank.py` (353), `ts_label.py` (268), `ts_honesty.py` (227) — each backed by a
   paired eval under `tools/ts-eval/` — and the other `test_*.py` suites, incl.
-  `test_harness_check.py` (136) and `test_replay.py` (368, also the capture-integrity
+  `test_harness_check.py` (191) and `test_replay.py` (368, also the capture-integrity
   harness for a workspace argument). Out-of-workspace layers: `broker/broker.py` (781,
   Unix-socket policy/key/mint/review-voucher authority) + `broker/client.py` (92), and
   `containment/generate_profile.py` (349) + `containment/selftest.py` (335) — macOS
