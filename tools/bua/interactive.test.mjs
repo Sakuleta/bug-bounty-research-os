@@ -1078,6 +1078,140 @@ function runCli(root, extraArgs = []) {
 }
 
 {
+  // Sprint BUA MF-8: per-action evidence is REGISTERED — for a non-consequential action
+  // the screenshot PNG too — and the registered capture carries the redacted state
+  // snapshot from the observation the action ran against.
+  const evidenceCalls = []
+  const page = {
+    on() {}, mainFrame: () => ({}), url: () => 'https://t.example/app',
+    title: async () => 'stub', screenshot: async () => {},
+    viewportSize: () => viewport, locator: () => ({ all: async () => [] }),
+    goto: async () => ({ status: () => 200 }),
+  }
+  const context = {
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    async route() {}, async routeWebSocket() {}, async addInitScript() {},
+    async newCDPSession() { return { send: async () => ({}), on() {} } },
+  }
+  const root = tempWorkspace()
+  try {
+    const plan = (() => {
+      const plans = [
+        { ok: true, source: 'typesafe', operation: { op: 'CLICK', handle: 'e1' } },
+        { ok: true, source: 'typesafe', operation: { op: 'DONE' } },
+      ]
+      let i = 0
+      return async () => plans[Math.min(i++, plans.length - 1)]
+    })()
+    const summary = await runInteractive({
+      root,
+      args: {
+        url: 'https://t.example/app', principal: 'researcher-A', action: 'A-000001',
+        profile: 'lab/bua-profile', preflight: 'preflight.json', 'out-dir': 'artifacts', steps: '2',
+      },
+      chromium: { launchPersistentContext: async () => context },
+      ctl: (args) => {
+        if (args[0] === 'prepare') return { action_id: 'A-000002' }
+        if (args[0] === 'token-consume') return { action_id: 'A-000002', nonce: 'n2' }
+        if (args[0] === 'evidence') {
+          evidenceCalls.push(args[2])
+          return { entity_id: `E-00000${evidenceCalls.length}` }
+        }
+        if (args[0] === 'action') return { entity_id: 'A-000002' }
+        return { binding_present: false }
+      },
+      scopeVerdict: () => ({ in_scope: true, gate: 'assets', host: 't.example' }),
+      token: { action_id: 'A-000001', nonce: 'n1', tool_family: 'browser',
+               preflight: { account: 'researcher-A' } },
+      snapshot: async () => ({ generation: 1, entries: [entry('e1')],
+                               locators: new Map([['e1', fakeLocator()]]),
+                               url: 'https://t.example/app', title: 'stub' }),
+      plan,
+      verify: async () => ({ ok: true, evidence: 'E-000009', capture: 'shot.png' }),
+      log: () => {},
+    })
+    check('BUA MF-8: a non-consequential action registers its capture JSON and its screenshot',
+      evidenceCalls.length === 2 && evidenceCalls.some((p) => p.endsWith('.action.json'))
+      && evidenceCalls.some((p) => p.endsWith('.png')))
+    const jsonRel = evidenceCalls.find((p) => p.endsWith('.action.json'))
+    const receipt = JSON.parse(readFileSync(join(root, jsonRel), 'utf8'))
+    check('BUA MF-8: the registered capture carries the redacted state snapshot',
+      receipt.state && receipt.state.url_masked === 'https://t.example/app'
+      && receipt.state.entries.length === 1 && receipt.state.entries[0].handle === 'e1')
+    const pngEvidence = `E-00000${evidenceCalls.findIndex((p) => p.endsWith('.png')) + 1}`
+    check('BUA MF-8: the capture links the registered screenshot evidence',
+      receipt.screenshot_evidence === pngEvidence && receipt.screenshot_skipped === null
+      && receipt.screenshot && receipt.screenshot.endsWith('.png'))
+    check('BUA MF-8: the action still records after both registrations',
+      summary.history.length === 1 && summary.history[0].status === 'recorded')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+{
+  // Sprint BUA MF-8/B6: a consequential action (credential surface) registers the
+  // masked capture + state snapshot but never a screenshot — the documented exception.
+  const evidenceCalls = []
+  const page = {
+    on() {}, mainFrame: () => ({}), url: () => 'https://t.example/app',
+    title: async () => 'stub', screenshot: async () => {},
+    viewportSize: () => viewport, locator: () => ({ all: async () => [] }),
+    goto: async () => ({ status: () => 200 }),
+  }
+  const context = {
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    async route() {}, async routeWebSocket() {}, async addInitScript() {},
+    async newCDPSession() { return { send: async () => ({}), on() {} } },
+  }
+  const root = tempWorkspace()
+  try {
+    const summary = await runInteractive({
+      root,
+      args: {
+        url: 'https://t.example/app', principal: 'researcher-A', action: 'A-000001',
+        profile: 'lab/bua-profile', preflight: 'preflight.json', 'out-dir': 'artifacts', steps: '1',
+      },
+      chromium: { launchPersistentContext: async () => context },
+      ctl: (args) => {
+        if (args[0] === 'prepare') return { action_id: 'A-000002' }
+        if (args[0] === 'token-consume') return { action_id: 'A-000002', nonce: 'n2' }
+        if (args[0] === 'gate-check') return { resolved: true, decision: 'APPROVED', gate: 'G-0005' }
+        if (args[0] === 'evidence') {
+          evidenceCalls.push(args[2])
+          return { entity_id: `E-00000${evidenceCalls.length}` }
+        }
+        if (args[0] === 'action') return { entity_id: 'A-000002' }
+        return { binding_present: false }
+      },
+      scopeVerdict: () => ({ in_scope: true, gate: 'assets', host: 't.example' }),
+      token: { action_id: 'A-000001', nonce: 'n1', tool_family: 'browser',
+               preflight: { account: 'researcher-A' } },
+      snapshot: async () => ({ generation: 1,
+                               entries: [entry('e1', { type: 'submit', text: 'Submit payment' })],
+                               locators: new Map([['e1', fakeLocator()]]),
+                               url: 'https://t.example/app', title: 'stub' }),
+      plan: async () => ({ ok: true, source: 'typesafe', operation: { op: 'CLICK', handle: 'e1' } }),
+      scopeRecheck: async () => ({ ok: true }),
+      log: () => {},
+    })
+    check('BUA MF-8: a consequential action registers exactly the masked capture (no screenshot)',
+      evidenceCalls.length === 1 && evidenceCalls[0].endsWith('.action.json'))
+    const receipt = JSON.parse(readFileSync(join(root, evidenceCalls[0]), 'utf8'))
+    check('BUA MF-8: the credential-surface exception is documented on the capture',
+      receipt.screenshot === null && receipt.screenshot_skipped === 'credential_surface'
+      && receipt.screenshot_evidence === null)
+    check('BUA MF-8: the consequential capture still carries the redacted state snapshot',
+      receipt.state && receipt.state.entries && receipt.state.entries.length === 1
+      && receipt.state.entries[0].handle === 'e1')
+    check('BUA MF-8: the consequential action records with its gate',
+      summary.history.length === 1 && summary.history[0].gate === 'resolved')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+{
   const root = tempWorkspace()
   try {
     const refused = runCli(root)
@@ -1500,7 +1634,8 @@ print(json.dumps(tok))
     const entries = [entry('e1'), entry('e2', { tag: 'input', type: 'text', ops: ['CLICK', 'TYPE'] })]
     const page = {
       on() {}, mainFrame: () => ({}), url: () => 'https://t.example/app',
-      title: async () => 'App', screenshot: async () => {},
+      title: async () => 'App',
+      screenshot: async ({ path }) => { writeFileSync(path, 'png-bytes') },
       viewportSize: () => viewport, locator: () => ({ all: async () => [] }),
       goto: async () => ({ status: () => 200 }),
     }

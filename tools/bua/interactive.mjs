@@ -1324,6 +1324,45 @@ export async function runInteractive({ root, args, chromium, ctl = makeCtl(root)
     const actionId = (tok && tok.action_id) || 'A-unknown'
     const captureRel = join(outDirRel, `${label}-s${step}-${actionId}.action.json`)
     const shotRel = join(outDirRel, `${label}-s${step}-${actionId}.png`)
+    // The registered capture carries the observation the action ran against, redacted:
+    // masked URL/title and bounded handle/tag/type/name/text per element (no selectors,
+    // no coordinates, no raw attribute values beyond the executor's own bounded reads).
+    const state = snapAt ? {
+      generation: snapAt.generation,
+      url_masked: maskUrlSecrets(String(snapAt.url || '')),
+      title: maskText(String(snapAt.title || '')).slice(0, 200),
+      entries: (Array.isArray(snapAt.entries) ? snapAt.entries : []).slice(0, MAX_SNAPSHOT_ENTRIES)
+        .map((e) => ({
+          handle: e.handle, tag: e.tag, type: e.type, name: e.name,
+          text: maskText(String(e.text || '')).slice(0, 120),
+        })),
+    } : null
+    let screenshot = null
+    let screenshotEvidence = null
+    // A consequential action's surface (credential entry, submit) is never captured as a
+    // screenshot; after a scope violation the run captures nothing normal either. Both
+    // exceptions are recorded on the capture instead of being silent.
+    const screenshotSkipped = actionClass === 'consequential' ? 'credential_surface'
+      : summary.scope_violation === true ? 'scope_violation' : null
+    if (screenshotSkipped === null) {
+      try {
+        await page.screenshot({ path: join(root, shotRel) })
+        screenshot = shotRel
+        summary.screenshot = shotRel
+      } catch { screenshot = null }
+    }
+    if (screenshot) {
+      // The PNG is per-action evidence too: a screenshot written but left unregistered is
+      // an invisible artifact, so its registration failure fails the receipt closed.
+      const shotRegistered = ctl(['evidence', 'register', shotRel, 'bua-interactive-screenshot',
+                                  `bua-interactive ${op.op} ${actionId} screenshot`, '--cycle', cycleId])
+      if (!shotRegistered || !shotRegistered.entity_id) {
+        return { ok: false, reason: 'screenshot evidence registration failed — the action WAS ' +
+          'executed; treat it as unproven' }
+      }
+      screenshotEvidence = shotRegistered.entity_id
+      summary.evidence.push(screenshotEvidence)
+    }
     const receipt = {
       action_id: actionId, step, op: op.op, handle: op.handle || null,
       action_class: actionClass || classifyAction(op, null),
@@ -1338,19 +1377,13 @@ export async function runInteractive({ root, args, chromium, ctl = makeCtl(root)
         blocked_count: summary.blocked_count,
         blocked_action_count: summary.blocked_action_count,
       },
+      state,
+      screenshot,
+      screenshot_evidence: screenshotEvidence,
+      screenshot_skipped: screenshotSkipped,
       captured_at: new Date().toISOString(),
     }
     writeFileSync(join(root, captureRel), JSON.stringify(JSON.parse(scrub(JSON.stringify(receipt))), null, 2) + '\n')
-    let screenshot = null
-    // A consequential action's surface (credential entry, submit) is never captured as a
-    // screenshot; after a scope violation the run captures nothing normal either.
-    if (actionClass !== 'consequential' && summary.scope_violation !== true) {
-      try {
-        await page.screenshot({ path: join(root, shotRel) })
-        screenshot = shotRel
-        summary.screenshot = shotRel
-      } catch { screenshot = null }
-    }
     const registered = ctl(['evidence', 'register', captureRel, 'bua-interactive-action',
                             `bua-interactive ${op.op} ${actionId}`, '--cycle', cycleId])
     if (!registered || !registered.entity_id) {
