@@ -403,13 +403,29 @@ export async function guardDispatch(op, ctx) {
     }
   }
   try {
-    await locator.hitTargetCheck()
+    // The hit-target trial is playwright's own documented actionability probe: a trial
+    // click performs the full check (visible, stable, enabled, receiving pointer events)
+    // without dispatching anything. An intercepted node fails it here — before dispatch —
+    // and a probe that fails for any other reason is reported as itself, never as an
+    // occlusion (a guard that blocks everything is not the guard).
+    await locator.click({ trial: true, timeout: ACTION_TIMEOUT_MS })
   } catch (e) {
-    return { ok: false, guard: 'occlusion',
-             reason: `handle ${op.handle} is covered by another element — blocked, never clicked through (` +
-               maskText(String(e.message || e)) + ')' }
+    const detail = maskText(String(e.message || e))
+    if (/intercepts pointer events|does not receive pointer events/i.test(detail)) {
+      return { ok: false, guard: 'occlusion',
+               reason: `handle ${op.handle} is covered by another element — blocked, never clicked through (` +
+                 detail + ')' }
+    }
+    if (/is not visible|outside of the viewport|is not stable|not enabled|disabled/i.test(detail)) {
+      return { ok: false, guard: 'geometry',
+               reason: `handle ${op.handle} failed the actionability trial — blocked, never clicked through (` +
+                 detail + ')' }
+    }
+    return { ok: false, guard: 'probe',
+             reason: `hit-target trial failed for handle ${op.handle} — the probe itself failed, ` +
+               `this is not an occlusion: ${detail}` }
   }
-  return { ok: true, box }
+  return { ok: true, box, locator }
 }
 
 // ===================================================================================

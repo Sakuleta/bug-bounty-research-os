@@ -46,9 +46,20 @@ const entry = (handle, extra = {}) => ({
   box: { x: 10, y: 10, width: 100, height: 30 }, ...extra,
 })
 const viewport = { width: 1440, height: 900 }
-const fakeLocator = ({ box, hitError = null, visible = true } = {}) => ({
+// A locator exposing EXACTLY the playwright-core `Locator` surface the arm may call: a
+// trial click is the documented actionability probe (`click({ trial: true })`), and a
+// covered node fails it the way a real overlay does. `hitTargetCheck` is deliberately
+// absent — the platform contract test below refuses any method the real interface lacks.
+const fakeLocator = ({ box, covered = false, probeError = null, visible = true } = {}) => ({
   boundingBox: async () => (visible ? (box || { x: 10, y: 10, width: 100, height: 30 }) : null),
-  hitTargetCheck: async () => { if (hitError) throw new Error(hitError) },
+  click: async (options = {}) => {
+    if (probeError) throw new Error(probeError)
+    if (options && options.trial && covered) {
+      throw new Error('locator.click: Timeout 15000ms exceeded.\nCall log:\n' +
+        '  - locator resolved to <button>Submit</button>\n' +
+        '  - <div class="overlay">…</div> subtree intercepts pointer events')
+    }
+  },
 })
 
 // ===================================================================================
@@ -428,6 +439,8 @@ function runCli(root, extraArgs = []) {
   }
   const ok = await guardDispatch({ op: 'CLICK', handle: 'e1' }, base)
   check('B2 guard: a fresh, visible, uncovered node passes', ok.ok === true)
+  check('B2 guard: the passing guard hands back the checked locator for dispatch',
+    ok.locator === base.locator)
   const stale = await guardDispatch({ op: 'CLICK', handle: 'e1' }, { ...base, currentGeneration: 8 })
   check('B2 guard: a stale snapshot generation refuses dispatch',
     stale.ok === false && stale.guard === 'freshness')
@@ -435,10 +448,16 @@ function runCli(root, extraArgs = []) {
   check('B2 guard: a handle that left the live snapshot refuses dispatch',
     gone.ok === false && gone.guard === 'freshness')
   const covered = await guardDispatch({ op: 'CLICK', handle: 'e1' },
-    { ...base, locator: fakeLocator({ hitError: 'element is covered by <div class="overlay">' }) })
+    { ...base, locator: fakeLocator({ covered: true }) })
   check('B2 guard: an overlaid node is blocked, never clicked through',
     covered.ok === false && covered.guard === 'occlusion'
     && covered.reason.includes('covered by another element'))
+  const realError = await guardDispatch({ op: 'CLICK', handle: 'e1' },
+    { ...base, locator: fakeLocator({ probeError: 'locator.click is not a function' }) })
+  check('B2 guard: a genuine probe failure is reported as itself, never as occlusion',
+    realError.ok === false && realError.guard === 'probe'
+    && realError.reason.includes('hit-target trial failed')
+    && !realError.reason.includes('covered by another element'))
   const moved = await guardDispatch({ op: 'CLICK', handle: 'e1' },
     { ...base, locator: fakeLocator({ box: { x: 90, y: 10, width: 100, height: 30 } }) })
   check('B2 guard: a node that moved beyond tolerance refuses dispatch',
@@ -458,6 +477,32 @@ function runCli(root, extraArgs = []) {
   const handleless = await guardDispatch({ op: 'NAVIGATE', url: 'https://t.example/' }, base)
   check('B2 guard: an operation without a handle skips the node guards',
     handleless.ok === true && handleless.targeted === false)
+}
+
+// ---- platform contract: the guard may only call Locator methods that exist ---------
+{
+  const typesPath = join(REPO_ROOT, 'node_modules', 'playwright-core', 'types', 'types.d.ts')
+  check('B2 contract: playwright-core ships the type surface the contract is pinned against',
+    existsSync(typesPath))
+  if (existsSync(typesPath)) {
+    const types = readFileSync(typesPath, 'utf8')
+    const start = types.indexOf('export interface Locator {')
+    const end = types.indexOf('\n}', start)
+    const block = start >= 0 && end > start ? types.slice(start, end) : ''
+    const interfaceMethods = new Set([...block.matchAll(/^ {2}([a-zA-Z]+)[<(]/gm)].map((m) => m[1]))
+    const source = readFileSync(join(REPO_ROOT, 'tools', 'bua', 'interactive.mjs'), 'utf8')
+    const called = new Set()
+    for (const m of source.matchAll(/\b(?:locator|loc)\.([A-Za-z_$][\w$]*)\s*\(/g)) called.add(m[1])
+    for (const m of source.matchAll(/\blocator\([^)]*\)\.all\(\)/g)) called.add('all')
+    const missing = [...called].filter((name) => !interfaceMethods.has(name))
+    check('B2 contract: every Locator method the arm calls exists in playwright-core\'s interface Locator' +
+      (missing.length ? ' (missing: ' + missing.join(', ') + ')' : ''),
+      missing.length === 0 && called.size > 0)
+    check('B2 contract: the occlusion probe uses the documented click-trial actionability API',
+      source.includes('click({ trial: true'))
+    check('B2 contract: the retired hitTargetCheck API is gone from the arm',
+      !source.includes('hitTargetCheck'))
+  }
 }
 
 // ---- plan label resolution: the model can only name what the executor offered -----
@@ -497,7 +542,12 @@ function runCli(root, extraArgs = []) {
   const dispatched = []
   const locator = {
     boundingBox: async () => ({ x: 10, y: 10, width: 100, height: 30 }),
-    hitTargetCheck: async () => { throw new Error('element is covered by <div class="overlay">') },
+    click: async (options = {}) => {
+      if (options && options.trial) {
+        throw new Error('locator.click: Timeout 15000ms exceeded.\nCall log:\n' +
+          '  - <div class="overlay">…</div> subtree intercepts pointer events')
+      }
+    },
   }
   const page = {
     on() {}, mainFrame: () => ({}), url: () => 'https://t.example/app',
@@ -540,6 +590,63 @@ function runCli(root, extraArgs = []) {
     check('B2 wiring: the refusal names the occlusion guard and never dispatches',
       String(summary.blocked_reason).includes('guard_repeat_cap_reached')
       && String(summary.blocked_reason).includes('occlusion'))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+{
+  // Sprint BUA M2 (security B7): the live wiring — an UNCOVERED node passes the real
+  // guard and the dispatch receives the checked locator (before the fix the guard
+  // returned no locator, so every live dispatch threw on `undefined.click`).
+  const dispatched = []
+  const locator = {
+    boundingBox: async () => ({ x: 10, y: 10, width: 100, height: 30 }),
+    click: async (options = {}) => { if (options && options.trial) return },
+  }
+  const page = {
+    on() {}, mainFrame: () => ({}), url: () => 'https://t.example/app',
+    title: async () => 'stub', screenshot: async () => {},
+    viewportSize: () => viewport, locator: () => ({ all: async () => [] }),
+    goto: async () => ({ status: () => 200 }),
+  }
+  const context = {
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    async route() {}, async routeWebSocket() {}, async addInitScript() {},
+    async newCDPSession() { return { send: async () => ({}), on() {} } },
+  }
+  const root = tempWorkspace()
+  try {
+    const summary = await runInteractive({
+      root,
+      args: {
+        url: 'https://t.example/app', principal: 'researcher-A', action: 'A-000001',
+        profile: 'lab/bua-profile', preflight: 'preflight.json', 'out-dir': 'artifacts', steps: '1',
+      },
+      chromium: { launchPersistentContext: async () => context },
+      ctl: (args) => {
+        if (args[0] === 'prepare') return { action_id: 'A-000002' }
+        if (args[0] === 'token-consume') return { action_id: 'A-000002', nonce: 'n2' }
+        if (args[0] === 'evidence') return { entity_id: 'E-000001' }
+        if (args[0] === 'action') return { entity_id: 'A-000002' }
+        return { binding_present: false }
+      },
+      scopeVerdict: () => ({ in_scope: true, gate: 'assets', host: 't.example' }),
+      token: { action_id: 'A-000001', nonce: 'n1', tool_family: 'browser',
+               preflight: { account: 'researcher-A' } },
+      snapshot: async () => ({ generation: 1, entries: [entry('e1')],
+                               locators: new Map([['e1', locator]]),
+                               url: 'https://t.example/app', title: 'stub' }),
+      plan: async () => ({ ok: true, source: 'typesafe', operation: { op: 'CLICK', handle: 'e1' } }),
+      scopeRecheck: async () => ({ ok: true }),
+      dispatch: async (ctx) => { dispatched.push(ctx); return { ok: true } },
+      log: () => {},
+    })
+    check('B2 wiring: an uncovered node passes the real guard and dispatches',
+      dispatched.length === 1 && dispatched[0].locator === locator
+      && dispatched[0].op.handle === 'e1')
+    check('B2 wiring: the live path records the action (the guard returned the locator)',
+      summary.history.length === 1 && summary.history[0].status === 'recorded')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
