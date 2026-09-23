@@ -11,8 +11,10 @@ willing to act on — and this seam:
 - posts ONE System One call carrying every question (the documented fan-out shape, the
   same one `ts_ground` uses) and nothing the executor did not build;
 - validates EVERY answer through `validate_choice` (simplex ≈ 1, argmax, v8.3 strict) and
-  maps the validated labels to a typed operation — an invalid, missing or extra answer is
-  a re-plan, never a dispatch;
+  requires a strict probability simplex on every answer in this seam (an answer without
+  one is a re-plan — `ts_http`'s global contract is untouched), then maps the validated
+  labels to a typed operation — an invalid, missing or extra answer is a re-plan, never a
+  dispatch;
 - enforces per-action and per-cycle model-call caps in code, beside the action budgets
   (dollars never relax action capacity), from a small state file;
 - ledgers one `bua-plan` cost row per real call (`{usd, estimated, source}`).
@@ -163,7 +165,15 @@ def _model_state(raw: Any) -> dict[str, Any]:
 
 def _plan_from_answers(answers: Any, questions: dict[str, dict[str, Any]]
                        ) -> tuple[dict[str, Any] | None, str]:
-    """Map validated answers to a typed operation; (None, reason) when anything is off."""
+    """Map validated answers to a typed operation; (None, reason) when anything is off.
+
+    The bua-plan seam requires STRICT simplex answers: `validate_choice` alone accepts
+    an answer that carries no probability map (the IDF/unavailable shape), but this seam
+    only ever talks to the System One fan-out, which must supply a simplex over the
+    offered choices — an answer without one is a re-plan, never a dispatch. This is
+    deliberately seam-scoped: `ts_http.validate_choice` keeps its global contract (v8.3
+    shapes depend on it).
+    """
     if not isinstance(answers, dict):
         return None, "the model returned no answers"
     for name, spec in questions.items():
@@ -173,6 +183,11 @@ def _plan_from_answers(answers: Any, questions: dict[str, dict[str, Any]]
         problem = validate_choice(answer, spec["choices"])
         if problem:
             return None, f"question {name!r}: {problem}"
+        probabilities = answer.get("probabilities") if isinstance(answer, dict) else None
+        if not isinstance(probabilities, dict) or not probabilities:
+            return None, (f"question {name!r}: the bua-plan seam requires a strict probability "
+                          "simplex over the offered choices — an answer without probabilities "
+                          "is not evidence, so it is a re-plan")
     op = str(answers["bua_operation"]["choice"])
     labels: dict[str, str] = {}
     for role in REQUIRED_LABELS[op]:

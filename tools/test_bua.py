@@ -26,6 +26,7 @@ from control_plane import ControlPlane  # noqa: E402
 from ts_bua import (DEFAULT_MAX_CALLS_PER_ACTION, PLAN_STATE_REL,  # noqa: E402
                     plan_actions)
 from ts_cost import COSTS_REL, cost_rows  # noqa: E402
+from ts_http import validate_choice  # noqa: E402
 
 passed: list[str] = []
 
@@ -323,5 +324,27 @@ with mock.patch.dict(os.environ, {"TYPESAFE_API_KEY": "test-key"}):
 check("BUA M9 plan: UPLOAD without the executor's target question never dispatches",
       no_target["ok"] is False and no_target["source"] == "invalid_choice"
       and "bua_target:UPLOAD" in no_target["reason"])
+
+# ---- strict simplex answers in the bua-plan seam only (sprint BUA MF-9) -----------
+root = plan_root()
+client = stub_client(valid_answers())
+with mock.patch.dict(os.environ, {"TYPESAFE_API_KEY": "test-key"}):
+    with_simplex = plan_actions(root, plan_request(), client=client)
+check("BUA MF-9 answer: a strict-simplex answer set still plans",
+      with_simplex["ok"] is True and with_simplex["operation"]["op"] == "CLICK")
+
+bare_answers = {name: {key: value for key, value in answer.items() if key != "probabilities"}
+                for name, answer in valid_answers().items()}
+root = plan_root()
+client = stub_client(bare_answers)
+with mock.patch.dict(os.environ, {"TYPESAFE_API_KEY": "test-key"}):
+    bare = plan_actions(root, plan_request(), client=client)
+check("BUA MF-9 answer: a simplex-less answer set re-plans, never dispatches",
+      bare["ok"] is False and bare["source"] == "invalid_choice"
+      and "simplex" in bare["reason"])
+check("BUA MF-9 answer: the refusal names the first offending question",
+      "bua_operation" in bare["reason"])
+check("BUA MF-9 answer: the global validate_choice behavior is unchanged (ts_http seam)",
+      validate_choice({"choice": "e1"}, ["e1", "e2"]) is None)
 
 print(f"\n{len(passed)} checks passed")
