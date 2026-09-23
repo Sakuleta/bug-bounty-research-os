@@ -168,6 +168,37 @@ check("the ranking writes no lifecycle events (advisory only)",
 check("the ranking ledgers its usage as an estimated cost row",
       any(r["decision"] == "rank" and r["estimated"] for r in cost_rows(ALLOWED)))
 
+# 6b. v8.3 fix: the ranking call is a replayable record (input snapshot + digest,
+#     endpoint, posture); replay re-runs the info battery offline against it.
+from ts_claims import read_judgments  # noqa: E402
+from ts_rank import replay_rank  # noqa: E402
+
+rp_root = workspace()
+add_cycle(rp_root)
+add_hyp(rp_root, "H-0001", "Does the export endpoint enforce the tenant filter for API keys?")
+add_hyp(rp_root, "H-0002", "Does the export endpoint's pagination limit hold under load?")
+rp_out = rank_hypotheses(rp_root, client=rank_client({"info_1": 0.95, "info_2": 0.2}),
+                         cycle_id="C-0001")
+rp_rows = read_judgments(rp_root, seam="rank")
+check("the ranking is recorded with input digest, endpoint and posture",
+      len(rp_rows) == 1 and len(rp_rows[0]["input_digest"]) == 64
+      and rp_rows[0]["endpoint"] == "https://api.typesafe.ai/v1/systemone"
+      and rp_rows[0]["posture"] == "on" and rp_rows[0]["verdict"] == rp_out["pick"]
+      and [h["id"] for h in rp_rows[0]["input"]["hypotheses"]] == ["H-0001", "H-0002"])
+check("the ranking result carries the posture and the endpoint",
+      rp_out["posture"] == "on"
+      and rp_out["endpoint"] == "https://api.typesafe.ai/v1/systemone")
+rp_replay = replay_rank(rp_root, client=rank_client({"info_1": 0.95, "info_2": 0.2}))
+check("replay reproduces the pick and escalation decision deterministically",
+      rp_replay["replayed"] == 1 and rp_replay["matched"] == 1
+      and rp_replay["mismatched"] == 0 and rp_replay["drifted"] == 0)
+check("replay with a flipped score argues the mismatch",
+      replay_rank(rp_root, client=rank_client({"info_1": 0.2, "info_2": 0.95}))["mismatched"] == 1)
+rp_denied = workspace('external_judgment: "DENIED"\n')
+rank_hypotheses(rp_denied, client=rank_client({"info_1": 0.95}), cycle_id="C-0001")
+check("a DENIED seam writes no judgment record (nothing was judged)",
+      read_judgments(rp_denied, seam="rank") == [])
+
 # 7. CLI wiring: `researchctl rank --cycle C-0001`.
 import contextlib  # noqa: E402
 import io  # noqa: E402

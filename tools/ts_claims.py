@@ -14,10 +14,11 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from control_plane import ControlPlane, external_judgment_allowed  # noqa: E402
-from ts_http import model_name, post_json, validate_choice  # noqa: E402
+from ts_http import API, model_name, post_json, validate_choice  # noqa: E402
 
 AUTO_ACCEPT = 0.8
 EXCERPT_CAP = 6000
@@ -231,11 +232,83 @@ def _verify_question(claim: str, verdict: str, evidence: str) -> dict:
 
 
 def _judgment_digest(claim: str, evidence: str) -> str:
-    """Canonical input digest for one judgment (replay compares it first)."""
+    """Canonical input digest for one claim judgment (replay compares it first)."""
+    return judgment_digest({"claim": claim, "evidence": evidence})
+
+
+def judgment_digest(payload: Any) -> str:
+    """Canonical input digest over any JSON-able judgment payload.
+
+    The one digest used by every seam's judgment record (claims, screening, grounding,
+    novelty, ranking, labeling, honesty): sorted keys + compact separators, so the same
+    input always hashes the same and a replay can detect drift before comparing verdicts.
+    """
     import hashlib
-    return hashlib.sha256(json.dumps({"claim": claim, "evidence": evidence},
-                                     ensure_ascii=False, sort_keys=True,
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True,
                                      separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def judgment_posture(root: Path, *, live: bool = True) -> str:
+    """The recorded egress posture for a judgment call: `on`, or `off: <why>`.
+
+    Never a silent default: every seam result and every judgment record carries this
+    beside the endpoint, so a reader can tell whether external judgment was live.
+    """
+    if not live:
+        return "off: live=False"
+    if not external_judgment_allowed(root):
+        return "off: external judgment denied"
+    return "on"
+
+
+def judgment_record(*, seam: str, input_payload: Any, model: Any = None,
+                    verdict: Any = None, confidence: Any = None, endpoint: str = API,
+                    posture: str = "on", cycle_id: str | None = None,
+                    timestamp: str | None = None, **extra: Any) -> dict:
+    """The one replayable judgment shape: input digest + input snapshot, model, verdict,
+    confidence, timestamp, endpoint and policy posture (plus seam-specific extras).
+
+    Replay re-runs the stored `input` through a mocked provider and compares the guard
+    decisions; the snapshot is the redacted egress copy, never raw workspace content.
+    """
+    return {"seam": seam, "input_digest": judgment_digest(input_payload),
+            "input": input_payload, "model": model, "verdict": verdict,
+            "confidence": confidence, "timestamp": timestamp or _now_iso(),
+            "endpoint": endpoint, "posture": posture, "cycle_id": cycle_id, **extra}
+
+
+def read_judgments(root: Path, *, path: str | Path | None = None,
+                   seam: str | None = None) -> list[dict]:
+    """Stored judgment records, optionally one seam's; malformed lines are skipped."""
+    ledger = Path(path) if path is not None else Path(root) / JUDGMENTS_REL
+    rows: list[dict] = []
+    if not ledger.is_file():
+        return rows
+    for line in ledger.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        if seam is not None and record.get("seam") != seam:
+            continue
+        rows.append(record)
+    return rows
+
+
+def verified_records(root: Path, *, seam: str, path: str | Path | None = None) -> tuple[list[dict], int]:
+    """(records whose stored input matches its digest, drifted count) for one seam."""
+    kept: list[dict] = []
+    drifted = 0
+    for record in read_judgments(root, path=path, seam=seam):
+        if judgment_digest(record.get("input")) == record.get("input_digest"):
+            kept.append(record)
+        else:
+            drifted += 1
+    return kept, drifted
 
 
 def _now_iso() -> str:
@@ -251,6 +324,24 @@ def record_judgments(root: Path, records: list[dict]) -> Path:
         for record in records:
             fh.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
     return path
+
+
+def try_record_judgments(root: Path, records: list[dict]) -> dict:
+    """Append judgment records without letting a disk error eat the paid result.
+
+    Returns {"judgments_recorded": bool} plus `judgments_error` when the write failed —
+    the v8.2 B10 standard: replay coverage must never be lost silently, and the seam
+    result still returns.
+    """
+    if not records:
+        return {"judgments_recorded": True}
+    try:
+        record_judgments(root, records)
+    except OSError as exc:
+        return {"judgments_recorded": False,
+                "judgments_error": (f"judgment ledger write failed ({exc}) — "
+                                    "replay coverage lost")}
+    return {"judgments_recorded": True}
 
 
 def replay_judgments(root: Path, *, client, path: str | Path | None = None) -> dict:
@@ -514,20 +605,10 @@ def check_claims(root: Path, packet: dict, *, client=None, live: bool = True,
                        "unscreened": unscreened},
            "model": resp.get("model") if isinstance(resp, dict) else None,
            "usage": {"input_tokens": usage_in, "output_tokens": usage_out}}
-    if judgments:
-        try:
-            record_judgments(root, judgments)
-        except OSError as exc:
-            # Replay coverage must never be lost silently: the judgments still return,
-            # but the output says the ledger write failed so the gap is visible.
-            out["judgments_recorded"] = False
-            out["judgments_error"] = f"judgment ledger write failed ({exc}) — replay coverage lost"
-        else:
-            out["judgments_recorded"] = True
-    else:
-        # Nothing was judged (all claims blocked or none produced a verdict): no
-        # judgment record is invented and no empty ledger file is created.
-        out["judgments_recorded"] = True
+    # Replay coverage must never be lost silently: a failed write surfaces on the
+    # result while the paid judgments still return (v8.2 B10), and blocked claims
+    # (nothing judged) create no empty ledger file.
+    out.update(try_record_judgments(root, judgments))
     return out
 
 

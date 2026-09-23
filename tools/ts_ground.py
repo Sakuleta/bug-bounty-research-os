@@ -36,6 +36,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from control_plane import cycle_id_ok, external_judgment_allowed, redact  # noqa: E402
+from ts_claims import judgment_digest  # noqa: E402
 from ts_cost import record_seam_cost  # noqa: E402
 from ts_http import API, model_name, post_json, validate_choice  # noqa: E402
 from ts_screen import screen_text  # noqa: E402
@@ -307,6 +308,50 @@ def _usage_add(total: dict[str, int], usage: Any) -> None:
             total[key] = total.get(key, 0) + value
 
 
+def _apply_ground_answers(answers: Any, kept: list[dict[str, Any]]) -> dict[str, Any]:
+    """Code-side decisions over one grounded judgment response.
+
+    Shared by `ground_state` and `replay_grounding` so both apply exactly the same
+    guard: the per-candidate relevance threshold, verdict validation, the verdict
+    confidence threshold and the resulting `auto`. Returns relevant/excluded/verdict/
+    confidence/auto/note/problem.
+    """
+    answers = answers if isinstance(answers, dict) else {}
+    relevant: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    for i, snippet in enumerate(kept, 1):
+        score = _noul(answers.get(f"support_{i}"))
+        if score is None:
+            excluded.append({"source": snippet["source"], "date": snippet["date"],
+                             "reason": "support score invalid — not counted as relevant",
+                             "screening": None})
+            continue
+        if score >= RELEVANCE_THRESHOLD:
+            relevant.append({"source": snippet["source"], "date": snippet["date"],
+                             "score": score})
+    vanswer = answers.get("verdict") or {}
+    problem = validate_choice(vanswer, VERDICT_CHOICES)
+    verdict = str(vanswer.get("choice", "")) if problem is None else None
+    try:
+        confidence = float(vanswer.get("confidence", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    note = None
+    if problem is not None:
+        verdict, confidence = None, None
+        note = f"verdict rejected: {problem}"
+    elif not relevant:
+        note = ("no relevant evidence above the threshold — verdict not accepted "
+                "(the model's answer stays a proposal)")
+    elif confidence is not None and confidence < VERDICT_CONFIDENCE_THRESHOLD:
+        note = (f"verdict confidence {confidence:.2f} below threshold "
+                f"{VERDICT_CONFIDENCE_THRESHOLD} — flagged for review")
+    auto = bool(verdict and relevant and confidence is not None
+                and confidence >= VERDICT_CONFIDENCE_THRESHOLD)
+    return {"relevant": relevant, "excluded": excluded, "verdict": verdict,
+            "confidence": confidence, "auto": auto, "note": note, "problem": problem}
+
+
 def ground_state(root: Path, question: str, *, provider: Provider | None = None,
                  client=None, live: bool = True, cycle_id: str | None = None,
                  limit: int = 5, timeout: int = 60) -> dict[str, Any]:
@@ -384,11 +429,7 @@ def ground_state(root: Path, question: str, *, provider: Provider | None = None,
     call = client or (lambda s, q: post_json(
         {"state": s, "model": model_name(), "questions": q},
         api_key=os.environ.get("TYPESAFE_API_KEY", ""), timeout=timeout))
-    relevant: list[dict[str, Any]] = []
     model = None
-    verdict: str | None = None
-    confidence: float | None = None
-    problem: str | None = None
     if kept:
         # One call: every per-candidate support question plus the target verdict, all
         # against the same grounded state (the documented fan-out shape).
@@ -396,43 +437,26 @@ def ground_state(root: Path, question: str, *, provider: Provider | None = None,
         resp = call(state, questions)
         _usage_add(usage_total, resp.get("usage"))
         _usage_add(judgment_usage, resp.get("usage"))
-        model = resp.get("model")
-        answers = resp.get("answers") if isinstance(resp.get("answers"), dict) else {}
-        for i, snippet in enumerate(kept, 1):
-            score = _noul(answers.get(f"support_{i}"))
-            if score is None:
-                excluded.append({"source": snippet["source"], "date": snippet["date"],
-                                 "reason": "support score invalid — not counted as relevant",
-                                 "screening": None})
-                continue
-            if score >= RELEVANCE_THRESHOLD:
-                relevant.append({"source": snippet["source"], "date": snippet["date"],
-                                 "score": score})
-        vanswer = answers.get("verdict") or {}
-        problem = validate_choice(vanswer, VERDICT_CHOICES)
-        verdict = str(vanswer.get("choice", "")) if problem is None else None
-        try:
-            confidence = float(vanswer.get("confidence", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            confidence = 0.0
-    note = None
-    if problem is not None:
-        verdict, confidence = None, None
-        note = f"verdict rejected: {problem}"
-    elif not relevant:
-        note = ("no relevant evidence above the threshold — verdict not accepted "
-                "(the model's answer stays a proposal)")
-    elif confidence is not None and confidence < VERDICT_CONFIDENCE_THRESHOLD:
-        note = (f"verdict confidence {confidence:.2f} below threshold "
-                f"{VERDICT_CONFIDENCE_THRESHOLD} — flagged for review")
-    auto = bool(verdict and relevant and confidence is not None
-                and confidence >= VERDICT_CONFIDENCE_THRESHOLD)
+        model = resp.get("model") if isinstance(resp, dict) else None
+        decision = _apply_ground_answers(
+            (resp.get("answers") if isinstance(resp, dict) else None), kept)
+        excluded.extend(decision["excluded"])
+    else:
+        decision = _apply_ground_answers(None, [])
+    relevant = decision["relevant"]
+    verdict = decision["verdict"]
+    confidence = decision["confidence"]
+    problem = decision["problem"]
+    note = decision["note"]
+    auto = decision["auto"]
+    input_payload = {"question": question, "search_results": list(state["search_results"])}
+    input_digest = judgment_digest(input_payload)
     out: dict[str, Any] = {
         "source": "typesafe", "question": question, "verdict": verdict,
         "confidence": confidence, "auto": auto, "relevant": relevant,
         "excluded": excluded, "state": state, "model": model,
         "usage": usage_total, "posture": posture, "endpoint": API, "cached": False,
-        "note": note,
+        "input_digest": input_digest, "note": note,
     }
     calls_used = len(snippets) + 1 if kept else len(snippets)
     cache["calls"] = cache["calls"] + calls_used
@@ -445,6 +469,7 @@ def ground_state(root: Path, question: str, *, provider: Provider | None = None,
         "excluded": excluded, "relevant": relevant, "verdict": verdict,
         "confidence": confidence, "auto": auto, "model": model,
         "usage": usage_total, "judgment_usage": judgment_usage,
+        "input": input_payload, "input_digest": input_digest,
         "posture": posture, "endpoint": API,
         "calls": calls_used,
     }
@@ -455,6 +480,63 @@ def ground_state(root: Path, question: str, *, provider: Provider | None = None,
     record_seam_cost(root, decision="ground", out={**out, "usage": judgment_usage},
                      cycle_id=cycle_id)
     return out
+
+
+
+def replay_grounding(root: Path, *, client, path: str | Path | None = None) -> dict[str, Any]:
+    """Re-run stored grounding judgments offline and compare guard decisions.
+
+    For each ledger row carrying an input snapshot the digest is checked first (a
+    tampered row replays as `drifted`, never as a false match); the same support +
+    verdict questions are then rebuilt over the snapshot and re-run through `client`,
+    and the code-computed verdict, confidence and `auto` decision are compared with the
+    stored ones. Rows without an input snapshot (cap refusals, unavailable postures)
+    are skipped — nothing was judged. Returns {"replayed", "matched", "drifted",
+    "mismatched", "mismatches"}.
+    """
+    root = Path(root)
+    ledger = Path(path) if path is not None else root / GROUNDING_REL
+    replayed = matched = drifted = mismatched = 0
+    mismatches: list[dict[str, Any]] = []
+    if ledger.is_file():
+        for line in ledger.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(record, dict) or not isinstance(record.get("input"), dict):
+                continue
+            replayed += 1
+            input_payload = record["input"]
+            if judgment_digest(input_payload) != record.get("input_digest"):
+                drifted += 1
+                continue
+            search_results = input_payload.get("search_results") or []
+            kept = [{"text": str(s.get("text") or ""), "source": str(s.get("source") or ""),
+                     "date": s.get("date")} for s in search_results if isinstance(s, dict)]
+            state = {"question": input_payload.get("question"),
+                     "search_results": list(search_results)}
+            if kept:
+                resp = client(state, {**_support_questions(len(kept)), **_verdict_question()})
+                decision = _apply_ground_answers(
+                    (resp.get("answers") if isinstance(resp, dict) else None), kept)
+            else:
+                decision = _apply_ground_answers(None, [])
+            if (decision["verdict"] == record.get("verdict")
+                    and decision["confidence"] == record.get("confidence")
+                    and decision["auto"] == record.get("auto")):
+                matched += 1
+            else:
+                mismatched += 1
+                mismatches.append({
+                    "question": str(input_payload.get("question") or "")[:120],
+                    "stored": [record.get("verdict"), record.get("confidence"), record.get("auto")],
+                    "replayed": [decision["verdict"], decision["confidence"], decision["auto"]],
+                })
+    return {"replayed": replayed, "matched": matched, "drifted": drifted,
+            "mismatched": mismatched, "mismatches": mismatches}
 
 
 def judge_question(root: Path, question: str, *, search_results: list[dict[str, Any]] | None = None,

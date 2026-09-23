@@ -186,6 +186,34 @@ ledger_out = check_novelty(pool_root, CANDIDATE, client=pair_client("same", 0.9)
 check("the aid judges only the blocked pairs from the ledger pool",
       [p["id"] for p in ledger_out["proposals"]] == ["H-0001"])
 
+# 8. v8.3 fix: every pair judgment is a replayable record (input snapshot + digest,
+#    endpoint, posture) in the shared judgment ledger; replay re-runs the pair question
+#    offline and compares the guard decisions.
+from ts_claims import read_judgments  # noqa: E402
+from ts_novelty import replay_novelty  # noqa: E402
+
+rep_root = workspace()
+rep_out = check_novelty(rep_root, CANDIDATE, pool=[SAME], client=pair_client("same", 0.92))
+rep_rows = read_judgments(rep_root, seam="novelty")
+check("the pair judgment is recorded with input digest, endpoint and posture",
+      len(rep_rows) == 1 and len(rep_rows[0]["input_digest"]) == 64
+      and rep_rows[0]["endpoint"] == "https://api.typesafe.ai/v1/systemone"
+      and rep_rows[0]["posture"] == "on" and rep_rows[0]["verdict"] == "same"
+      and rep_rows[0]["input"]["archived"]["text"].startswith("Raw export query"))
+check("the novelty result carries the posture and the endpoint",
+      rep_out["posture"] == "on"
+      and rep_out["endpoint"] == "https://api.typesafe.ai/v1/systemone")
+rep_replay = replay_novelty(rep_root, client=pair_client("same", 0.92))
+check("replay reproduces the pair guard decision deterministically",
+      rep_replay["replayed"] == 1 and rep_replay["matched"] == 1
+      and rep_replay["mismatched"] == 0 and rep_replay["drifted"] == 0)
+check("replay with a flipped pair answer argues the mismatch",
+      replay_novelty(rep_root, client=pair_client("different", 0.92))["mismatched"] == 1)
+denied_root = workspace('external_judgment: "DENIED"\n')
+check_novelty(denied_root, CANDIDATE, pool=[SAME], client=pair_client("same", 0.92))
+check("a DENIED seam writes no judgment record (nothing was judged)",
+      read_judgments(denied_root, seam="novelty") == [])
+
 # 7. CLI wiring: `researchctl novelty candidate.json`.
 import contextlib  # noqa: E402
 import io  # noqa: E402

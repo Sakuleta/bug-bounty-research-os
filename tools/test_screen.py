@@ -18,9 +18,10 @@ from unittest import mock
 TOOLS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TOOLS))
 from control_plane import ControlPlane  # noqa: E402
+from ts_http import API  # noqa: E402
 from ts_cost import cost_rows  # noqa: E402
 from ts_screen import (BATTERY, FLAG_THRESHOLD, SCREEN_CAP, QUARANTINE_REL,  # noqa: E402
-                       screen_evidence, screen_text, screening_rows)
+                       SCREENING_REL, screen_evidence, screen_text, screening_rows)
 
 passed: list[str] = []
 
@@ -245,6 +246,43 @@ f_out = check_claims(f_root, {"claims": [{"id": "f1", "claim": "the capture show
 check("a flagged claim is blocked without egress, with the flag visible",
       f_calls == [] and f_out["results"][0]["verdict"] is None
       and "flagged" in f_out["results"][0]["note"])
+
+# 7d. v8.3 fix: the screening row is a replayable judgment record (input snapshot +
+#     digest, endpoint, posture) and replay re-runs the battery offline against it.
+from ts_screen import replay_screenings  # noqa: E402
+
+first_row = screening_rows(eroot)[0]
+check("the screening row carries the replayable judgment fields",
+      len(first_row["input_digest"]) == 64 and first_row["endpoint"] == API
+      and first_row["posture"] == "on" and first_row["input"]["content"].startswith("Ignore all"))
+
+
+def replay_client(state, questions):
+    score = 0.9 if "Ignore all previous" in state["content"] else 0.02
+    return {"model": "stub-screen",
+            "answers": {name: {"type": "noul", "noul": score} for name in questions},
+            "usage": {}}
+
+
+replayed = replay_screenings(eroot, client=replay_client)
+check("replay reproduces the stored screening guard decisions offline",
+      replayed["replayed"] == 2 and replayed["matched"] == 2
+      and replayed["mismatched"] == 0 and replayed["drifted"] == 0)
+flipped = replay_screenings(eroot, client=noul_stub(LOW))
+check("replay with a flipped battery reports the mismatch deterministically",
+      flipped["replayed"] == 2 and flipped["matched"] == 1 and flipped["mismatched"] == 1
+      and flipped["mismatches"][0]["replayed"][0] is False)
+tampered_rows = screening_rows(eroot)
+genuine_rows = json.loads(json.dumps(tampered_rows))
+tampered_rows[0]["input"]["content"] = "tampered stored input"
+(eroot / SCREENING_REL).write_text("".join(
+    json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n" for r in tampered_rows))
+drifted = replay_screenings(eroot, client=replay_client)
+check("a tampered stored input replays as drifted, never as a match",
+      drifted["drifted"] == 1 and drifted["matched"] == 1)
+# Restore the genuine rows for the CLI test below.
+(eroot / SCREENING_REL).write_text("".join(
+    json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n" for r in genuine_rows))
 
 # 8. CLI wiring: `researchctl screen E-…` runs the battery and prints the row.
 import contextlib  # noqa: E402

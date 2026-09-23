@@ -377,6 +377,37 @@ check("screening usage is ledgered once (per call), not re-folded into the groun
 check("the grounded result still reports the true total spend",
       cost_out["usage"] == {"input_tokens": 70, "output_tokens": 9})
 
+# 14. v8.3 fix: the grounding judgment is a replayable record — the ledger row and the
+#     cache entry carry the input snapshot + digest, and offline replay re-runs the same
+#     questions through a mocked provider and compares the guard decisions.
+from ts_ground import replay_grounding  # noqa: E402
+
+rep_root = workspace('external_judgment: "ALLOWED"\ngrounding: "ALLOWED"\n')
+ground_state(rep_root, "Was version 6.0 released?", provider=FakeProvider(SNIPPETS),
+             client=ground_client, cycle_id="C-9301")
+rep_row = json.loads((rep_root / "11_runtime/grounding.jsonl").read_text().splitlines()[-1])
+rep_cache = json.loads((rep_root / "11_runtime/grounding-cache/C-9301.json").read_text())
+rep_entry = rep_cache["entries"][list(rep_cache["entries"])[0]]
+check("the grounding row and cache entry carry the input snapshot and digest",
+      rep_row["input"]["question"] == "Was version 6.0 released?"
+      and len(rep_row["input_digest"]) == 64
+      and rep_entry["input_digest"] == rep_row["input_digest"]
+      and rep_row["endpoint"] == "https://api.typesafe.ai/v1/systemone"
+      and rep_row["posture"] == "on")
+replayed = replay_grounding(rep_root, client=ground_client)
+check("replay reproduces the grounded guard decisions deterministically",
+      replayed["replayed"] == 1 and replayed["matched"] == 1
+      and replayed["mismatched"] == 0 and replayed["drifted"] == 0)
+check("replay with a flipped provider answer argues the mismatch",
+      replay_grounding(rep_root, client=low_client)["mismatched"] == 1)
+genuine_row = (rep_root / "11_runtime/grounding.jsonl").read_text()
+tampered = json.loads(genuine_row.splitlines()[-1])
+tampered["input"]["question"] = "tampered stored question"
+(rep_root / "11_runtime/grounding.jsonl").write_text(genuine_row + json.dumps(tampered) + "\n")
+check("a tampered stored input replays as drifted, never as a match",
+      replay_grounding(rep_root, client=ground_client)["drifted"] == 1)
+(rep_root / "11_runtime/grounding.jsonl").write_text(genuine_row)
+
 # 9. CLI wiring: `researchctl ground <question> --cycle C-…` runs the seam.
 import contextlib  # noqa: E402
 import io  # noqa: E402

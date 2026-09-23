@@ -23,11 +23,14 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from control_plane import ControlPlane, external_judgment_allowed, redact  # noqa: E402
+from ts_claims import (API, judgment_posture, judgment_record,  # noqa: E402
+                       try_record_judgments, verified_records)
 from ts_cost import record_seam_cost  # noqa: E402
 from ts_http import model_name, post_json  # noqa: E402
 
 INFO_THRESHOLD = 0.6
 ESCALATE_MARGIN = 0.15
+TEXT_CAP = 6000
 POLICY_NOTE = "external judgment denied by engagement policy"
 NO_KEY_NOTE = "no TYPESAFE_API_KEY (or live=False): no ranking was produced"
 UNSAFE_RISK_VALUES = {"high", "destructive", "critical"}
@@ -66,46 +69,27 @@ def veto_reason(entry: dict[str, Any]) -> str | None:
     return None
 
 
-def _unavailable(note: str) -> dict[str, Any]:
+def _unavailable(note: str, posture: str) -> dict[str, Any]:
+    """The unavailable shape carries the endpoint and posture too (never a silent
+    default), so a reader can tell what was attempted."""
     return {"source": "unavailable", "ranking": [], "pick": None, "escalate": True,
             "reason": note, "vetoed": [], "vetoed_reasons": {}, "advisory": True,
-            "model": None, "usage": {}, "note": note}
+            "model": None, "usage": {}, "note": note,
+            "posture": posture, "endpoint": API}
 
 
-def rank_hypotheses(root: Path, *, client=None, live: bool = True, timeout: int = 60,
-                    cycle_id: str | None = None,
-                    hypotheses: list[dict[str, Any]] | None = None,
-                    question: str | None = None) -> dict[str, Any]:
-    """Rank open hypotheses by information value; code picks the safe maximum.
+def _bounded(text: Any) -> str:
+    """The egress/record copy of a hypothesis text: redacted, then capped (the same
+    minimization discipline as the other seams)."""
+    safe = redact(str(text or ""))
+    if len(safe) > TEXT_CAP:
+        safe = safe[:TEXT_CAP] + f"\n…[truncated {len(safe) - TEXT_CAP} chars]"
+    return safe
 
-    Returns `{"source", "ranking": [{id, info, safe, status}], "pick", "escalate",
-    "reason", "vetoed", "vetoed_reasons", "advisory", "model", "usage"}`. `pick` is
-    None whenever the ranking escalates (no safe candidate above `INFO_THRESHOLD`, a
-    narrow top-two margin, or an unavailable seam). A caller may pass `hypotheses`
-    and/or `question` to rank a scenario without ledger state (the paired eval does).
-    """
-    root = Path(root)
-    if not live or not external_judgment_allowed(root):
-        return _unavailable(POLICY_NOTE if live else NO_KEY_NOTE)
-    if client is None and not os.environ.get("TYPESAFE_API_KEY"):
-        return _unavailable(NO_KEY_NOTE)
-    if hypotheses is not None:
-        entries = [{"id": str(h.get("id")), "text": str(h.get("text") or ""),
-                    "status": str(h.get("status") or "CANDIDATE"),
-                    "payload": dict(h.get("payload") or h)}
-                   for h in hypotheses]
-    else:
-        entries = open_hypotheses(root)
-    if not entries:
-        return {**_unavailable("no open hypotheses to rank"), "escalate": False}
-    cycle = ControlPlane(root)
-    resolved_question = question
-    if resolved_question is None and cycle_id:
-        resolved_question = str((cycle.cycle_data(cycle_id) or {}).get("objective") or "")
-    state = {"question": resolved_question or "the current cycle question",
-             "hypotheses": {f"hypothesis_{i}": {"id": e["id"], "text": redact(str(e["text"]))}
-                            for i, e in enumerate(entries, 1)}}
-    questions = {
+
+def _rank_questions(count: int) -> dict[str, dict]:
+    """The one info battery shape over `hypothesis_1..N` (shared with the replay)."""
+    return {
         f"info_{i}": {
             "type": "noul",
             "instructions": (f"How much information would testing `hypothesis_{i}` add for "
@@ -116,14 +100,14 @@ def rank_hypotheses(root: Path, *, client=None, live: bool = True, timeout: int 
                 "false": "Low information: already answered, cosmetic, or unconnected.",
             },
         }
-        for i in range(1, len(entries) + 1)
+        for i in range(1, count + 1)
     }
-    call = client or (lambda s, q: post_json(
-        {"state": s, "model": model_name(), "questions": q},
-        api_key=os.environ.get("TYPESAFE_API_KEY", ""), timeout=timeout))
-    started = time.monotonic()
-    resp = call(state, questions)
-    answers = resp.get("answers") if isinstance(resp.get("answers"), dict) else {}
+
+
+def _rank_decision(answers: Any, entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """Code-side ranking decision — the veto, the validated scores and the deterministic
+    pick/escalate rules. Shared by the seam and its replay so both apply one guard."""
+    answers = answers if isinstance(answers, dict) else {}
     ranking: list[dict[str, Any]] = []
     vetoed: list[str] = []
     vetoed_reasons: dict[str, str] = {}
@@ -165,14 +149,125 @@ def rank_hypotheses(root: Path, *, client=None, live: bool = True, timeout: int 
                       f"{ESCALATE_MARGIN} — escalating instead of picking")
         else:
             pick = top["id"]
-    out = {"source": "typesafe", "ranking": ranking, "pick": pick, "escalate": escalate,
-           "reason": reason, "vetoed": vetoed, "vetoed_reasons": vetoed_reasons,
+    return {"ranking": ranking, "pick": pick, "escalate": escalate, "reason": reason,
+            "vetoed": vetoed, "vetoed_reasons": vetoed_reasons}
+
+
+def rank_hypotheses(root: Path, *, client=None, live: bool = True, timeout: int = 60,
+                    cycle_id: str | None = None,
+                    hypotheses: list[dict[str, Any]] | None = None,
+                    question: str | None = None) -> dict[str, Any]:
+    """Rank open hypotheses by information value; code picks the safe maximum.
+
+    Returns `{"source", "ranking": [{id, info, safe, status}], "pick", "escalate",
+    "reason", "vetoed", "vetoed_reasons", "advisory", "model", "usage"}`. `pick` is
+    None whenever the ranking escalates (no safe candidate above `INFO_THRESHOLD`, a
+    narrow top-two margin, or an unavailable seam). A caller may pass `hypotheses`
+    and/or `question` to rank a scenario without ledger state (the paired eval does).
+    """
+    root = Path(root)
+    if not live:
+        return _unavailable(NO_KEY_NOTE, "off: live=False")
+    if not external_judgment_allowed(root):
+        return _unavailable(POLICY_NOTE, "off: external judgment denied")
+    if client is None and not os.environ.get("TYPESAFE_API_KEY"):
+        return _unavailable(NO_KEY_NOTE, judgment_posture(root))
+    if hypotheses is not None:
+        entries = [{"id": str(h.get("id")), "text": str(h.get("text") or ""),
+                    "status": str(h.get("status") or "CANDIDATE"),
+                    "payload": dict(h.get("payload") or h)}
+                   for h in hypotheses]
+    else:
+        entries = open_hypotheses(root)
+    if not entries:
+        return {**_unavailable("no open hypotheses to rank", judgment_posture(root)),
+                "escalate": False}
+    cycle = ControlPlane(root)
+    resolved_question = question
+    if resolved_question is None and cycle_id:
+        resolved_question = str((cycle.cycle_data(cycle_id) or {}).get("objective") or "")
+    # One egress/record copy per hypothesis: redacted + capped, used by the model state
+    # and the replayable judgment record alike.
+    recorded_hypotheses = [
+        {"id": entry["id"], "text": _bounded(entry["text"]),
+         "status": entry["status"],
+         "side_effect_risk": str((entry.get("payload") or {}).get("side_effect_risk") or "")}
+        for entry in entries]
+    state = {"question": resolved_question or "the current cycle question",
+             "hypotheses": {f"hypothesis_{i}": {"id": h["id"], "text": h["text"]}
+                            for i, h in enumerate(recorded_hypotheses, 1)}}
+    questions = _rank_questions(len(entries))
+    call = client or (lambda s, q: post_json(
+        {"state": s, "model": model_name(), "questions": q},
+        api_key=os.environ.get("TYPESAFE_API_KEY", ""), timeout=timeout))
+    posture = judgment_posture(root, live=live)
+    started = time.monotonic()
+    resp = call(state, questions)
+    decision = _rank_decision(
+        (resp.get("answers") if isinstance(resp, dict) else None), entries)
+    ranking = decision["ranking"]
+    top_info = ranking[0]["info"] if ranking and ranking[0]["safe"] else None
+    out = {"source": "typesafe", "ranking": ranking, "pick": decision["pick"],
+           "escalate": decision["escalate"], "reason": decision["reason"],
+           "vetoed": decision["vetoed"], "vetoed_reasons": decision["vetoed_reasons"],
            "advisory": True, "threshold": INFO_THRESHOLD, "margin": ESCALATE_MARGIN,
-           "model": resp.get("model"), "usage": resp.get("usage", {}),
-           "note": ADVISORY_NOTE}
+           "model": resp.get("model") if isinstance(resp, dict) else None,
+           "usage": (resp.get("usage") if isinstance(resp, dict) else None) or {},
+           "posture": posture, "endpoint": API, "note": ADVISORY_NOTE}
+    out.update(try_record_judgments(root, [judgment_record(
+        seam="rank",
+        input_payload={"question": resolved_question or "the current cycle question",
+                       "hypotheses": recorded_hypotheses,
+                       "threshold": INFO_THRESHOLD, "margin": ESCALATE_MARGIN},
+        model=out["model"], verdict=out["pick"], confidence=top_info,
+        escalate=out["escalate"], posture=posture, cycle_id=cycle_id,
+        vetoed=out["vetoed"])]))
     record_seam_cost(root, decision="rank", out=out, cycle_id=cycle_id,
                      latency_ms=int((time.monotonic() - started) * 1000))
     return out
+
+
+def replay_rank(root: Path, *, client, path: str | Path | None = None) -> dict[str, Any]:
+    """Re-run stored ranking judgments offline and compare the pick decision.
+
+    Digest-verified records rebuild the same hypotheses (id, redacted text and
+    side-effect risk — the veto inputs) and the same info battery; the mocked answer is
+    re-scored through `_rank_decision` and the recomputed pick/escalate is compared with
+    the stored ones. Returns {"replayed", "matched", "drifted", "mismatched",
+    "mismatches"}.
+    """
+    records, drifted = verified_records(root, seam="rank", path=path)
+    replayed = matched = mismatched = 0
+    mismatches: list[dict[str, Any]] = []
+    for record in records:
+        replayed += 1
+        input_payload = record["input"]
+        entries = [{"id": str(h.get("id")), "text": str(h.get("text") or ""),
+                    "status": str(h.get("status") or "CANDIDATE"),
+                    "payload": {"side_effect_risk": h.get("side_effect_risk")}}
+                   for h in (input_payload.get("hypotheses") or [])]
+        if not entries:
+            mismatched += 1
+            mismatches.append({"stored": [record.get("verdict"), record.get("escalate")],
+                               "replayed": [None, None], "reason": "empty stored input"})
+            continue
+        state = {"question": input_payload.get("question"),
+                 "hypotheses": {f"hypothesis_{i}": {"id": h["id"], "text": h["text"]}
+                                for i, h in enumerate(entries, 1)}}
+        resp = client(state, _rank_questions(len(entries)))
+        decision = _rank_decision(
+            (resp.get("answers") if isinstance(resp, dict) else None), entries)
+        if (decision["pick"] == record.get("verdict")
+                and decision["escalate"] == record.get("escalate")):
+            matched += 1
+        else:
+            mismatched += 1
+            mismatches.append({
+                "stored": [record.get("verdict"), record.get("escalate")],
+                "replayed": [decision["pick"], decision["escalate"]],
+            })
+    return {"replayed": replayed, "matched": matched, "drifted": drifted,
+            "mismatched": mismatched, "mismatches": mismatches}
 
 
 def main() -> int:

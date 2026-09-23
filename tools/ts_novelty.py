@@ -27,6 +27,8 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from control_plane import ControlPlane, external_judgment_allowed, redact  # noqa: E402
+from ts_claims import (API, judgment_posture, judgment_record, read_judgments,  # noqa: E402
+                       try_record_judgments, verified_records)
 from ts_cost import record_seam_cost  # noqa: E402
 from ts_http import model_name, post_json, validate_choice  # noqa: E402
 from ts_screen import SCREEN_CAP  # noqa: E402
@@ -110,9 +112,12 @@ def hypothesis_pool(root: Path) -> list[dict[str, Any]]:
     return pool
 
 
-def _unavailable(note: str) -> dict[str, Any]:
+def _unavailable(note: str, posture: str) -> dict[str, Any]:
+    """The unavailable shape carries the endpoint and posture too — provenance is never
+    silent, even when nothing was judged."""
     return {"source": "unavailable", "proposals": [], "human_lane": [], "blocked": [],
-            "advisory": True, "model": None, "usage": {}, "note": note}
+            "advisory": True, "model": None, "usage": {}, "note": note,
+            "posture": posture, "endpoint": API}
 
 
 def _egress_text(text: Any) -> str:
@@ -130,6 +135,48 @@ def _egress_text(text: Any) -> str:
     return safe
 
 
+def _pair_questions(candidate_payload: dict[str, Any]) -> dict[str, dict]:
+    """The one pairwise question shape (shared by the seam and its offline replay)."""
+    return {"pair": {
+        "type": "choice",
+        "instructions": {
+            "candidate": candidate_payload,
+            "question": ("Do `candidate` and `archived` describe the same finding (same root "
+                         "cause and primitive), different findings, or is it unclear?"),
+        },
+        "criteria": {
+            "same": "Same root cause and primitive; the wording differs at most.",
+            "different": "A different root cause or primitive.",
+            "unclear": "Cannot be decided from the texts alone.",
+        },
+    }}
+
+
+def _pair_decision(answer: Any, threshold: float) -> dict[str, Any]:
+    """Code-side pair decision: validation + the threshold rule, never the model.
+
+    Shared by the seam and its replay so both apply exactly the same guard: a rejected
+    answer is `unclear`; a below-threshold verdict degrades to `unclear`; only
+    same/different at or above the threshold are `auto`; every `unclear` is human-lane.
+    """
+    problem = validate_choice(answer, PAIR_CHOICES)
+    try:
+        confidence = float(answer.get("confidence", 0.0) or 0.0)
+    except (TypeError, ValueError, AttributeError):
+        confidence = 0.0
+    verdict = str(answer.get("choice", "")) if problem is None else "unclear"
+    note = None
+    if problem is not None:
+        note = f"answer rejected ({problem}) — routed to the human lane"
+    elif verdict == "same" and confidence < threshold:
+        note = (f"same verdict below threshold {threshold} (confidence {confidence:.2f}) "
+                "— routed to the human lane as unclear")
+        verdict = "unclear"
+    auto = verdict in ("same", "different") and confidence >= threshold
+    return {"verdict": verdict, "confidence": confidence, "auto": auto, "note": note,
+            "problem": problem, "human_lane": verdict == "unclear"}
+
+
 def check_novelty(root: Path, candidate: dict[str, Any], pool: list[dict[str, Any]] | None = None,
                   *, client=None, live: bool = True, timeout: int = 60,
                   threshold: float = CONFIDENCE_THRESHOLD,
@@ -142,32 +189,22 @@ def check_novelty(root: Path, candidate: dict[str, Any], pool: list[dict[str, An
     """
     root = Path(root)
     if not live:
-        return _unavailable(NO_KEY_NOTE)
+        return _unavailable(NO_KEY_NOTE, "off: live=False")
     if not external_judgment_allowed(root):
-        return _unavailable(POLICY_NOTE)
+        return _unavailable(POLICY_NOTE, "off: external judgment denied")
     if client is None and not os.environ.get("TYPESAFE_API_KEY"):
-        return _unavailable(NO_KEY_NOTE)
+        return _unavailable(NO_KEY_NOTE, judgment_posture(root))
     pool = pool if pool is not None else hypothesis_pool(root)
     blocked = block_candidates(candidate, pool)
     candidate_text = _egress_text(candidate.get("text"))
+    posture = judgment_posture(root, live=live)
     call = client or (lambda s, q: post_json(
         {"state": s, "model": model_name(), "questions": q},
         api_key=os.environ.get("TYPESAFE_API_KEY", ""), timeout=timeout))
-    questions = {"pair": {
-        "type": "choice",
-        "instructions": {
-            "candidate": {"id": candidate.get("id"), "text": candidate_text},
-            "question": ("Do `candidate` and `archived` describe the same finding (same root "
-                         "cause and primitive), different findings, or is it unclear?"),
-        },
-        "criteria": {
-            "same": "Same root cause and primitive; the wording differs at most.",
-            "different": "A different root cause or primitive.",
-            "unclear": "Cannot be decided from the texts alone.",
-        },
-    }}
+    questions = _pair_questions({"id": candidate.get("id"), "text": candidate_text})
     proposals: list[dict[str, Any]] = []
     human_lane: list[str] = []
+    records: list[dict] = []
     started = time.monotonic()
     model = None
     usage_total: dict[str, int] = {}
@@ -175,41 +212,73 @@ def check_novelty(root: Path, candidate: dict[str, Any], pool: list[dict[str, An
         state = {"candidate": {"id": candidate.get("id"), "text": candidate_text},
                  "archived": {"id": entry["id"], "text": _egress_text(entry["text"])}}
         resp = call(state, questions)
-        model = resp.get("model") or model
-        usage = resp.get("usage")
+        model = (resp.get("model") if isinstance(resp, dict) else None) or model
+        usage = resp.get("usage") if isinstance(resp, dict) else None
         if isinstance(usage, dict):
             for key in ("input_tokens", "output_tokens"):
                 value = usage.get(key)
                 if isinstance(value, int) and not isinstance(value, bool):
                     usage_total[key] = usage_total.get(key, 0) + value
         answer = (resp.get("answers") or {}).get("pair") or {}
-        problem = validate_choice(answer, PAIR_CHOICES)
-        try:
-            confidence = float(answer.get("confidence", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            confidence = 0.0
-        verdict = str(answer.get("choice", "")) if problem is None else "unclear"
-        note = None
-        if problem is not None:
-            note = f"answer rejected ({problem}) — routed to the human lane"
-        elif verdict == "same" and confidence < threshold:
-            note = (f"same verdict below threshold {threshold} (confidence {confidence:.2f}) "
-                    "— routed to the human lane as unclear")
-            verdict = "unclear"
-        auto = verdict in ("same", "different") and confidence >= threshold
-        if verdict == "unclear":
+        decision = _pair_decision(answer, threshold)
+        if decision["human_lane"]:
             human_lane.append(entry["id"])
-        proposals.append({"id": entry["id"], "verdict": verdict, "confidence": confidence,
-                          "auto": auto, "note": note,
+        proposals.append({"id": entry["id"], "verdict": decision["verdict"],
+                          "confidence": decision["confidence"], "auto": decision["auto"],
+                          "note": decision["note"],
                           "evidence": {"exact_hash": entry["exact"],
                                        "keyword_overlap": entry["overlap"]}})
+        records.append(judgment_record(
+            seam="novelty",
+            input_payload={"candidate": state["candidate"], "archived": state["archived"],
+                           "threshold": threshold},
+            model=(resp.get("model") if isinstance(resp, dict) else None),
+            verdict=decision["verdict"], confidence=decision["confidence"],
+            auto=decision["auto"], posture=posture, cycle_id=cycle_id,
+            pair_id=entry["id"], human_lane=decision["human_lane"]))
     out = {"source": "typesafe", "proposals": proposals, "human_lane": human_lane,
            "blocked": [b["id"] for b in blocked], "advisory": True,
            "threshold": threshold, "model": model, "usage": usage_total,
-           "note": ADVISORY_NOTE}
+           "posture": posture, "endpoint": API, "note": ADVISORY_NOTE}
+    out.update(try_record_judgments(root, records))
     record_seam_cost(root, decision="novelty", out=out, cycle_id=cycle_id,
                      latency_ms=int((time.monotonic() - started) * 1000))
     return out
+
+
+def replay_novelty(root: Path, *, client, path: str | Path | None = None) -> dict[str, Any]:
+    """Re-run stored novelty pair judgments offline and compare guard decisions.
+
+    Each record's input digest is verified first (a tampered snapshot replays as
+    `drifted`, never as a match); the recorded candidate/archived texts and threshold
+    then rebuild the same pair question, re-run through `client`, and the recomputed
+    verdict and `auto` decision are compared with the stored ones. Returns
+    {"replayed", "matched", "drifted", "mismatched", "mismatches"}.
+    """
+    records, drifted = verified_records(root, seam="novelty", path=path)
+    replayed = matched = mismatched = 0
+    mismatches: list[dict[str, Any]] = []
+    for record in records:
+        replayed += 1
+        input_payload = record["input"]
+        threshold = float(input_payload.get("threshold", CONFIDENCE_THRESHOLD))
+        candidate_payload = input_payload.get("candidate") or {}
+        resp = client({"candidate": candidate_payload,
+                       "archived": input_payload.get("archived") or {}},
+                      _pair_questions(candidate_payload))
+        answer = (resp.get("answers") or {}).get("pair") or {}
+        decision = _pair_decision(answer, threshold)
+        if decision["verdict"] == record.get("verdict") and decision["auto"] == record.get("auto"):
+            matched += 1
+        else:
+            mismatched += 1
+            mismatches.append({
+                "pair_id": record.get("pair_id"),
+                "stored": [record.get("verdict"), record.get("auto")],
+                "replayed": [decision["verdict"], decision["auto"]],
+            })
+    return {"replayed": replayed, "matched": matched, "drifted": drifted,
+            "mismatched": mismatched, "mismatches": mismatches}
 
 
 def main() -> int:

@@ -33,7 +33,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from control_plane import ControlPlane, external_judgment_allowed, redact  # noqa: E402
 from ts_cost import record_seam_cost  # noqa: E402
-from ts_http import model_name, post_json  # noqa: E402
+from ts_http import API, model_name, post_json  # noqa: E402
 
 # The fixed battery: one Noul per question, all asked in one call over the same state.
 # Wording carries explicit boundary clauses (iterated on the paired eval): the question
@@ -100,14 +100,34 @@ def _score(answer: Any) -> tuple[float | None, str | None]:
     return number, None
 
 
+def _evaluate_answers(answers: Any) -> dict[str, Any]:
+    """Code-side scoring of one battery response: validated scores, flagged and invalid
+    sets. Callers fail closed on invalid scores (an invalid score flags the content)."""
+    answers = answers if isinstance(answers, dict) else {}
+    scores: dict[str, float] = {}
+    invalid: list[str] = []
+    for name in BATTERY:
+        value, reason = _score(answers.get(name))
+        if reason:
+            invalid.append(name)
+        else:
+            scores[name] = value
+    flagged_questions = sorted(name for name, value in scores.items() if value >= FLAG_THRESHOLD)
+    return {"flagged": bool(flagged_questions) or bool(invalid),
+            "scores": scores, "invalid_scores": sorted(invalid),
+            "flagged_questions": flagged_questions}
+
+
 def screen_text(root: Path, text: str, *, client=None, live: bool = True,
                 timeout: int = 60) -> dict[str, Any]:
     """Run the fixed battery over `text`; returns scores, flag and usage.
 
     The text is redacted (canonical `redact()`) and capped at `SCREEN_CAP` with a
     visible truncation marker before egress — the same minimization discipline as the
-    evidence excerpts. `client` injects a callable (state, questions) -> response for
-    tests; `live=False` and a denied policy return the `unavailable` shape.
+    evidence excerpts; the redacted, capped copy is returned as `input` so
+    `screen_evidence` can store it as the replayable input snapshot. `client` injects a
+    callable (state, questions) -> response for tests; `live=False` and a denied policy
+    return the `unavailable` shape.
     """
     if not live:
         return _unavailable(NO_KEY_NOTE)
@@ -140,29 +160,18 @@ def screen_text(root: Path, text: str, *, client=None, live: bool = True,
             "model": None, "usage": {},
             "error": f"screening call refused/failed ({detail})",
             "note": "failing closed: unscreened content is quarantined for review",
-            "chars": len(str(text or "")), "sent_chars": len(content),
+            "input": content, "chars": len(str(text or "")), "sent_chars": len(content),
             "truncated": truncated, "redacted": content != capped,
         }
     elapsed = int((time.monotonic() - started) * 1000)
-    answers = resp.get("answers") if isinstance(resp.get("answers"), dict) else {}
-    scores: dict[str, float] = {}
-    invalid: list[str] = []
-    for name in BATTERY:
-        value, reason = _score(answers.get(name))
-        if reason:
-            invalid.append(name)
-        else:
-            scores[name] = value
-    flagged_questions = sorted(name for name, value in scores.items() if value >= FLAG_THRESHOLD)
+    verdict = _evaluate_answers((resp.get("answers") if isinstance(resp, dict) else None))
     out: dict[str, Any] = {
         "source": "typesafe",
-        "flagged": bool(flagged_questions) or bool(invalid),
+        **verdict,
         "threshold": FLAG_THRESHOLD,
-        "scores": scores,
-        "flagged_questions": flagged_questions,
-        "invalid_scores": sorted(invalid),
-        "model": resp.get("model"),
-        "usage": resp.get("usage", {}),
+        "model": resp.get("model") if isinstance(resp, dict) else None,
+        "usage": (resp.get("usage") if isinstance(resp, dict) else None) or {},
+        "input": content,
         "chars": len(str(text or "")),
         "sent_chars": len(content),
         "truncated": truncated,
@@ -304,6 +313,9 @@ def screen_evidence(root: Path, ref: str, *, client=None, live: bool = True,
     text = evidence_excerpt(Path(root), ref, constrained=False)
     started = time.monotonic()
     result = screen_text(root, text, client=client, live=live, timeout=timeout)
+    from ts_claims import judgment_digest, judgment_posture  # lazy: ts_claims imports this module
+    content = result.get("input")
+    input_payload = {"content": content} if content is not None else None
     row = {
         "time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "evidence_ref": str(ref),
@@ -320,6 +332,12 @@ def screen_evidence(root: Path, ref: str, *, client=None, live: bool = True,
         "chars": result.get("chars", len(text)),
         "truncated": bool(result.get("truncated")),
         "redacted": bool(result.get("redacted")),
+        # Replayable judgment fields: the exact (redacted, capped) input snapshot, its
+        # digest, the endpoint and the egress posture (`judgment_record` shape).
+        "input": input_payload,
+        "input_digest": (judgment_digest(input_payload) if input_payload is not None else None),
+        "endpoint": API,
+        "posture": judgment_posture(Path(root), live=live),
         "quarantine_path": None,
         "latency_ms": int((time.monotonic() - started) * 1000),
     }
@@ -331,6 +349,43 @@ def screen_evidence(root: Path, ref: str, *, client=None, live: bool = True,
         row["quarantine_path"] = f"{QUARANTINE_REL}/{ref}.md"
     _write_row(root, row)
     return row
+
+
+def replay_screenings(root: Path, *, client) -> dict[str, Any]:
+    """Re-run stored screening judgments offline and compare guard decisions.
+
+    Rows without a recorded input (the unavailable/error shapes) are skipped — nothing
+    was judged. A row whose stored input no longer matches its digest replays as
+    `drifted` (never a false match); otherwise the fixed battery re-runs through
+    `client` and the recomputed flag and flagged-question set are compared with the
+    stored ones. Returns {"replayed", "matched", "drifted", "mismatched", "mismatches"}.
+    """
+    from ts_claims import judgment_digest  # lazy: ts_claims imports this module
+    replayed = matched = drifted = mismatched = 0
+    mismatches: list[dict[str, Any]] = []
+    for row in screening_rows(root):
+        input_payload = row.get("input")
+        if not isinstance(input_payload, dict) or "content" not in input_payload:
+            continue
+        replayed += 1
+        if judgment_digest(input_payload) != row.get("input_digest"):
+            drifted += 1
+            continue
+        resp = client({"content": input_payload["content"]}, _questions())
+        replayed_verdict = _evaluate_answers(
+            (resp.get("answers") if isinstance(resp, dict) else None))
+        if (replayed_verdict["flagged"] == row.get("flagged")
+                and replayed_verdict["flagged_questions"] == (row.get("flagged_questions") or [])):
+            matched += 1
+        else:
+            mismatched += 1
+            mismatches.append({
+                "evidence_ref": row.get("evidence_ref"),
+                "stored": [row.get("flagged"), row.get("flagged_questions")],
+                "replayed": [replayed_verdict["flagged"], replayed_verdict["flagged_questions"]],
+            })
+    return {"replayed": replayed, "matched": matched, "drifted": drifted,
+            "mismatched": mismatched, "mismatches": mismatches}
 
 
 def main() -> int:
