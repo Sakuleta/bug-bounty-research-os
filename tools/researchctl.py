@@ -208,6 +208,12 @@ def main() -> int:
                                            "(the dispatch-time gate for consequential actions)")
     gc.add_argument("action_id")
     gc.set_defaults(fn="gate-check")
+    bp = sub.add_parser("bua-plan", help="one validated interactive plan: the executor-built "
+                                         "Choice space goes out as ONE Jev fan-out, every "
+                                         "answer through validate_choice; policy DENIED or an "
+                                         "invalid answer means no operation to dispatch")
+    bp.add_argument("request_json")
+    bp.set_defaults(fn="bua-plan")
     sc = sub.add_parser("scope-check")
     sc.add_argument("url")
     sc.set_defaults(fn="scope-check")
@@ -376,6 +382,9 @@ def main() -> int:
             out = cp.consume_token(ns.action_id, load_json(ns.shape_json))
         elif ns.fn == "gate-check":
             out = cp.gate_for_action(ns.action_id)
+        elif ns.fn == "bua-plan":
+            from ts_bua import plan_actions
+            out = plan_actions(cp.root, load_json(ns.request_json))
         elif ns.fn == "scope-check":
             out = scope_verdict(Path(ns.root), ns.url)
         elif ns.fn == "scope-set":

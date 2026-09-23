@@ -13,13 +13,14 @@
  * Run: `node tools/bua/interactive.test.mjs` (exits non-zero on failure).
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   DEFAULT_MAX_STEPS, GUARD_RETRY_CAP, REPLAN_CAP, TYPE_TEXT_MAX, buildBoundary,
-  classifyAction, guardDispatch, parseOperation, resolveOperation, runInteractive, runLoop,
+  classifyAction, guardDispatch, parseOperation, planContext, resolveOperation,
+  runInteractive, runLoop,
 } from './interactive.mjs'
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -805,6 +806,145 @@ function runCli(root, extraArgs = []) {
     } catch (e) { code = e.code }
     check('B4 wiring: a token account outside the declared identity binding is refused (exit 5)',
       code === 5)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+// ===================================================================================
+// 8. Plan fan-out: the executor builds the whole model space
+// ===================================================================================
+{
+  const entries = [
+    entry('e1', { text: 'Sign in' }),
+    entry('e2', { tag: 'input', type: 'text', ops: ['CLICK', 'TYPE'] }),
+    entry('e6', { tag: 'select', ops: ['SELECT'], options: ['a', 'b'] }),
+    entry('e7', { tag: 'a', ops: ['CLICK', 'NAVIGATE'], href: 'https://t.example/next' }),
+  ]
+  const boundary = buildBoundary({ root: '/tmp/bua-boundary', entries,
+                                   textValues: ['admin'], loginFlows: ['primary'] })
+  const ctx = planContext({
+    boundary, entryUrl: 'https://t.example/app', step: 2, cycleId: 'C-0001',
+    history: [{ step: 1, op: 'NAVIGATE', status: 'recorded' }],
+    snapshot: { url: 'https://t.example/app', title: 'App', entries },
+  })
+  const q = ctx.request.questions
+  check('B5 planContext: the operation question offers the executor vocabulary',
+    JSON.stringify(q.bua_operation.choices) === JSON.stringify(['DONE', 'BLOCKED', 'CLICK', 'TYPE', 'SELECT', 'NAVIGATE', 'LOGIN']))
+  check('B5 planContext: per-operation target questions carry executor labels only',
+    JSON.stringify(q['bua_target:CLICK'].choices) === JSON.stringify(['e1', 'e2', 'e7'])
+    && JSON.stringify(q['bua_target:SELECT'].choices) === JSON.stringify(['e6=a', 'e6=b']))
+  check('B5 planContext: the entry URL and page links are opaque labels, not URLs in the choices',
+    JSON.stringify(q['bua_target:NAVIGATE'].choices) === JSON.stringify(['u0', 'u1'])
+    && !JSON.stringify(q['bua_target:NAVIGATE'].choices).includes('http'))
+  check('B5 planContext: text, file, flow and block questions come from executor config',
+    JSON.stringify(q.bua_text.choices) === JSON.stringify(['t1'])
+    && JSON.stringify(q.bua_flow.choices) === JSON.stringify(['l1'])
+    && q.bua_file === undefined && JSON.stringify(q.bua_block.choices) === JSON.stringify(['b1', 'b2', 'b3', 'b4']))
+  check('B5 planContext: the model state names elements by handle and text, never by selector',
+    ctx.request.state.elements[0].handle === 'e1'
+    && ctx.request.state.elements[0].text === 'Sign in'
+    && !('href' in ctx.request.state.elements[0]))
+  check('B5 planContext: the labels resolve back to executor payloads',
+    ctx.targets.CLICK.get('e1').handle === 'e1'
+    && ctx.targets.NAVIGATE.get('u1').url === 'https://t.example/next'
+    && ctx.targets.SELECT.get('e6=b').option === 'b')
+}
+
+// ---- the real plan seam, end to end (real researchctl, denied policy) --------------
+{
+  const root = mkdtempSync(join(tmpdir(), 'bua-plan-e2e-'))
+  let token = null
+  try {
+    mkdirSync(join(root, '11_runtime'), { recursive: true })
+    mkdirSync(join(root, '00_control'), { recursive: true })
+    mkdirSync(join(root, '12_knowledge', 'fixture'), { recursive: true })
+    writeFileSync(join(root, '11_runtime', 'events.jsonl'), '')
+    writeFileSync(join(root, '12_knowledge', 'fixture', 'fixture.md'), '# Fixture pack\n')
+    writeFileSync(join(root, '12_knowledge', 'INDEX.yaml'),
+      'packs:\n  fixture:\n    load_when: [interactive, fixture]\n    files: [fixture.md]\n')
+    writeFileSync(join(root, '00_control', 'engagement.yaml'),
+      'scope:\n  assets:\n  - "t.example"\n' +
+      'budget:\n  max_actions_per_cycle: 10\n  max_actions_per_engagement: 50\n')
+    writeFileSync(join(root, 'preflight.json'), JSON.stringify({
+      cycle_id: 'C-0001', target: 'https://t.example', account: 'researcher-A',
+      object_owner: 'researcher-A', purpose: 'interactive end to end',
+      hypothesis: 'H-0001', expected_secure: 'denied', expected_vulnerable: 'allowed',
+      side_effect: 'none', stop_condition: 'stop on unsafe behavior',
+    }))
+    symlinkSync(join(REPO_ROOT, 'tools'), join(root, 'tools'), 'dir')
+    writeFileSync(join(root, 'fixture.py'), `
+import json, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / 'tools'))
+from control_plane import ControlPlane
+root = Path(sys.argv[1])
+cp = ControlPlane(root)
+cp.create_cycle('C-0001', {
+    'id': 'C-0001', 'type': 'DISCOVERY', 'objective': 'interactive fixture',
+    'allowed_scope': ['t.example'], 'stop_conditions': ['stop'], 'controls': [],
+    'status': 'PLANNED',
+    'knowledge_triage': [{'pack': 'fixture', 'verdict': 'SKIP',
+                          'reason': 'fixture triage covers this pack'}],
+})
+(root / '04_cycles/C-0001').mkdir(parents=True, exist_ok=True)
+(root / '04_cycles/C-0001/objective.md').write_text(
+    '# Cycle Objective\\n\\n## Question\\nDoes behavior differ by principal?\\n\\n'
+    '## Minimal test\\nTwo-principal differential on a researcher-owned object.\\n')
+cp.transition_cycle('C-0001', 'READY', reason='ready')
+cp.transition_cycle('C-0001', 'RUNNING', reason='run')
+cp.create_hypothesis('H-0001', {'cycle_id': 'C-0001', 'observation': 'fixture',
+                                'hypothesis': 'fixture', 'secure_prediction': 'denied',
+                                'vulnerable_prediction': 'allowed'})
+tok = cp.prepare_action({
+    'cycle_id': 'C-0001', 'target': 'https://t.example/app', 'scope_status': 'IN_SCOPE',
+    'account': 'researcher-A', 'object_owner': 'researcher-A',
+    'purpose': 'interactive end to end', 'hypothesis': 'H-0001',
+    'expected_secure': 'denied', 'expected_vulnerable': 'allowed',
+    'side_effect': 'none', 'stop_condition': 'stop on unsafe behavior',
+    'tool_family': 'browser',
+    'request_shape': {'url': 'https://t.example/app', 'principal': 'researcher-A'},
+})
+print(json.dumps(tok))
+`)
+    token = JSON.parse(execFileSync('python3', [join(root, 'fixture.py'), root], { encoding: 'utf8' }))
+
+    const page = {
+      on() {}, mainFrame: () => ({}), url: () => 'https://t.example/app',
+      title: async () => 'App', screenshot: async () => {},
+      viewportSize: () => viewport, locator: () => ({ all: async () => [] }),
+      goto: async () => ({ status: () => 200 }),
+    }
+    const context = {
+      on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+      async route() {}, async routeWebSocket() {}, async addInitScript() {},
+      async newCDPSession() { return { send: async () => ({}), on() {} } },
+    }
+    const summary = await runInteractive({
+      root,
+      args: {
+        url: 'https://t.example/app', principal: 'researcher-A', action: token.action_id,
+        profile: 'lab/bua-profile', preflight: 'preflight.json', 'out-dir': 'artifacts',
+        steps: '2',
+      },
+      chromium: { launchPersistentContext: async () => context },
+      log: () => {},
+    })
+    check('B5 e2e: a denied model policy blocks the interactive run before any dispatch',
+      summary.status === 'blocked' && String(summary.blocked_reason).includes('denied'))
+    check('B5 e2e: the run reports no confirmed action and no scope violation',
+      summary.confirmed_evidence === null && summary.scope_violation === false)
+    check('B5 e2e: the entry token was consumed exactly once by the real seam',
+      execFileSync('python3', ['-c',
+        "import json,sys;rows=[json.loads(l) for l in open(sys.argv[1]) if l.strip()];" +
+        "print(sum(1 for r in rows if r.get('consumed')))", join(root, '11_runtime', 'action-tokens.jsonl')],
+      { encoding: 'utf8' }).trim() === '1')
+    const artifactsDir = join(root, 'artifacts')
+    const summaryFile = readdirSync(artifactsDir).find((f) => f.endsWith('.interactive.json'))
+    const artifact = JSON.parse(readFileSync(join(artifactsDir, summaryFile), 'utf8'))
+    check('B5 e2e: the summary artifact carries the scope-guard flags and the blocked reason',
+      artifact.blocked_reason.includes('denied') && Array.isArray(artifact.blocked_requests)
+      && artifact.blocked_requests.length === 0)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

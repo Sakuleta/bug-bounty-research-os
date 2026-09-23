@@ -899,8 +899,11 @@ export function loadPreflight(root, rel) {
 function makeCtl(root, exec = execFileSync) {
   return (args) => {
     try {
+      // Spawn with the workspace as cwd: every workspace-relative path the CLI takes
+      // (shape json, plan request, evidence path, receipt json) resolves against the root,
+      // exactly as `run.mjs` resolves its own out-dir.
       return JSON.parse(exec('python3', [join(root, 'tools', 'researchctl.py'), root, ...args],
-        { encoding: 'utf8', timeout: 60000 }))
+        { encoding: 'utf8', timeout: 60000, cwd: root }))
     } catch (e) {
       let parsed = null
       try { parsed = JSON.parse(String(e.stdout || '')) } catch { /* not JSON */ }
@@ -914,11 +917,21 @@ function makeCtl(root, exec = execFileSync) {
   }
 }
 
+/** Consume one prepared token through the CLI seam. The seam returns the token record
+ *  (or `{ok: false, error}` on a refusal) — a record without an action id is a refusal. */
+function consumeToken(ctl, actionId, shapeRel) {
+  const res = ctl(['token-consume', actionId, shapeRel])
+  if (!res || res.ok === false || !res.action_id) {
+    return { ok: false, reason: String((res && (res.reason || res.error)) || 'unknown token') }
+  }
+  return { ok: true, token: res }
+}
+
 /** One interactive run with injected deps (the browser factory, the researchctl seam,
  *  the scope verdict, the entry token and every loop seam) so the CLI path is testable
  *  without a browser. */
-export async function runInteractive({ root, args, chromium, ctl, scopeVerdict, token, plan,
-                                       verify, snapshot, dispatch, capture, record, authorize,
+export async function runInteractive({ root, args, chromium, ctl = makeCtl(root), scopeVerdict, token,
+                                       plan, verify, snapshot, dispatch, capture, record, authorize,
                                        gate, guard, scopeRecheck, log = console.log }) {
   const outDirRel = args['out-dir']
   insideRoot(root, outDirRel, '--out-dir')
@@ -961,10 +974,10 @@ export async function runInteractive({ root, args, chromium, ctl, scopeVerdict, 
     const shape = { url: args.url, principal: args.principal }
     const shapeRel = join(outDirRel, `${label}-entry-shape.json`)
     writeFileSync(join(root, shapeRel), JSON.stringify(shape) + '\n')
-    const consumed = ctl(['token-consume', args.action, shapeRel])
-    if (!consumed || consumed.ok !== true) {
+    const consumed = consumeToken(ctl, args.action, shapeRel)
+    if (!consumed.ok) {
       throw new Refusal(5, `entry preflight token ${args.action} was refused: ` +
-        String((consumed && (consumed.reason || consumed.error)) || 'unknown token') + ' — no token, no dispatch')
+        consumed.reason + ' — no token, no dispatch')
     }
     entryToken = consumed.token
   }
@@ -1260,11 +1273,11 @@ export async function runInteractive({ root, args, chromium, ctl, scopeVerdict, 
     if (!prepared || !prepared.action_id) {
       return { ok: false, reason: 'prepare refused the action: ' + String((prepared && (prepared.error || prepared.reason)) || 'unknown') }
     }
-    const consumed = ctl(['token-consume', prepared.action_id, shapeRel])
-    if (!consumed || consumed.ok !== true) {
-      return { ok: false, reason: 'preflight token was refused: ' + String((consumed && (consumed.reason || consumed.error)) || 'unknown') }
+    const consumed = consumeToken(ctl, prepared.action_id, shapeRel)
+    if (!consumed.ok) {
+      return { ok: false, reason: 'preflight token was refused: ' + consumed.reason }
     }
-    return { ok: true, token: consumed.token || prepared }
+    return { ok: true, token: consumed.token }
   }
   const realGate = async ({ actionId }) => {
     const checked = ctl(['gate-check', actionId])
