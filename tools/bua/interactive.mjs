@@ -54,9 +54,9 @@ import { createRequire } from 'node:module'
 import { join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
-  authorityAmbiguous, decideRequest, findOsRoot, hostKey, insideRoot, makeHopCollector,
-  makeScopeCache, makeServiceWorkerHandler, makeWebSocketHandler, maskText, maskUrlSecrets,
-  observeWorkerWebSocket, serviceWorkerInitScript, scopeCheckVerdict,
+  authorityAmbiguous, decideRequest, findOsRoot, hasSecretShape, hostKey, insideRoot,
+  makeHopCollector, makeScopeCache, makeServiceWorkerHandler, makeWebSocketHandler, maskText,
+  maskUrlSecrets, observeWorkerWebSocket, serviceWorkerInitScript, scopeCheckVerdict,
 } from './run.mjs'
 
 // ---- named caps (the step/model budgets an interactive run may never exceed) --------
@@ -226,6 +226,11 @@ export function parseOperation(raw, boundary) {
       if (String(h.entry.type || '').toLowerCase() === 'password') {
         return { ok: false, kind: 'boundary',
                  reason: 'TYPE never targets a credential field — credentials are env-only and enter through LOGIN' }
+      }
+      if (hasSecretShape(text)) {
+        return { ok: false, kind: 'boundary',
+                 reason: 'TYPE text carries a credential-shaped value — credentials are env-only ' +
+                   'and enter through LOGIN, never as a model-chosen text payload' }
       }
       return { ok: true, op: { op: 'TYPE', handle: raw.handle, text } }
     }
@@ -584,7 +589,8 @@ export async function runLoop(deps) {
               { source })
       break
     }
-    const boundary = planned.boundary || deps.boundary
+    const boundary = planned.boundary
+      || (typeof deps.boundary === 'function' ? deps.boundary({ snapshot }) : deps.boundary)
     const parsed = parseOperation(planned.operation, boundary)
     if (!parsed.ok) {
       if (guardFail('boundary', parsed.reason)) break
@@ -1151,11 +1157,17 @@ export async function runInteractive({ root, args, chromium, ctl, scopeVerdict, 
   let loginDone = false
   const realSnapshot = async () => {
     generation += 1
-    const snap = await snapshotPage(page, generation)
+    const snapAt = await snapshotPage(page, generation)
     summary.final_url = maskUrlSecrets(page.url())
-    return snap
+    return snapAt
   }
-  const snap = snapshot || realSnapshot
+  // The live generation is whatever the last observation returned: the guard refuses a
+  // handle whose snapshot generation is no longer current.
+  const snap = async (ctx) => {
+    const taken = await (snapshot || realSnapshot)(ctx)
+    if (taken && typeof taken.generation === 'number') generation = taken.generation
+    return taken
+  }
   const realCapture = async ({ op, result, snapshot: snapAt, token: tok, step, actionClass }) => {
     const actionId = (tok && tok.action_id) || 'A-unknown'
     const captureRel = join(outDirRel, `${label}-s${step}-${actionId}.action.json`)
@@ -1290,14 +1302,16 @@ export async function runInteractive({ root, args, chromium, ctl, scopeVerdict, 
       return { ok: false, reason: scrub(String(e.message || e)) }
     }
   }
+  const boundaryFor = ({ snapshot: snapAt }) => buildBoundary({
+    root, entries: (snapAt && snapAt.entries) || [], textValues: preflight.text_values,
+    uploadFiles: preflight.upload_files, loginFlows: preflight.login_flows,
+  })
   const deps = {
     maxSteps: Number(args.steps) || DEFAULT_MAX_STEPS,
-    boundary: buildBoundary({ root, entries: [], textValues: preflight.text_values,
-                              uploadFiles: preflight.upload_files, loginFlows: preflight.login_flows }),
+    boundary: boundaryFor,
     snapshot: snap,
     plan: plan || (async ({ step, snapshot: snapAt, history }) => {
-      const boundary = buildBoundary({ root, entries: snapAt.entries, textValues: preflight.text_values,
-                                       uploadFiles: preflight.upload_files, loginFlows: preflight.login_flows })
+      const boundary = boundaryFor({ snapshot: snapAt })
       const ctx = planContext({ boundary, snapshot: snapAt, entryUrl: args.url, step, history, cycleId })
       const planRel = join(outDirRel, `${label}-plan-s${step}.json`)
       writeFileSync(join(root, planRel), JSON.stringify(ctx.request, null, 2) + '\n')

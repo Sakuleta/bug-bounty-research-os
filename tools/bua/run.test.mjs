@@ -484,13 +484,14 @@ module.exports = { chromium: { launchPersistentContext: async () => ({
   }
 }
 
-// ---- v8.3 V4: executor guard requirements for any write-capable BUA extension ----
-// The current runner is read-only: no runner API call changes target state. These
-// checks pin that property against the source and pin the requirements doc that any
-// future interactive arm must satisfy before it may exist (model output never becomes
-// selectors/coordinates/shell/JS; freshness/occlusion/geometry re-checked at dispatch).
+// ---- v8.3 V4 / v8.4 B2: executor guard requirements for any write-capable BUA extension ----
+// The read-only runner stays read-only: no runner API call changes target state. These
+// checks pin that property against the source, and pin the conditional rule: interaction
+// APIs may appear only in a task script beside `run.mjs` that ships with its guard suite
+// (`interactive.test.mjs`), which must exist and pass. The scan covers EVERY
+// `tools/bua/*.mjs` file, so a new task script cannot silently bypass the pin (R1).
 {
-  const runnerSource = readFileSync(join(REPO_ROOT, 'tools', 'bua', 'run.mjs'), 'utf8')
+  const buaDir = join(REPO_ROOT, 'tools', 'bua')
   const writeApis = [
     'page.click', 'page.dblclick', 'page.fill', 'page.type', 'page.press',
     'page.selectOption', 'page.check', 'page.uncheck', 'page.setInputFiles',
@@ -498,8 +499,32 @@ module.exports = { chromium: { launchPersistentContext: async () => ({
     'page.keyboard', 'page.mouse', 'page.tap', 'page.focus',
     'elementHandle.click', 'locator.click', 'locator.fill',
   ]
+  const runnerSource = readFileSync(join(buaDir, 'run.mjs'), 'utf8')
   const found = writeApis.filter((api) => runnerSource.includes(api))
   check('the read-only runner exposes no write/interaction API', found.length === 0)
+
+  const taskScripts = readdirSync(buaDir)
+    .filter((f) => f.endsWith('.mjs') && !f.endsWith('.test.mjs') && f !== 'run.mjs')
+  const interactive = taskScripts.filter((f) => {
+    const source = readFileSync(join(buaDir, f), 'utf8')
+    return writeApis.some((api) => source.includes(api))
+  })
+  const guardSuite = join(buaDir, 'interactive.test.mjs')
+  check('a task script with interaction APIs ships with its guard suite (the blanket refusal is conditional)',
+    interactive.length === 0 || existsSync(guardSuite))
+  if (interactive.length) {
+    let suiteOk = true
+    let suiteDetail = ''
+    try {
+      execFileSync('node', [guardSuite], { encoding: 'utf8', timeout: 300000, stdio: 'pipe' })
+    } catch (e) {
+      suiteOk = false
+      suiteDetail = String((e.stdout || '') + (e.stderr || ''))
+        .split('\n').filter((line) => line.startsWith('FAIL')).join(' | ')
+    }
+    check('the interactive guard suite passes (interaction APIs fail unless it does)', suiteOk)
+    if (!suiteOk) console.log('interactive guard suite failures: ' + suiteDetail)
+  }
 
   const guardDoc = join(REPO_ROOT, 'tools', 'bua', 'INTERACTIVE-GUARDS.md')
   check('the write-capable extension guard requirements doc exists', existsSync(guardDoc))
@@ -512,6 +537,8 @@ module.exports = { chromium: { launchPersistentContext: async () => ({
     ]) {
       check('guard requirements doc names: ' + requirement, doc.includes(requirement))
     }
+    check('guard requirements doc names the guard suite that gates the interactive arm',
+      doc.includes('interactive.test.mjs'))
   }
 }
 

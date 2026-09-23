@@ -18,7 +18,8 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  DEFAULT_MAX_STEPS, GUARD_RETRY_CAP, REPLAN_CAP, buildBoundary, runInteractive, runLoop,
+  DEFAULT_MAX_STEPS, GUARD_RETRY_CAP, REPLAN_CAP, TYPE_TEXT_MAX, buildBoundary,
+  classifyAction, guardDispatch, parseOperation, resolveOperation, runInteractive, runLoop,
 } from './interactive.mjs'
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -44,7 +45,7 @@ const entry = (handle, extra = {}) => ({
 })
 const viewport = { width: 1440, height: 900 }
 const fakeLocator = ({ box, hitError = null, visible = true } = {}) => ({
-  boundingBox: async () => (visible ? (box || { x: 10, y: 10, w: 100, h: 30 }) : null),
+  boundingBox: async () => (visible ? (box || { x: 10, y: 10, width: 100, height: 30 }) : null),
   hitTargetCheck: async () => { if (hitError) throw new Error(hitError) },
 })
 
@@ -330,6 +331,211 @@ function runCli(root, extraArgs = []) {
     check('B1 handlers: the run summary carries the scope-guard flags the read-only arm carries',
       summary.scope_violation === false && Array.isArray(summary.blocked_requests)
       && Array.isArray(summary.out_of_scope_hops) && summary.status === 'confirmed')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+// ===================================================================================
+// 4. The boundary: model output never becomes selectors, coordinates, shell or JS
+// ===================================================================================
+{
+  const entries = [
+    entry('e1'),
+    entry('e2', { tag: 'input', type: 'text', ops: ['CLICK', 'TYPE'] }),
+    entry('e5', { tag: 'input', type: 'password', ops: ['LOGIN'] }),
+    entry('e6', { tag: 'select', ops: ['SELECT'], options: ['a', 'b'] }),
+  ]
+  const boundary = buildBoundary({ root: '/tmp/bua-boundary', entries,
+                                   textValues: ['admin'], uploadFiles: [], loginFlows: ['primary'] })
+  const refused = (label, raw, needle) => {
+    const parsed = parseOperation(raw, boundary)
+    check(label, parsed.ok === false && String(parsed.reason).toLowerCase().includes(needle))
+  }
+  refused('B2 boundary: a model-emitted CSS selector is refused',
+    { op: 'CLICK', selector: '#submit' }, 'selector')
+  refused('B2 boundary: a selector smuggled as a handle is refused',
+    { op: 'CLICK', handle: '#submit' }, 'opaque handle')
+  refused('B2 boundary: model-emitted coordinates are refused',
+    { op: 'CLICK', handle: 'e1', x: 10, y: 20 }, 'coordinates')
+  refused('B2 boundary: model-emitted JavaScript is refused',
+    { op: 'CLICK', handle: 'e1', script: 'fetch("/admin")' }, 'javascript')
+  refused('B2 boundary: a model-emitted shell command is refused',
+    { op: 'CLICK', handle: 'e1', command: 'curl https://evil.example' }, 'shell')
+  refused('B2 boundary: an unexpected key is refused (closed schema)',
+    { op: 'CLICK', handle: 'e1', href: 'https://evil.example' }, 'unexpected key')
+  refused('B2 boundary: a string "CLICK(e1)" is not a typed operation',
+    'CLICK(e1)', 'not a typed object')
+  refused('B2 boundary: an unknown operation is refused',
+    { op: 'EVALUATE', handle: 'e1' }, 'unknown operation')
+  refused('B2 boundary: a stale handle is refused at the boundary',
+    { op: 'CLICK', handle: 'e99' }, 'not in the executor snapshot')
+  refused('B2 boundary: a javascript: navigation is refused',
+    { op: 'NAVIGATE', url: 'javascript:alert(1)' }, 'not an http(s) navigation')
+  refused('B2 boundary: a file: navigation is refused',
+    { op: 'NAVIGATE', url: 'file:///etc/passwd' }, 'not an http(s) navigation')
+  refused('B2 boundary: a data: navigation is refused',
+    { op: 'NAVIGATE', url: 'data:text/html,<script>alert(1)</script>' }, 'not an http(s) navigation')
+  refused('B2 boundary: userinfo in a URL is refused',
+    { op: 'NAVIGATE', url: 'https://user:pw@t.example/' }, 'userinfo')
+  refused('B2 boundary: an ambiguous authority is refused',
+    { op: 'NAVIGATE', url: 'http://127.0.0.1:9\\@t.example/' }, 'ambiguous')
+  refused('B2 boundary: over-long TYPE text is refused (the 2000-char cap)',
+    { op: 'TYPE', handle: 'e2', text: 'x'.repeat(TYPE_TEXT_MAX + 1) }, 'plain string')
+  refused('B2 boundary: a secret-shaped TYPE payload is refused (credentials never ride TYPE)',
+    { op: 'TYPE', handle: 'e2', text: 'glpat-ABCDEFGHIJKLMNOPQRST' }, 'credential')
+  refused('B2 boundary: TYPE never targets a credential field',
+    { op: 'TYPE', handle: 'e5', text: 'hunter2' }, 'credential field')
+  refused('B2 boundary: a SELECT option the target never offered is refused',
+    { op: 'SELECT', handle: 'e6', option: 'not-offered' }, 'not offered')
+  refused('B2 boundary: an upload file the executor never offered is refused',
+    { op: 'UPLOAD', file: '/etc/passwd' }, 'not one of the executor-offered')
+  refused('B2 boundary: a login flow that is not configured is refused',
+    { op: 'LOGIN', flow: 'evil' }, 'not configured')
+  const good = parseOperation({ op: 'TYPE', handle: 'e2', text: 'admin' }, boundary)
+  check('B2 boundary: a typed operation over an executor handle passes',
+    good.ok === true && good.op.text === 'admin')
+  const nav = parseOperation({ op: 'NAVIGATE', url: 'https://t.example/app' }, boundary)
+  check('B2 boundary: an in-shape http(s) navigation passes', nav.ok === true)
+}
+
+// ---- classification: read / state-changing / consequential ------------------------
+{
+  check('B2 classify: NAVIGATE is read', classifyAction({ op: 'NAVIGATE' }, null) === 'read')
+  check('B2 classify: DONE and BLOCKED are read',
+    classifyAction({ op: 'DONE' }, null) === 'read' && classifyAction({ op: 'BLOCKED' }, null) === 'read')
+  check('B2 classify: LOGIN is consequential (credential use)',
+    classifyAction({ op: 'LOGIN' }, null) === 'consequential')
+  check('B2 classify: a submit button is consequential',
+    classifyAction({ op: 'CLICK' }, entry('e1', { type: 'submit', text: 'Sign in' })) === 'consequential')
+  check('B2 classify: a delete control is consequential',
+    classifyAction({ op: 'CLICK' }, entry('e1', { text: 'Delete account' })) === 'consequential')
+  check('B2 classify: a plain button is state-changing',
+    classifyAction({ op: 'CLICK' }, entry('e1', { text: 'Next page' })) === 'state-changing')
+  check('B2 classify: UPLOAD is state-changing',
+    classifyAction({ op: 'UPLOAD' }, entry('e1')) === 'state-changing')
+}
+
+// ---- node-identity guards, re-checked at dispatch ---------------------------------
+{
+  const base = {
+    generation: 7, currentGeneration: 7, entry: entry('e1'),
+    locator: fakeLocator(), viewport,
+  }
+  const ok = await guardDispatch({ op: 'CLICK', handle: 'e1' }, base)
+  check('B2 guard: a fresh, visible, uncovered node passes', ok.ok === true)
+  const stale = await guardDispatch({ op: 'CLICK', handle: 'e1' }, { ...base, currentGeneration: 8 })
+  check('B2 guard: a stale snapshot generation refuses dispatch',
+    stale.ok === false && stale.guard === 'freshness')
+  const gone = await guardDispatch({ op: 'CLICK', handle: 'e1' }, { ...base, entry: undefined })
+  check('B2 guard: a handle that left the live snapshot refuses dispatch',
+    gone.ok === false && gone.guard === 'freshness')
+  const covered = await guardDispatch({ op: 'CLICK', handle: 'e1' },
+    { ...base, locator: fakeLocator({ hitError: 'element is covered by <div class="overlay">' }) })
+  check('B2 guard: an overlaid node is blocked, never clicked through',
+    covered.ok === false && covered.guard === 'occlusion'
+    && covered.reason.includes('covered by another element'))
+  const moved = await guardDispatch({ op: 'CLICK', handle: 'e1' },
+    { ...base, locator: fakeLocator({ box: { x: 90, y: 10, width: 100, height: 30 } }) })
+  check('B2 guard: a node that moved beyond tolerance refuses dispatch',
+    moved.ok === false && moved.guard === 'geometry' && moved.reason.includes('moved beyond tolerance'))
+  const resized = await guardDispatch({ op: 'CLICK', handle: 'e1' },
+    { ...base, locator: fakeLocator({ box: { x: 10, y: 10, width: 400, height: 30 } }) })
+  check('B2 guard: a node that resized beyond tolerance refuses dispatch',
+    resized.ok === false && resized.guard === 'geometry')
+  const offscreen = await guardDispatch({ op: 'CLICK', handle: 'e1' },
+    { ...base, locator: fakeLocator({ box: { x: 10, y: 1200, width: 100, height: 30 } }) })
+  check('B2 guard: a node outside the viewport refuses dispatch (no scrolling)',
+    offscreen.ok === false && offscreen.guard === 'geometry' && offscreen.reason.includes('outside the viewport'))
+  const invisible = await guardDispatch({ op: 'CLICK', handle: 'e1' },
+    { ...base, locator: fakeLocator({ visible: false }) })
+  check('B2 guard: an invisible node refuses dispatch',
+    invisible.ok === false && invisible.guard === 'geometry')
+  const handleless = await guardDispatch({ op: 'NAVIGATE', url: 'https://t.example/' }, base)
+  check('B2 guard: an operation without a handle skips the node guards',
+    handleless.ok === true && handleless.targeted === false)
+}
+
+// ---- plan label resolution: the model can only name what the executor offered -----
+{
+  const boundary = buildBoundary({ root: '/tmp/bua-boundary',
+    entries: [entry('e1'), entry('e6', { tag: 'select', ops: ['SELECT'], options: ['a', 'b'] }),
+              entry('e7', { tag: 'a', ops: ['CLICK', 'NAVIGATE'], href: 'https://t.example/next' })],
+    textValues: ['admin'], loginFlows: ['primary'] })
+  const ctx = {
+    targets: { CLICK: new Map([['e1', { handle: 'e1' }]]),
+               TYPE: new Map([['e2', { handle: 'e2' }]]),
+               SELECT: new Map([['e6=a', { handle: 'e6', option: 'a' }]]),
+               NAVIGATE: new Map([['u0', { url: 'https://t.example/app' }]]) },
+    texts: new Map([['t1', 'admin']]), files: new Map(), flows: new Map([['l1', 'primary']]),
+    reasons: new Map([['b1', 'human_required']]),
+  }
+  check('B2 labels: an offered label resolves to a typed operation',
+    resolveOperation({ op: 'CLICK', labels: { target: 'e1' } }, ctx).op.handle === 'e1')
+  check('B2 labels: a forged target label is refused',
+    resolveOperation({ op: 'CLICK', labels: { target: 'e99' } }, ctx).ok === false)
+  check('B2 labels: a forged text label is refused',
+    resolveOperation({ op: 'TYPE', labels: { target: 'e2', text: 't9' } }, ctx).ok === false)
+  check('B2 labels: a composite select label resolves handle+option',
+    JSON.stringify(resolveOperation({ op: 'SELECT', labels: { target: 'e6=a' } }, ctx).op)
+    === JSON.stringify({ op: 'SELECT', handle: 'e6', option: 'a' }))
+  check('B2 labels: a forged flow label is refused',
+    resolveOperation({ op: 'LOGIN', labels: { flow: 'l9' } }, ctx).ok === false)
+  check('B2 labels: a forged block reason is refused',
+    resolveOperation({ op: 'BLOCKED', labels: { reason: 'b9' } }, ctx).ok === false)
+  check('B2 labels: the executor still parses the resolved operation',
+    parseOperation(resolveOperation({ op: 'CLICK', labels: { target: 'e1' } }, ctx).op, boundary).ok === true)
+}
+
+// ---- the real guard is what the loop uses (wiring, not just the pure function) ----
+{
+  const installOrder = []
+  const dispatched = []
+  const locator = {
+    boundingBox: async () => ({ x: 10, y: 10, width: 100, height: 30 }),
+    hitTargetCheck: async () => { throw new Error('element is covered by <div class="overlay">') },
+  }
+  const page = {
+    on() {}, mainFrame: () => ({}), url: () => 'https://t.example/app',
+    title: async () => 'stub', screenshot: async () => {},
+    viewportSize: () => viewport, locator: () => ({ all: async () => [] }),
+    goto: async () => ({ status: () => 200 }),
+  }
+  const context = {
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    async route() { installOrder.push('route') },
+    async routeWebSocket() { installOrder.push('routeWebSocket') },
+    async addInitScript() { installOrder.push('addInitScript') },
+    async newCDPSession() { return { send: async () => ({}), on() {} } },
+  }
+  const root = tempWorkspace()
+  try {
+    const summary = await runInteractive({
+      root,
+      args: {
+        url: 'https://t.example/app', principal: 'researcher-A', action: 'A-000001',
+        profile: 'lab/bua-profile', preflight: 'preflight.json', 'out-dir': 'artifacts', steps: '2',
+      },
+      chromium: { launchPersistentContext: async () => context },
+      ctl: () => ({ ok: true }),
+      scopeVerdict: () => ({ in_scope: true, gate: 'assets', host: 't.example' }),
+      token: { action_id: 'A-000001', nonce: 'n1', tool_family: 'browser',
+               preflight: { account: 'researcher-A' } },
+      snapshot: async () => ({ generation: 1, entries: [entry('e1')],
+                               locators: new Map([['e1', locator]]),
+                               url: 'https://t.example/app', title: 'stub' }),
+      plan: async () => ({ ok: true, source: 'typesafe', operation: { op: 'CLICK', handle: 'e1' } }),
+      authorize: async () => ({ ok: true, token: { action_id: 'A-000002', nonce: 'n2' } }),
+      scopeRecheck: async () => ({ ok: true }),
+      dispatch: async (ctx) => { dispatched.push(ctx); return { ok: true } },
+      log: () => {},
+    })
+    check('B2 wiring: an occluded target is refused by the real guard before dispatch',
+      dispatched.length === 0 && summary.status === 'blocked'
+      && summary.events.some((e) => e.guard === 'occlusion'))
+    check('B2 wiring: the refusal names the occlusion guard and never dispatches',
+      String(summary.blocked_reason).includes('guard_repeat_cap_reached')
+      && String(summary.blocked_reason).includes('occlusion'))
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

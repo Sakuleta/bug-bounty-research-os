@@ -1,10 +1,14 @@
 # Write-capable BUA extension — executor guard requirements
 
-Status: **requirements only**. The current runner (`run.mjs`) is read-only
-(navigate + screenshot + masked capture); there is no click/fill/type/evaluate path and
-no interactive browsing in the v8.3 sprint. Any future task script that changes state
-on the target must satisfy every requirement below **before** it may exist, and
-`run.test.mjs` pins both the doc and the read-only property of today's runner.
+Status: **in force**. The read-only runner (`run.mjs`) is still read-only
+(navigate + screenshot + masked capture) and is still the default arm wired into the
+executor; there is no click/fill/type/evaluate path in it. A write-capable task script
+now exists BESIDE it — `tools/bua/interactive.mjs` — carrying its documented
+precondition, its own guard suite (`tools/bua/interactive.test.mjs`) and the human gate
+for consequential actions. `run.test.mjs` scans every `tools/bua/*.mjs` file: interaction
+APIs in any file fail unless that guard suite exists and passes, and the read-only runner
+itself stays interaction-free. Every requirement below is encoded in code and pinned by
+the guard suite.
 
 Adapted from the `browser-use/jev-ultrafast` executor discipline
 (`INTEGRATION-RESEARCH.md` §4.4): *the model proposes an action; the executor decides
@@ -46,10 +50,15 @@ handle against the live DOM and verify the node is the same node it showed the m
 
 ## 4. The read-only default stays the default
 
-- The read-only runner remains the only arm wired into the executor until a task script
-  ships with its documented precondition, its own guard tests, and a human gate.
-- `run.test.mjs` scans the runner source for interaction APIs and fails when one
-  appears without the guard suite; this doc is the checklist that suite must encode.
+- The read-only runner remains the only arm wired into the executor
+  (`dsh-plugin/index.js` spawns `tools/bua/run.mjs` and nothing else); the interactive
+  task script is controller-driven and carries its documented precondition
+  (`tools/bua/interactive.mjs` header: scope verdict, explicit workspace profile, a
+  consumed single-use entry token, the per-action preflight template).
+- `run.test.mjs` scans every `tools/bua/*.mjs` file for interaction APIs and fails when
+  one appears in a file without the guard suite (`tools/bua/interactive.test.mjs`) — and
+  it runs that suite, so "exists" is never enough; it must pass. `run.mjs` itself stays
+  interaction-free. This doc is the checklist the suite encodes.
 
 ## 5. Failure is a first-class outcome
 

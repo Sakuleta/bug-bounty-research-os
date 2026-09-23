@@ -110,6 +110,13 @@ function scrubSecrets(text) {
   for (const re of SECRET_SHAPES) out = out.replace(re, '[REDACTED]')
   return out
 }
+/** True when `text` carries a secret-shaped value (the masker's own shapes). A credential
+ *  must never be typed into a target field through the interactive arm: `TYPE` refuses
+ *  secret-shaped payloads and credentials enter only through the env-only LOGIN flow. */
+export function hasSecretShape(text) {
+  const raw = String(text == null ? '' : text)
+  return scrubSecrets(raw) !== raw
+}
 
 function maskQueryPart(part) {
   const eq = part.indexOf('=')
