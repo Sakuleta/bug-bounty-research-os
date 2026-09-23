@@ -1270,8 +1270,15 @@ export async function runInteractive({ root, args, chromium, ctl = makeCtl(root)
     return { ok: true, id: recorded.entity_id }
   }
   const realAuthorize = async ({ op, snapshot: snapAt, step, actionClass }) => {
-    if (op.op === 'NAVIGATE' && entryToken && String(entryToken.preflight && entryToken.preflight.target || args.url) === String(op.url)) {
-      return { ok: true, token: entryToken }
+    // The entry token is single-use: it authorizes the entry navigation exactly once.
+    // After its first authorize hit it is spent — a later NAVIGATE to the same URL must
+    // prepare + consume a fresh token like every other dispatch (the receipt for the
+    // first one already names it, and record_action refuses duplicate action ids).
+    if (op.op === 'NAVIGATE' && entryToken
+        && String(entryToken.preflight && entryToken.preflight.target || args.url) === String(op.url)) {
+      const spent = entryToken
+      entryToken = null
+      return { ok: true, token: spent }
     }
     const shape = { url: op.op === 'NAVIGATE' ? op.url : (snapAt.url || args.url), principal: args.principal }
     const shapeRel = join(outDirRel, `${label}-shape-s${step}.json`)

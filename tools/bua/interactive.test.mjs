@@ -729,6 +729,74 @@ function runCli(root, extraArgs = []) {
 }
 
 {
+  // Sprint BUA M3: the entry token authorizes the entry navigation exactly ONCE — a
+  // second NAVIGATE to the same URL must prepare + consume a fresh token.
+  const calls = { prepare: 0, consume: 0 }
+  const dispatched = []
+  const page = {
+    on() {}, mainFrame: () => ({}), url: () => 'https://t.example/app',
+    title: async () => 'stub', screenshot: async () => {},
+    viewportSize: () => viewport, locator: () => ({ all: async () => [] }),
+    goto: async () => ({ status: () => 200 }),
+  }
+  const context = {
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    async route() {}, async routeWebSocket() {}, async addInitScript() {},
+    async newCDPSession() { return { send: async () => ({}), on() {} } },
+  }
+  const root = tempWorkspace()
+  try {
+    const plan = (() => {
+      const plans = [
+        { ok: true, source: 'typesafe', operation: { op: 'NAVIGATE', url: 'https://t.example/app' } },
+        { ok: true, source: 'typesafe', operation: { op: 'NAVIGATE', url: 'https://t.example/app' } },
+        { ok: true, source: 'typesafe', operation: { op: 'DONE' } },
+      ]
+      let i = 0
+      return async () => plans[Math.min(i++, plans.length - 1)]
+    })()
+    const summary = await runInteractive({
+      root,
+      args: {
+        url: 'https://t.example/app', principal: 'researcher-A', action: 'A-000001',
+        profile: 'lab/bua-profile', preflight: 'preflight.json', 'out-dir': 'artifacts', steps: '3',
+      },
+      chromium: { launchPersistentContext: async () => context },
+      ctl: (args) => {
+        if (args[0] === 'token-consume') {
+          calls.consume += 1
+          return { action_id: args[1], nonce: `n${calls.consume}` }
+        }
+        if (args[0] === 'prepare') {
+          calls.prepare += 1
+          return { action_id: `A-00000${calls.prepare + 1}` }
+        }
+        if (args[0] === 'evidence') return { entity_id: 'E-000001' }
+        if (args[0] === 'action') return { entity_id: 'A-000002' }
+        return { binding_present: false }
+      },
+      scopeVerdict: () => ({ in_scope: true, gate: 'assets', host: 't.example' }),
+      snapshot: async () => ({ generation: 1, entries: [], locators: new Map(),
+                               url: 'https://t.example/app', title: 'stub' }),
+      plan,
+      scopeRecheck: async () => ({ ok: true }),
+      dispatch: async (ctx) => { dispatched.push(ctx); return { ok: true } },
+      verify: async () => ({ ok: true, evidence: 'E-000009', capture: 'shot.png' }),
+      log: () => {},
+    })
+    check('BUA M3: the entry token is consumed for the entry navigation exactly once',
+      calls.consume === 2 && calls.prepare === 1)
+    check('BUA M3: a second NAVIGATE to the entry URL carries a fresh token (no reuse)',
+      dispatched.length === 2 && dispatched[0].token.action_id === 'A-000001'
+      && dispatched[1].token.action_id === 'A-000002'
+      && dispatched[0].token.nonce !== dispatched[1].token.nonce)
+    check('BUA M3: the run completes with both navigations recorded', summary.status === 'confirmed')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+{
   const root = tempWorkspace()
   try {
     const refused = runCli(root)
