@@ -19,7 +19,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   DEFAULT_MAX_STEPS, GUARD_RETRY_CAP, REPLAN_CAP, TYPE_TEXT_MAX, buildBoundary,
-  classifyAction, guardDispatch, parseOperation, planContext, resolveLoginTargets,
+  classifyAction, guardDispatch, isSubmitControl, parseOperation, planContext, resolveLoginTargets,
   resolveOperation, resolveUploadPath,
   runInteractive, runLoop,
 } from './interactive.mjs'
@@ -429,6 +429,28 @@ function runCli(root, extraArgs = []) {
     classifyAction({ op: 'CLICK' }, entry('e1', { text: 'Next page' })) === 'state-changing')
   check('B2 classify: UPLOAD is state-changing',
     classifyAction({ op: 'UPLOAD' }, entry('e1')) === 'state-changing')
+  // Sprint BUA M5/MF-6: the spec's own classes the first pattern missed.
+  check('BUA M5 classify: <button>Send message</button> is consequential (external contact)',
+    classifyAction({ op: 'CLICK' }, entry('e1', { tag: 'button', type: '', text: 'Send message' })) === 'consequential')
+  check('BUA M5 classify: <button>OK</button> is consequential (HTML-default submit)',
+    classifyAction({ op: 'CLICK' }, entry('e1', { tag: 'button', type: '', text: 'OK' })) === 'consequential')
+  check('BUA M5 classify: <input type=image> is consequential (form submit)',
+    classifyAction({ op: 'CLICK' }, entry('e1', { tag: 'input', type: 'image', ops: ['CLICK'] })) === 'consequential')
+  check('BUA M5 classify: the purchase/external-contact verbs are consequential',
+    ['Order now', 'Book a demo', 'Publish', 'Post', 'Share', 'Invite a teammate', 'Donate']
+      .every((text) => classifyAction({ op: 'CLICK' }, entry('e1', { text })) === 'consequential'))
+  check('BUA M5 classify: the effective-submit rule is the HTML default, not the raw type',
+    isSubmitControl('button', '') === true && isSubmitControl('button', 'submit') === true
+    && isSubmitControl('button', 'button') === false && isSubmitControl('button', 'reset') === false
+    && isSubmitControl('input', 'submit') === true && isSubmitControl('input', 'image') === true
+    && isSubmitControl('input', 'text') === false && isSubmitControl('a', '') === false)
+  check('BUA M5 classify: a TYPE into an otp field is consequential (human-owned)',
+    classifyAction({ op: 'TYPE' }, entry('e2', { tag: 'input', type: 'text', name: 'otp' })) === 'consequential')
+  check('BUA M5 classify: a TYPE into an mfa/captcha field is consequential',
+    classifyAction({ op: 'TYPE' }, entry('e2', { tag: 'input', type: 'text', name: 'mfa_code' })) === 'consequential'
+    && classifyAction({ op: 'TYPE' }, entry('e3', { tag: 'input', type: 'text', label: 'CAPTCHA answer' })) === 'consequential')
+  check('BUA M5 classify: a plain search TYPE stays state-changing',
+    classifyAction({ op: 'TYPE' }, entry('e2', { tag: 'input', type: 'search', name: 'q' })) === 'state-changing')
 }
 
 // ---- node-identity guards, re-checked at dispatch ---------------------------------
@@ -678,6 +700,23 @@ function runCli(root, extraArgs = []) {
   check('B3 loop: a consequential action consults the human gate',
     calls.gate.length === GUARD_RETRY_CAP && calls.gate[0].actionId === 'A-000001')
   check('B3 loop: a consequential action without a resolved gate never dispatches',
+    calls.dispatch.length === 0 && summary.status === 'blocked'
+    && summary.events.some((e) => e.guard === 'human_gate'))
+}
+
+{
+  // Sprint BUA M5/MF-6: a TYPE into an OTP-named field is consequential (human-owned),
+  // so it consults the gate and never dispatches without a resolved one.
+  const { deps, calls } = loopHarness({
+    entries: [entry('e2', { tag: 'input', type: 'text', name: 'otp', ops: ['CLICK', 'TYPE'] })],
+    plan: async () => ({ ok: true, source: 'typesafe',
+                         operation: { op: 'TYPE', handle: 'e2', text: '123456' } }),
+    gate: async (ctx) => { calls.gate.push(ctx); return { ok: false, reason: 'human-owned: no gate' } },
+  })
+  const summary = await runLoop(deps)
+  check('BUA M5 loop: an OTP-field TYPE consults the human gate',
+    calls.gate.length === GUARD_RETRY_CAP)
+  check('BUA M5 loop: an OTP-field TYPE without a resolved gate never dispatches',
     calls.dispatch.length === 0 && summary.status === 'blocked'
     && summary.events.some((e) => e.guard === 'human_gate'))
 }

@@ -95,7 +95,24 @@ export const GATE_AUTHORIZING_DECISIONS = new Set(['RESUME', 'PROVIDED', 'APPROV
 // consequential: the model never gets to argue about the classification, and the class
 // list is the spec's (submit, purchase, delete, credential use, external contact).
 const CONSEQUENTIAL_PATTERN =
-  /\b(submit|delete|remove|destroy|purchase|buy|pay|payment|checkout|transfer|confirm|authorize|approve|unsubscribe|deactivate|revoke|sign[-_ ]?out|log[-_ ]?out|contact)\b/i
+  /\b(submit|delete|remove|destroy|purchase|buy|pay|payment|checkout|transfer|confirm|authorize|approve|unsubscribe|deactivate|revoke|sign[-_ ]?out|log[-_ ]?out|contact|send|publish|order|book|post|share|invite|donate)\b/i
+
+// OTP/MFA/CAPTCHA/PII fields are human-owned per AGENTS.md §5: the arm may drive TO the
+// wall but a model-chosen TYPE into one is a credential-adjacent write, so it is
+// consequential and needs a resolved human gate before it dispatches.
+const CREDENTIAL_FIELD_PATTERN =
+  /\b(otp|totp|mfa|2fa|one[-_ ]?time|verification[-_ ]?code|auth[-_ ]?code|security[-_ ]?code|captcha|password|passwd|passcode|pin|ssn|social[-_ ]?security|cvv|cvc|credit[-_ ]?card)\b/i
+
+/** True when a control submits its form by the HTML default or an explicit submit
+ *  type: `<button>` with no type (or `submit`), `<input type=submit|image>`. The raw
+ *  `type` attribute hides this — the effective-submit flag is what the snapshot carries
+ *  so a form-submitting control can never classify as a harmless state change. */
+export function isSubmitControl(tag, type) {
+  const t = String(type == null ? '' : type).toLowerCase()
+  if (tag === 'button') return t === '' || t === 'submit'
+  if (tag === 'input') return t === 'submit' || t === 'image'
+  return false
+}
 
 /** Refusals carry their exit code; `main()` is the only place that exits. */
 export class Refusal extends Error {
@@ -290,8 +307,17 @@ export function classifyAction(op, entry) {
   if (op.op === 'UPLOAD') return 'state-changing'
   const hay = [entry && entry.type, entry && entry.name, entry && entry.role,
                entry && entry.text, entry && entry.label]
-    .filter((v) => typeof v === 'string').join(' ')
-  if ((op.op === 'CLICK' || op.op === 'SELECT') && CONSEQUENTIAL_PATTERN.test(hay)) return 'consequential'
+    .filter((v) => typeof v === 'string').join(' ').replace(/[_-]+/g, ' ')
+  if (op.op === 'TYPE' && CREDENTIAL_FIELD_PATTERN.test(hay)) return 'consequential'
+  if (op.op === 'CLICK' || op.op === 'SELECT') {
+    // The effective-submit flag is what the snapshot read; a caller that did not compute
+    // it (a fixture) still gets the HTML-default rule from the raw tag/type.
+    const submits = entry && entry.submit !== undefined
+      ? entry.submit === true
+      : isSubmitControl(entry && entry.tag, entry && entry.type)
+    if (submits) return 'consequential'
+    if (CONSEQUENTIAL_PATTERN.test(hay)) return 'consequential'
+  }
   return 'state-changing'
 }
 
@@ -747,6 +773,7 @@ export async function snapshotPage(page, generation) {
     entries.push({
       handle, tag, type, name, role, text, ops, options,
       href: href ? maskUrlSecrets(href) : null, box, form_index: formIndex,
+      submit: isSubmitControl(tag, type),
     })
     locators.set(handle, loc)
   }
