@@ -46,6 +46,21 @@ result rows record under `jev_error` (`refused_calls` in the payload). Question 
 was iterated on the set: the boundary clauses ("what the content itself does, not what
 it quotes") moved the three benign false positives to clear.
 
+### 4. Grounded judgments — `grounding_eval_set.json` + `grounding_eval.py` + `grounding_results.json` (v8.3)
+
+Six labeled freshness questions whose answers live in the 2026 research corpus
+(GPT-6 release, Laya's license, the Cloudflare skill's no-live-probing stance, the
+TypeSafe API's missing websearch knob, jev-ultrafast's browser-harness dependency,
+Laya's near-chance base checkpoint). Before-web: one verdict question over an empty
+state; after-web: the shipped `ts_ground.ground_state` with the item's committed,
+dated snippets inserted verbatim (a `FakeProvider`, so the after-web arm is
+reproducible). Measured: confidently-wrong verdicts 6/6 → 0/6 and correct verdicts
+0/6 → 6/6 (the ungrounded model answers `unclear` at ~1.0 confidence on every
+question; grounded, all six are correct and clear the code thresholds). The committed
+payload records the eval-integrity posture (scored OS runs keep grounding off unless
+the engagement explicitly allows it; this eval's after-web arm runs under the explicit
+`grounding: "ALLOWED"` opt-in).
+
 ## How to rerun
 
 Both scripts are stdlib-only Python 3 and read `TYPESAFE_API_KEY` from the environment.

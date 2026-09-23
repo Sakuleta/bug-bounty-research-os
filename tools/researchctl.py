@@ -217,6 +217,13 @@ def main() -> int:
     frs = fr.add_subparsers(dest="op", required=True)
     x = frs.add_parser("record"); x.add_argument("json"); x.set_defaults(fn="freshness-record")
     x = frs.add_parser("status"); x.set_defaults(fn="freshness-status")
+    gr = sub.add_parser("ground", help="retrieval-backed Jev judgment: provider snippets "
+                                       "go verbatim into state.search_results; code "
+                                       "thresholds decide; default off (needs "
+                                       "external_judgment ALLOWED + grounding: ALLOWED)")
+    gr.add_argument("question")
+    gr.add_argument("--cycle", default=None)
+    gr.set_defaults(fn="ground")
     scr = sub.add_parser("screen", help="run the fixed injection battery over a registered "
                                         "evidence artifact's store copy; a flagged verdict "
                                         "quarantines a review copy and withholds the text "
@@ -339,6 +346,9 @@ def main() -> int:
         elif ns.fn == "screen":
             from ts_screen import screen_evidence
             out = screen_evidence(Path(ns.root), ns.evidence_ref)
+        elif ns.fn == "ground":
+            from ts_ground import ground_state
+            out = ground_state(Path(ns.root), ns.question, cycle_id=ns.cycle)
         elif ns.fn == "budget-status":
             out = cp.budget_status()
         elif ns.fn == "budget-set":
@@ -406,6 +416,11 @@ def main() -> int:
             print(f"screen {ns.evidence_ref}: {verdict} "
                   f"(flagged_questions={out.get('flagged_questions') or []}, "
                   f"quarantine={out.get('quarantine_path')})", file=sys.stderr)
+        if ns.fn == "ground":
+            print(f"ground: posture={out.get('posture')} verdict={out.get('verdict')} "
+                  f"auto={out.get('auto')} relevant={len(out.get('relevant') or [])} "
+                  f"excluded={len(out.get('excluded') or [])} (aid, not a decision)",
+                  file=sys.stderr)
         if (ns.fn == "budget-set" and isinstance(out, dict)
                 and out.get("payload", {}).get("below_current_count")):
             print("warning: the new caps are below the current recorded action counts — "
