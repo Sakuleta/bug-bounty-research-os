@@ -13,13 +13,14 @@
  * Run: `node tools/bua/interactive.test.mjs` (exits non-zero on failure).
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   DEFAULT_MAX_STEPS, GUARD_RETRY_CAP, REPLAN_CAP, TYPE_TEXT_MAX, buildBoundary,
-  classifyAction, guardDispatch, parseOperation, planContext, resolveOperation,
+  classifyAction, guardDispatch, parseOperation, planContext, resolveLoginTargets,
+  resolveOperation, resolveUploadPath,
   runInteractive, runLoop,
 } from './interactive.mjs'
 
@@ -197,7 +198,8 @@ function loopHarness(overrides = {}) {
 // ===================================================================================
 // 2. CLI preconditions (fail closed before any browser is needed)
 // ===================================================================================
-function tempWorkspace({ assets = ['t.example'], binding = null, preflight = true } = {}) {
+function tempWorkspace({ assets = ['t.example'], binding = null, preflight = true,
+                        preflightExtra = null } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'bua-interactive-'))
   mkdirSync(join(root, '11_runtime'), { recursive: true })
   mkdirSync(join(root, '00_control'), { recursive: true })
@@ -211,6 +213,7 @@ function tempWorkspace({ assets = ['t.example'], binding = null, preflight = tru
       object_owner: 'researcher-A', purpose: 'probe the interactive arm',
       hypothesis: 'H-0001', expected_secure: 'denied', expected_vulnerable: 'allowed',
       side_effect: 'none', stop_condition: 'stop on unsafe behavior',
+      ...(preflightExtra || {}),
     }))
   }
   symlinkSync(join(REPO_ROOT, 'tools'), join(root, 'tools'), 'dir')
@@ -947,6 +950,299 @@ print(json.dumps(tok))
       && artifact.blocked_requests.length === 0)
   } finally {
     rmSync(root, { recursive: true, force: true })
+  }
+}
+
+// ===================================================================================
+// 9. Uploads, login flows and JS-driven observation (B6)
+// ===================================================================================
+{
+  const root = mkdtempSync(join(tmpdir(), 'bua-upload-'))
+  const outside = mkdtempSync(join(tmpdir(), 'bua-outside-'))
+  try {
+    mkdirSync(join(root, 'lab', 'credentials'), { recursive: true })
+    writeFileSync(join(root, 'lab', 'payload.txt'), 'probe\n')
+    writeFileSync(join(root, 'lab', 'credentials', 'secret.txt'), 'never\n')
+    writeFileSync(join(outside, 'outside.txt'), 'outside\n')
+    mkdirSync(join(root, 'lab', 'dir'), { recursive: true })
+    symlinkSync(join(outside, 'outside.txt'), join(root, 'lab', 'escape.txt'))
+    check('B6 upload: a workspace-contained file resolves to its real path',
+      resolveUploadPath(root, 'lab/payload.txt').ok === true)
+    const traversal = resolveUploadPath(root, join('..', basename(outside), 'outside.txt'))
+    check('B6 upload: a traversal path is refused (fail closed)',
+      traversal.ok === false && traversal.reason.includes('inside the workspace'))
+    const absolute = resolveUploadPath(root, '/etc/passwd')
+    check('B6 upload: an absolute path outside the workspace is refused',
+      absolute.ok === false && absolute.reason.includes('inside the workspace'))
+    const symlink = resolveUploadPath(root, 'lab/escape.txt')
+    check('B6 upload: a symlink that escapes the workspace is refused (not followed)',
+      symlink.ok === false && symlink.reason.includes('inside the workspace'))
+    const creds = resolveUploadPath(root, 'lab/credentials/secret.txt')
+    check('B6 upload: lab/credentials is never an upload source',
+      creds.ok === false && creds.reason.includes('lab/credentials'))
+    const dir = resolveUploadPath(root, 'lab/dir')
+    check('B6 upload: a directory is not an upload source',
+      dir.ok === false && dir.reason.includes('not a regular file'))
+    const missing = resolveUploadPath(root, 'lab/nope.txt')
+    check('B6 upload: a missing file is refused', missing.ok === false)
+    check('B6 upload: a NUL in the path is refused',
+      resolveUploadPath(root, 'lab/payload.txt\u0000.png').ok === false)
+    let threw = false
+    try {
+      buildBoundary({ root, entries: [], uploadFiles: [join('..', basename(outside), 'outside.txt')] })
+    } catch (e) { threw = String(e.message).includes('inside the workspace') }
+    check('B6 upload: a boundary built over a traversal file refuses to exist', threw)
+    threw = false
+    try {
+      buildBoundary({ root, entries: [], textValues: ['x'.repeat(TYPE_TEXT_MAX + 1)] })
+    } catch (e) { threw = String(e.message).includes('plain string') }
+    check('B6 upload: a boundary built over an over-long text value refuses to exist', threw)
+
+    const boundary = buildBoundary({ root, entries: [entry('e9', { tag: 'input', type: 'file', ops: ['UPLOAD'] })],
+                                     uploadFiles: ['lab/payload.txt'] })
+    const payload = realpathSync(join(root, 'lab', 'payload.txt'))
+    const uploadOp = parseOperation({ op: 'UPLOAD', file: payload }, boundary)
+    check('B6 upload: the resolved workspace file parses as a typed UPLOAD',
+      uploadOp.ok === true && uploadOp.op.file === payload)
+    check('B6 upload: a file outside the offered set is refused at the boundary',
+      parseOperation({ op: 'UPLOAD', file: '/etc/passwd' }, boundary).ok === false)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+    rmSync(outside, { recursive: true, force: true })
+  }
+}
+
+// ---- login target resolution + env-only secrets, masked captures -------------------
+{
+  const loginEntries = [
+    entry('e1', { tag: 'input', type: 'text', ops: ['CLICK', 'TYPE'], form_index: 0 }),
+    entry('e2', { tag: 'input', type: 'password', ops: ['LOGIN'], form_index: 0 }),
+    entry('e3', { tag: 'button', type: 'submit', ops: ['CLICK'], form_index: 0, text: 'Sign in' }),
+    entry('e4', { tag: 'input', type: 'text', ops: ['CLICK', 'TYPE'], form_index: 1 }),
+  ]
+  const targets = resolveLoginTargets(loginEntries)
+  check('B6 login: the password field, its form\'s username field and submit control resolve',
+    targets.ok === true && targets.user === 'e1' && targets.password === 'e2' && targets.submit === 'e3')
+  check('B6 login: a snapshot without a password field refuses the flow',
+    resolveLoginTargets([loginEntries[0]]).ok === false)
+  check('B6 login: a password field without a username field refuses the flow',
+    resolveLoginTargets([loginEntries[1]]).ok === false)
+  check('B6 login: a password field without a submit control refuses the flow',
+    resolveLoginTargets([loginEntries[0], loginEntries[1]]).ok === false)
+
+  const boundary = buildBoundary({ root: '/tmp/bua-boundary', entries: loginEntries, loginFlows: ['primary'] })
+  const loginOp = parseOperation({ op: 'LOGIN', flow: 'primary' }, boundary)
+  check('B6 login: the resolved flow parses as a typed LOGIN (consequential)',
+    loginOp.ok === true && classifyAction(loginOp.op, null) === 'consequential')
+
+  const fills = []
+  const clicks = []
+  const locator = (handle) => ({
+    boundingBox: async () => ({ x: 10, y: 10, width: 100, height: 30 }),
+    hitTargetCheck: async () => {},
+    fill: async (value) => { fills.push([handle, value]) },
+    click: async () => { clicks.push(handle) },
+  })
+  const page = {
+    on() {}, mainFrame: () => ({}), url: () => 'https://t.example/login',
+    title: async () => 'Login', screenshot: async () => {},
+    viewportSize: () => viewport, locator: () => ({ all: async () => [] }),
+    goto: async () => ({ status: () => 200 }),
+  }
+  const context = {
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    async route() {}, async routeWebSocket() {}, async addInitScript() {},
+    async newCDPSession() { return { send: async () => ({}), on() {} } },
+  }
+  const root = tempWorkspace({ preflightExtra: { login_flows: ['primary'] } })
+  let evidence = 0
+  const previous = { user: process.env.RESEARCH_OS_BUA_LOGIN_USER,
+                     password: process.env.RESEARCH_OS_BUA_LOGIN_PASSWORD }
+  try {
+    process.env.RESEARCH_OS_BUA_LOGIN_USER = 'researcher-A'
+    process.env.RESEARCH_OS_BUA_LOGIN_PASSWORD = 'S3cret-Password-Value'
+    const snapshot = async () => ({
+      generation: 1, entries: loginEntries,
+      locators: new Map([['e1', locator('e1')], ['e2', locator('e2')], ['e3', locator('e3')]]),
+      url: 'https://t.example/login', title: 'Login',
+    })
+    const plan = (() => {
+      const plans = [
+        { ok: true, source: 'typesafe', operation: { op: 'LOGIN', flow: 'primary' } },
+        { ok: true, source: 'typesafe', operation: { op: 'DONE' } },
+      ]
+      let i = 0
+      return async () => plans[Math.min(i++, plans.length - 1)]
+    })()
+    const summary = await runInteractive({
+      root,
+      args: {
+        url: 'https://t.example/login', principal: 'researcher-A', action: 'A-000001',
+        profile: 'lab/bua-profile', preflight: 'preflight.json', 'out-dir': 'artifacts', steps: '3',
+      },
+      chromium: { launchPersistentContext: async () => context },
+      ctl: (args) => {
+        if (args[0] === 'prepare') return { action_id: 'A-000002' }
+        if (args[0] === 'token-consume') return { action_id: 'A-000002', nonce: 'n2' }
+        if (args[0] === 'gate-check') return { resolved: true, gate: 'G-0009' }
+        if (args[0] === 'evidence') { evidence += 1; return { entity_id: `E-00000${evidence}` } }
+        if (args[0] === 'action') return { entity_id: 'A-000002' }
+        return { binding_present: false }
+      },
+      scopeVerdict: () => ({ in_scope: true, gate: 'assets', host: 't.example' }),
+      token: { action_id: 'A-000001', nonce: 'n1', tool_family: 'browser',
+               preflight: { account: 'researcher-A' } },
+      snapshot, plan,
+      scopeRecheck: async () => ({ ok: true }),
+      verify: async () => ({ ok: true, evidence: 'E-000009', capture: 'shot.png' }),
+      log: () => {},
+    })
+    check('B6 login: the flow fills the form from env secrets and submits',
+      fills.length === 2 && fills[0][0] === 'e1' && fills[1][0] === 'e2'
+      && clicks.length === 1 && clicks[0] === 'e3')
+    check('B6 login: the password never appears in the run summary or its events',
+      !JSON.stringify(summary).includes('S3cret-Password-Value'))
+    const files = readdirSync(join(root, 'artifacts'))
+    const receipt = files.filter((f) => f.endsWith('.action.json'))
+      .map((f) => readFileSync(join(root, 'artifacts', f), 'utf8')).join('\n')
+    check('B6 login: the action receipt masks the password and names the env source',
+      receipt.includes('"login_flow": "primary"') && receipt.includes('"secrets_source": "env"')
+      && !receipt.includes('S3cret-Password-Value'))
+    check('B6 login: a consequential action writes no screenshot (credential surface)',
+      !files.some((f) => f.endsWith('.png')))
+    check('B6 login: the run completes without a scope violation',
+      summary.status === 'confirmed' && summary.scope_violation === false)
+  } finally {
+    if (previous.user === undefined) delete process.env.RESEARCH_OS_BUA_LOGIN_USER
+    else process.env.RESEARCH_OS_BUA_LOGIN_USER = previous.user
+    if (previous.password === undefined) delete process.env.RESEARCH_OS_BUA_LOGIN_PASSWORD
+    else process.env.RESEARCH_OS_BUA_LOGIN_PASSWORD = previous.password
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+{
+  // No env secrets: the login refuses rather than inventing a credential.
+  const root = tempWorkspace({ preflightExtra: { login_flows: ['primary'] } })
+  const page = {
+    on() {}, mainFrame: () => ({}), url: () => 'https://t.example/login',
+    title: async () => 'Login', screenshot: async () => {},
+    viewportSize: () => viewport, locator: () => ({ all: async () => [] }),
+    goto: async () => ({ status: () => 200 }),
+  }
+  const context = {
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    async route() {}, async routeWebSocket() {}, async addInitScript() {},
+    async newCDPSession() { return { send: async () => ({}), on() {} } },
+  }
+  try {
+    delete process.env.RESEARCH_OS_BUA_LOGIN_USER
+    delete process.env.RESEARCH_OS_BUA_LOGIN_PASSWORD
+    const entries = [
+      entry('e1', { tag: 'input', type: 'text', ops: ['CLICK', 'TYPE'], form_index: 0 }),
+      entry('e2', { tag: 'input', type: 'password', ops: ['LOGIN'], form_index: 0 }),
+      entry('e3', { tag: 'button', type: 'submit', ops: ['CLICK'], form_index: 0 }),
+    ]
+    const summary = await runInteractive({
+      root,
+      args: {
+        url: 'https://t.example/login', principal: 'researcher-A', action: 'A-000001',
+        profile: 'lab/bua-profile', preflight: 'preflight.json', 'out-dir': 'artifacts', steps: '2',
+      },
+      chromium: { launchPersistentContext: async () => context },
+      ctl: (args) => (args[0] === 'gate-check' ? { resolved: true, gate: 'G-0009' } : { binding_present: false }),
+      scopeVerdict: () => ({ in_scope: true, gate: 'assets', host: 't.example' }),
+      token: { action_id: 'A-000001', nonce: 'n1', tool_family: 'browser',
+               preflight: { account: 'researcher-A' } },
+      snapshot: async () => ({ generation: 1, entries,
+                               locators: new Map([['e1', fakeLocator()], ['e2', fakeLocator()], ['e3', fakeLocator()]]),
+                               url: 'https://t.example/login', title: 'Login' }),
+      plan: async () => ({ ok: true, source: 'typesafe', operation: { op: 'LOGIN', flow: 'primary' } }),
+      authorize: async () => ({ ok: true, token: { action_id: 'A-000002', nonce: 'n2' } }),
+      scopeRecheck: async () => ({ ok: true }),
+      log: () => {},
+    })
+    check('B6 login: without env secrets the login refuses and the run blocks',
+      summary.status === 'blocked' && summary.events.some((e) => e.guard === 'dispatch'
+        && e.reason.includes('env-only')))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+{
+  // A service worker that appears anyway is a scope violation and the capture is skipped
+  // — never silent (the same rule the read-only arm pins).
+  const page = {
+    on() {}, mainFrame: () => ({}), url: () => 'https://t.example/app',
+    title: async () => 'stub', screenshot: async () => {},
+    viewportSize: () => viewport, locator: () => ({ all: async () => [] }),
+    goto: async () => ({ status: () => 200 }),
+  }
+  let swHandler = null
+  const context = {
+    on(event, handler) { if (event === 'serviceworker') swHandler = handler },
+    pages: () => [page], newPage: async () => page, close: async () => {},
+    async route() {}, async routeWebSocket() {}, async addInitScript() {},
+    async newCDPSession() { return { send: async () => ({}), on() {} } },
+  }
+  const root = tempWorkspace()
+  try {
+    const summary = await runInteractive({
+      root,
+      args: {
+        url: 'https://t.example/app', principal: 'researcher-A', action: 'A-000001',
+        profile: 'lab/bua-profile', preflight: 'preflight.json', 'out-dir': 'artifacts', steps: '1',
+      },
+      chromium: { launchPersistentContext: async () => context },
+      ctl: () => ({ binding_present: false }),
+      scopeVerdict: () => ({ in_scope: true, gate: 'assets', host: 't.example' }),
+      token: { action_id: 'A-000001', nonce: 'n1', tool_family: 'browser',
+               preflight: { account: 'researcher-A' } },
+      snapshot: async () => ({ generation: 1, entries: [], locators: new Map(),
+                               url: 'https://t.example/app', title: 'stub' }),
+      plan: async () => ({ ok: false, source: 'denied', reason: 'external judgment denied by engagement policy' }),
+      log: () => {},
+    })
+    check('B6 workers: the service-worker backstop is wired on the interactive arm',
+      typeof swHandler === 'function')
+    if (swHandler) await swHandler({})
+    check('B6 workers: a worker that appears anyway flags a scope violation, capture skipped, never silent',
+      summary.service_worker_violations === 1 && summary.scope_violation === true
+      && summary.screenshot === null)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+{
+  // JS-driven flows are observed through route verdicts + DOM snapshots only.
+  const source = readFileSync(join(REPO_ROOT, 'tools', 'bua', 'interactive.mjs'), 'utf8')
+  for (const banned of ['page.evaluate(', 'page.$eval(', 'page.$$eval(', 'evaluateHandle(',
+                        'addScriptTag(', 'addInitScript(']) {
+    const ok = banned === 'addInitScript('
+      ? source.includes(banned) // the service-worker block legitimately installs an init script
+      : !source.includes(banned)
+    check('B6 JS-driven: interactive.mjs never evaluates page script (' + banned + ')', ok)
+  }
+  check('B6 JS-driven: the DOM snapshot is built from Playwright locators only',
+    source.includes('locator(') && source.includes('boundingBox()') && source.includes('getAttribute('))
+  check('B6 JS-driven: the route verdict is what records page-initiated traffic',
+    source.includes('decideRequest(url, scopeCache)') && source.includes("route.abort('blockedbyclient')"))
+}
+
+{
+  // A refused upload list fails the run closed BEFORE the browser starts.
+  const outside = mkdtempSync(join(tmpdir(), 'bua-cli-outside-'))
+  writeFileSync(join(outside, 'outside.txt'), 'outside\n')
+  const root = tempWorkspace({
+    preflightExtra: { upload_files: [join('..', basename(outside), 'outside.txt')] },
+  })
+  try {
+    const refused = runCli(root)
+    check('B6 CLI: a traversal upload file in the preflight refuses the run before launch (exit 2)',
+      refused.status === 2 && refused.out.includes('inside the workspace')
+      && !refused.out.includes('playwright-core'))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+    rmSync(outside, { recursive: true, force: true })
   }
 }
 

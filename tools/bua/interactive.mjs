@@ -257,19 +257,20 @@ export function parseOperation(raw, boundary) {
       if (typeof file !== 'string' || !file) {
         return { ok: false, kind: 'boundary', reason: 'UPLOAD requires a workspace file path' }
       }
-      const allowed = boundary && boundary.uploads ? boundary.uploads.get(file) : null
-      if (!allowed) {
+      const offered = boundary && boundary.uploads ? [...boundary.uploads.values()] : []
+      if (!offered.includes(file)) {
         return { ok: false, kind: 'boundary',
                  reason: `upload file ${JSON.stringify(file)} is not one of the executor-offered workspace files` }
       }
-      return { ok: true, op: { op: 'UPLOAD', file: allowed } }
+      return { ok: true, op: { op: 'UPLOAD', file } }
     }
     case 'LOGIN': {
       const flow = raw.flow
-      if (typeof flow !== 'string' || !boundary || !boundary.flows.has(flow)) {
+      const offered = boundary && boundary.flows ? [...boundary.flows.values()] : []
+      if (typeof flow !== 'string' || !offered.includes(flow)) {
         return { ok: false, kind: 'boundary', reason: `login flow ${JSON.stringify(flow)} is not configured for this run` }
       }
-      return { ok: true, op: { op: 'LOGIN', flow: boundary.flows.get(flow) } }
+      return { ok: true, op: { op: 'LOGIN', flow } }
     }
     default:
       return { ok: false, kind: 'boundary', reason: `unhandled operation ${op}` }
@@ -816,7 +817,7 @@ export async function verifyDone({ freshSnapshot, capture }) {
 /** One typed dispatch. Playwright performs its own actionability checks (including the
  *  hit-target check) and this file never passes `force`, so an occluded node fails here
  *  too; the guard's trial check is the explicit pre-dispatch half. */
-async function dispatchOp({ page, op, locator, entry, summary, collectHops, login, fresh }) {
+async function dispatchOp({ page, op, locator, entry, summary, collectHops, login, snapshot }) {
   try {
     switch (op.op) {
       case 'CLICK':
@@ -849,7 +850,7 @@ async function dispatchOp({ page, op, locator, entry, summary, collectHops, logi
         return { ok: true, status: resp ? resp.status() : null, url: maskUrlSecrets(page.url()) }
       }
       case 'LOGIN':
-        return await login()
+        return await login({ snapshot })
       default:
         return { ok: false, reason: `unhandled operation ${op.op}` }
     }
@@ -939,6 +940,13 @@ export async function runInteractive({ root, args, chromium, ctl = makeCtl(root)
   const outDir = join(root, outDirRel)
   mkdirSync(outDir, { recursive: true })
   const preflight = loadPreflight(root, args.preflight)
+  // The executor-owned label spaces are validated BEFORE the browser starts: a refused
+  // upload file (traversal, symlink escape, lab/credentials), a malformed text value or a
+  // bad flow name fails the run closed instead of surfacing mid-loop.
+  buildBoundary({
+    root, entries: [], textValues: preflight.text_values,
+    uploadFiles: preflight.upload_files, loginFlows: preflight.login_flows,
+  })
   const cycleId = String(preflight.cycle_id)
   const label = String(args.action || 'bua')
   const ts = new Date().toISOString().replace(/[:.]/g, '-')

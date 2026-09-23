@@ -209,8 +209,14 @@ in code (allowlist + hard exclusions; anything else is logged NOT-TESTED), trunc
 network capture with cookie presence-only, fresh login per run with env-only secrets.
 Browser traffic runs through the executor's browser arm: prepare (`tool_family`
 "browser") → `research_os_browser` → `tools/bua/run.mjs` (read-only navigate + capture);
-raw browser launches are denied, and interactive flows extend the runner with a task
-script carrying its documented precondition.
+raw browser launches are denied. Interactive/state-changing flows use the task script
+beside it — `tools/bua/interactive.mjs` — which is controller-driven (the executor does
+not spawn it), carries its documented precondition (scope verdict, explicit workspace
+profile, consumed single-use entry token, per-action preflight template) and ships with
+its guard suite (`tools/bua/interactive.test.mjs`): typed operations over executor-issued
+handles only, node-identity guards at dispatch, one preflight token per dispatch, a
+resolved human gate before any consequential action, and `DONE` only after a fresh
+observation registers its capture.
 
 Before the first navigation the runner installs a context-wide
 `context.route('**/*')` handler and a `context.routeWebSocket('**/*')` handler:

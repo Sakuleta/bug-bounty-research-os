@@ -41,12 +41,23 @@ handle against the live DOM and verify the node is the same node it showed the m
 ## 3. Every write passes the existing gates, exactly once
 
 - A single-use **preflight** token (`researchctl prepare`, `tool_family` "browser")
-  bound to the exact `request_shape`; no token, no dispatch.
+  bound to the exact `request_shape`; no token, no dispatch. On the interactive arm the
+  token is consumed through `researchctl token-consume` (single-use, digest-bound,
+  broker-first while the broker socket is present) immediately before the dispatch.
 - The per-request **scope** route handler stays installed for the whole run; a write to
-  an out-of-scope host is aborted and recorded, never followed.
+  an out-of-scope host is aborted and recorded, never followed. A runner-initiated
+  dispatch re-checks the current page host before it is sent (`blocked_actions`), and a
+  **redirect hop** that leaves scope taints the session (`scope_violation`): the hop is
+  recorded and every further write is refused — the redirect target must be preflighted
+  as its own action.
 - Page-initiated writes (a form the page submits, an XHR the page fires) are inside the
   same scope guard; runner-initiated writes need their own authorization model and
-  their own capture + evidence registration, per action.
+  their own capture + evidence registration, per action. Action class is decided in code
+  (`read` / `state-changing` / `consequential` — submit, purchase, delete, credential use,
+  external contact) from the executor's own snapshot metadata; a consequential action
+  additionally needs a RESOLVED human gate naming the action id
+  (`researchctl gate-check`), and the OTP/MFA/CAPTCHA/PII/verification-link wall stays
+  human-owned: drive to it, ask narrowly, resume.
 
 ## 4. The read-only default stays the default
 
