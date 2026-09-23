@@ -81,11 +81,11 @@ def main(*, root: Path | None = None, force: bool = False) -> None:
     guard_live(force, root)
     items = json.loads((SCRATCH / "grounding_eval_set.json").read_text())
     rows: list[dict] = []
-    for item in items:
+    for index, item in enumerate(items, 1):
         before = judge_question(root, item["question"])
         after = ground_state(root, item["question"],
                              provider=FakeProvider(item["snippets"]),
-                             cycle_id=f"eval-{item['id']}")
+                             cycle_id=f"C-9{index:03d}")  # cache ids are cycle-shaped
         rows.append({
             "id": item["id"], "question": item["question"], "truth": item["truth"],
             "before_verdict": before["verdict"], "before_confidence": before["confidence"],

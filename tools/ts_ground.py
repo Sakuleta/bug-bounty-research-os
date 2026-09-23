@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from control_plane import external_judgment_allowed  # noqa: E402
+from control_plane import cycle_id_ok, external_judgment_allowed  # noqa: E402
 from ts_cost import record_seam_cost  # noqa: E402
 from ts_http import API, model_name, post_json, validate_choice  # noqa: E402
 from ts_screen import screen_text  # noqa: E402
@@ -198,8 +198,24 @@ def retrieve(root: Path, question: str, *, provider: Provider | None = None,
 
 
 def _cache_path(root: Path, cycle_id: str | None) -> Path:
+    """Cache file for one cycle. The cycle id is an allowlist value, never a path.
+
+    Only `C-<4+ digits>` or None (the shared `adhoc` entry) are accepted: an absolute or
+    traversing id fails closed before any read or write, so the grounding cache can never
+    escape the workspace (Security M1). The resolved path is additionally checked against
+    the cache directory as defense in depth.
+    """
     key = cycle_id or "adhoc"
-    return Path(root) / CACHE_REL / f"{key}.json"
+    if key != "adhoc" and not cycle_id_ok(str(key)):
+        raise ValueError(
+            f"invalid grounding cache key {key!r}: a cycle id must match C-<digits> "
+            "(or be omitted) — arbitrary paths are refused, the cache stays in the "
+            "workspace")
+    base = (Path(root) / CACHE_REL).resolve()
+    path = (base / f"{key}.json").resolve()
+    if base != path.parent:
+        raise ValueError(f"grounding cache path escapes the cache directory: {path}")
+    return path
 
 
 def _load_cache(root: Path, cycle_id: str | None) -> dict[str, Any]:

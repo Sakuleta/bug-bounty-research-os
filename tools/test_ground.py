@@ -278,6 +278,40 @@ with mock.patch.dict(os.environ, {"BRAVE_API_KEY": "", "TAVILY_API_KEY": ""}):
     check("retrieve() refuses without a provider (env adapters default off)",
           retrieve(ALLOWED, "q", provider=None)["source"] == "unavailable")
 
+# 11. Fix (Security M1): the cycle id is an allowlist value, never a path — an absolute
+#     or traversing --cycle cannot write or read outside the workspace cache dir.
+evil_root = workspace('external_judgment: "ALLOWED"\ngrounding: "ALLOWED"\n')
+outside = Path(tempfile.mkdtemp()) / "pwned_abs"
+evil_calls: list = []
+
+
+def evil_client(state, questions):
+    evil_calls.append(state)
+    return ground_client(state, questions)
+
+
+for bad_id in (str(outside), "../escape", "a/b", "adhoc/../x"):
+    refused = None
+    try:
+        ground_state(evil_root, "Was version 6.0 released?", provider=fake, client=evil_client,
+                     cycle_id=bad_id)
+    except ValueError as exc:
+        refused = str(exc)
+    check(f"a non-cycle cache id is refused ({bad_id!r})",
+          refused is not None and "cycle" in refused.lower())
+check("a refused cache id writes nothing outside the workspace and calls no model",
+      evil_calls == [] and not outside.exists() and not outside.with_suffix(".json").exists()
+      and not (evil_root / "11_runtime/grounding-cache/escape.json").exists())
+valid = ground_state(ALLOWED, "Was version 6.0 released?", provider=FakeProvider(SNIPPETS),
+                     client=ground_client, cycle_id="C-9901")
+check("a valid cycle id still caches inside the workspace grounding-cache dir",
+      valid["auto"] is True
+      and (ALLOWED / "11_runtime/grounding-cache/C-9901.json").is_file())
+from ts_ground import _cache_path  # noqa: E402
+
+check("the cache path of a valid id resolves under the cache directory",
+      _cache_path(ALLOWED, "C-0001") == (ALLOWED / "11_runtime/grounding-cache/C-0001.json").resolve())
+
 # 9. CLI wiring: `researchctl ground <question> --cycle C-…` runs the seam.
 import contextlib  # noqa: E402
 import io  # noqa: E402
@@ -314,6 +348,18 @@ check("researchctl ground prints the grounded verdict with the verbatim sources"
       and cli_ground["state"]["search_results"][0]["source"] == SNIPPETS[0]["source"]
       and any(r.get("cycle_id") == "C-0009" for r in
               [json.loads(line) for line in (ALLOWED / "11_runtime/grounding.jsonl").read_text().splitlines()]))
+
+# The CLI path refuses an out-of-workspace cycle id before any provider/model work.
+with mock.patch("ts_ground.provider_from_env", return_value=FakeProvider(SNIPPETS)), \
+        mock.patch("ts_ground.post_json", combined_post), \
+        mock.patch.dict(os.environ, {"TYPESAFE_API_KEY": "k"}):
+    with mock.patch.object(sys, "argv", [str(TOOLS / "researchctl.py"), str(evil_root),
+                                         "ground", "Was version 6.0 released?",
+                                         "--cycle", str(outside)]), \
+            contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        rc_evil = ctl_main()
+check("researchctl ground refuses an absolute cycle path and writes nothing",
+      rc_evil == 1 and not outside.exists() and not outside.with_suffix(".json").exists())
 
 # 10. judge_question: the verdict primitive over a caller-supplied state (the paired
 #     eval's before-web arm uses it); gated like the seam, no retrieval.
