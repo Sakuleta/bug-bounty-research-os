@@ -2074,6 +2074,78 @@ print(json.dumps(tok))
   }
 }
 {
+  // Sprint BUA SEC M2: register-before-use. A fill that throws with the password in its
+  // message must not leak it — both env values enter the scrubber BEFORE the first fill.
+  const loginEntries = [
+    entry('e1', { tag: 'input', type: 'text', ops: ['CLICK', 'TYPE'], form_index: 0 }),
+    entry('e2', { tag: 'input', type: 'password', ops: ['LOGIN'], form_index: 0 }),
+    entry('e3', { tag: 'button', type: 'submit', ops: ['CLICK'], form_index: 0, text: 'Sign in' }),
+  ]
+  const locator = (handle) => ({
+    boundingBox: async () => ({ x: 10, y: 10, width: 100, height: 30 }),
+    click: async (options = {}) => { if (options && options.trial) return },
+    fill: async (value) => {
+      if (handle === 'e2') throw new Error(`fill failed with value=${value}`)
+    },
+  })
+  const page = {
+    on() {}, mainFrame: () => ({}), url: () => 'https://t.example/login',
+    title: async () => 'Login', screenshot: async () => {},
+    viewportSize: () => viewport, locator: () => ({ all: async () => [] }),
+    goto: async () => ({ status: () => 200 }),
+  }
+  const context = {
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    clearCookies: async () => {},
+    async route() {}, async routeWebSocket() {}, async addInitScript() {},
+    async newCDPSession() { return { send: async () => ({}), on() {} } },
+  }
+  const root = tempWorkspace({ preflightExtra: { login_flows: ['primary'] } })
+  const previous = { user: process.env.RESEARCH_OS_BUA_LOGIN_USER,
+                     password: process.env.RESEARCH_OS_BUA_LOGIN_PASSWORD }
+  try {
+    process.env.RESEARCH_OS_BUA_LOGIN_USER = 'researcher-A'
+    process.env.RESEARCH_OS_BUA_LOGIN_PASSWORD = 'S3cret-Password-Value'
+    const summary = await runInteractive({
+      root,
+      args: {
+        url: 'https://t.example/login', principal: 'researcher-A', action: 'A-000001',
+        profile: 'lab/bua-profile', preflight: 'preflight.json', 'out-dir': 'artifacts', steps: '2',
+      },
+      chromium: { launchPersistentContext: async () => context },
+      ctl: (args) => {
+        if (args[0] === 'prepare') return { action_id: 'A-000002' }
+        if (args[0] === 'token-consume') return { action_id: 'A-000002', nonce: 'n2' }
+        if (args[0] === 'gate-check') return { resolved: true, decision: 'APPROVED', gate: 'G-0009' }
+        return { binding_present: false }
+      },
+      scopeVerdict: () => ({ in_scope: true, gate: 'assets', host: 't.example' }),
+      token: { action_id: 'A-000001', nonce: 'n1', tool_family: 'browser',
+               preflight: { account: 'researcher-A' } },
+      snapshot: async () => ({ generation: 1, entries: loginEntries,
+                               locators: new Map([['e1', locator('e1')], ['e2', locator('e2')],
+                                                  ['e3', locator('e3')]]),
+                               url: 'https://t.example/login', title: 'Login' }),
+      plan: async () => ({ ok: true, source: 'typesafe', operation: { op: 'LOGIN', flow: 'primary' } }),
+      scopeRecheck: async () => ({ ok: true }),
+      log: () => {},
+    })
+    check('BUA SEC M2: a throwing credential fill never leaks the password into the summary',
+      !JSON.stringify(summary).includes('S3cret-Password-Value'))
+    check('BUA SEC M2: the failure is recorded with the value scrubbed',
+      summary.status === 'blocked'
+      && summary.events.some((e) => e.guard === 'dispatch'
+        && String(e.reason).includes('[REDACTED]')))
+  } finally {
+    if (previous.user === undefined) delete process.env.RESEARCH_OS_BUA_LOGIN_USER
+    else process.env.RESEARCH_OS_BUA_LOGIN_USER = previous.user
+    if (previous.password === undefined) delete process.env.RESEARCH_OS_BUA_LOGIN_PASSWORD
+    else process.env.RESEARCH_OS_BUA_LOGIN_PASSWORD = previous.password
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+{
   // No env secrets: the login refuses rather than inventing a credential.
   const root = tempWorkspace({ preflightExtra: { login_flows: ['primary'] } })
   const page = {

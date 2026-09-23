@@ -1543,11 +1543,15 @@ export async function runInteractive({ root, args, chromium, ctl = makeCtl(root)
         '(RESEARCH_OS_BUA_LOGIN_USER / RESEARCH_OS_BUA_LOGIN_PASSWORD) — refusing to log in without them' }
     }
     const locators = (snapAt && snapAt.locators) || new Map()
+    // Register-before-use: both env-only identity values enter the scrubber BEFORE the
+    // first fill, so every error path (a fill that throws with the value in its message,
+    // a submit click that quotes the form) scrubs with them present. Pushing the
+    // password after the fills left a throwing fill's message raw.
+    secrets.push(user, password)
     try {
       await locators.get(targets.user).fill(user, { timeout: ACTION_TIMEOUT_MS })
       await locators.get(targets.password).fill(password, { timeout: ACTION_TIMEOUT_MS })
       loginDone = true
-      secrets.push(password)
       await locators.get(targets.submit).click({ timeout: ACTION_TIMEOUT_MS })
       return { ok: true, login_flow: 'primary', secrets_source: 'env' }
     } catch (e) {
