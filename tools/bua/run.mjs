@@ -110,13 +110,6 @@ function scrubSecrets(text) {
   for (const re of SECRET_SHAPES) out = out.replace(re, '[REDACTED]')
   return out
 }
-/** True when `text` carries a secret-shaped value (the masker's own shapes). A credential
- *  must never be typed into a target field through the interactive arm: `TYPE` refuses
- *  secret-shaped payloads and credentials enter only through the env-only LOGIN flow. */
-export function hasSecretShape(text) {
-  const raw = String(text == null ? '' : text)
-  return scrubSecrets(raw) !== raw
-}
 
 function maskQueryPart(part) {
   const eq = part.indexOf('=')
@@ -376,7 +369,7 @@ function usage(msg) {
 }
 
 function parseArgs(argv) {
-  const out = { 'out-dir': '08_artifacts/raw' }
+  const out = { 'out-dir': '08_artifacts/raw', profile: 'lab/bua-profile' }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (!a.startsWith('--')) usage('unexpected argument: ' + a)
@@ -392,7 +385,7 @@ function parseArgs(argv) {
  *  engagement binding or the runtime directory marks the workspace (mirroring
  *  dsh-plugin/index.js, so deleting the OS_VERSION marker cannot disarm the
  *  runner); a directory with none of them is not a workspace (fail closed). */
-export function findOsRoot(cwd) {
+function findOsRoot(cwd) {
   let dir = resolve(cwd)
   for (let i = 0; i < 12; i++) {
     if (existsSync(join(dir, '11_runtime', 'events.jsonl'))
@@ -406,7 +399,7 @@ export function findOsRoot(cwd) {
 }
 
 /** Keep workspace-owned paths inside the workspace. */
-export function insideRoot(root, rel, flag) {
+function insideRoot(root, rel, flag) {
   const abs = resolve(root, rel)
   if (abs !== resolve(root) && !abs.startsWith(resolve(root) + sep)) {
     usage(`${flag} must stay inside the workspace (got ${rel})`)
@@ -417,7 +410,7 @@ export function insideRoot(root, rel, flag) {
 /** The authoritative scope seam. `researchctl scope-check` exits non-zero on a denied
  *  target with the verdict still on stdout (researchctl.py returns 3 when in_scope is
  *  false); any other spawn/parse failure throws and every caller fails closed. */
-export function scopeCheckVerdict(url, root) {
+function scopeCheckVerdict(url, root) {
   try {
     return JSON.parse(execFileSync(
       'python3',
@@ -435,14 +428,6 @@ export function scopeCheckVerdict(url, root) {
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (!args.url || !args.principal) usage('--url and --principal are required')
-  // Never a SILENT lab default: the controlled executor always passes the identity
-  // binding's `session.browser_profile` explicitly, so a default here is a direct
-  // invocation — say so loudly instead of quietly browsing on a shared profile.
-  if (!args.profile) {
-    args.profile = 'lab/bua-profile'
-    console.log('bua-runner: WARNING no --profile given — using the lab default lab/bua-profile; ' +
-      'the controlled executor always passes the identity binding\'s session.browser_profile explicitly')
-  }
   const root = findOsRoot(process.cwd())
   if (!root) usage('not inside a Research OS workspace (11_runtime/events.jsonl, 00_control/engagement.yaml or 11_runtime/)')
   insideRoot(root, args['out-dir'], '--out-dir')

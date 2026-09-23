@@ -57,7 +57,7 @@ import {
   authorityAmbiguous, decideRequest, findOsRoot, hasSecretShape, hostKey, insideRoot,
   makeHopCollector, makeScopeCache, makeServiceWorkerHandler, makeWebSocketHandler, maskText,
   maskUrlSecrets, observeWorkerWebSocket, serviceWorkerInitScript, scopeCheckVerdict,
-} from './run.mjs'
+} from './interactive-helpers.mjs'
 
 // ---- named caps (the step/model budgets an interactive run may never exceed) --------
 export const DEFAULT_MAX_STEPS = 12

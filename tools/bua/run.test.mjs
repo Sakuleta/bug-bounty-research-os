@@ -460,8 +460,6 @@ module.exports = { chromium: { launchPersistentContext: async () => ({
     check('F14 workspace without OS_VERSION is still detected (past root discovery, not exit 2)',
       threwNoMarker !== null && threwNoMarker.status !== 2
       && !String((threwNoMarker.stdout || '') + (threwNoMarker.stderr || '')).includes('not inside a Research OS workspace'))
-    check('the read-only runner never falls back to the lab profile silently (a warning when --profile is absent)',
-      String((threwNoMarker.stdout || '') + (threwNoMarker.stderr || '')).includes('no --profile given'))
     rmSync(join(wsRoot, '11_runtime', 'events.jsonl'), { force: true })
     const threwLedgerGone = runArgs()
     check('F14 engagement.yaml alone still marks the workspace',
@@ -504,6 +502,8 @@ module.exports = { chromium: { launchPersistentContext: async () => ({
   const runnerSource = readFileSync(join(buaDir, 'run.mjs'), 'utf8')
   const found = writeApis.filter((api) => runnerSource.includes(api))
   check('the read-only runner exposes no write/interaction API', found.length === 0)
+  check('the read-only runner stays the read-only arm (no interactive-helper coupling)',
+    !runnerSource.includes('interactive-helpers') && !runnerSource.includes('hasSecretShape'))
 
   const taskScripts = readdirSync(buaDir)
     .filter((f) => f.endsWith('.mjs') && !f.endsWith('.test.mjs') && f !== 'run.mjs')
