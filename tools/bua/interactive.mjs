@@ -709,6 +709,17 @@ export async function runLoop(deps) {
       if (guardFail('scope', String((scope && scope.reason) || 'out-of-scope dispatch'), { op: op.op })) break
       continue
     }
+    // Fresh login per run (MF-10): when the engagement configures login flows, a write
+    // must not ride a session the run did not establish. The check runs before
+    // authorization so a refused write never spends a preflight token.
+    if (typeof deps.freshLogin === 'function' && actionClass !== 'read') {
+      const fresh = await deps.freshLogin({ op, entry, snapshot, step, actionClass })
+      if (!fresh || fresh.ok !== true) {
+        if (guardFail('fresh_login', String((fresh && fresh.reason) || 'fresh login required'),
+                      { op: op.op })) break
+        continue
+      }
+    }
     const authorized = await deps.authorize({ op, entry, snapshot, step, actionClass })
     if (!authorized || authorized.ok !== true) {
       if (guardFail('authorization', String((authorized && authorized.reason) || 'no preflight token'),
@@ -878,9 +889,26 @@ function scrubValues(text, secrets) {
   return out
 }
 
+/** Fresh login per run, the storage half: a reused persistent profile must not carry a
+ *  live session into the run. Cookies are cleared on the context before the first
+ *  navigation; this STATIC executor init script clears the origin's web storage once
+ *  per origin per tab (a sessionStorage marker keeps an in-run navigation from logging
+ *  the app out again). It is executor code, never model-provided — the same class as
+ *  the service-worker block, not a `page.evaluate`. */
+export function freshLoginInitScript() {
+  return `(() => {
+  try {
+    if (sessionStorage.getItem('__bua_fresh_login__') !== '1') {
+      localStorage.clear();
+      sessionStorage.clear();
+      sessionStorage.setItem('__bua_fresh_login__', '1');
+    }
+  } catch (e) { /* web storage unavailable: nothing to clear */ }
+})();`
+}
+
 /** DONE verification: a FRESH observation (new snapshot generation) plus a registered
- *  capture — a completed write is never reported confirmed without both. */
-export async function verifyDone({ freshSnapshot, capture }) {
+ *  capture — a completed write is never reported confirmed without both. */export async function verifyDone({ freshSnapshot, capture }) {
   const fresh = await freshSnapshot()
   if (!fresh || !Array.isArray(fresh.entries)) {
     return { ok: false, reason: 'fresh observation failed (no snapshot)' }
@@ -1023,7 +1051,7 @@ function consumeToken(ctl, actionId, shapeRel) {
  *  without a browser. */
 export async function runInteractive({ root, args, chromium, ctl = makeCtl(root), scopeVerdict, token,
                                        plan, verify, snapshot, dispatch, capture, record, authorize,
-                                       gate, guard, scopeRecheck, log = console.log }) {
+                                       gate, guard, scopeRecheck, freshLogin, log = console.log }) {
   const outDirRel = args['out-dir']
   insideRoot(root, outDirRel, '--out-dir')
   insideRoot(root, args.profile, '--profile')
@@ -1147,6 +1175,16 @@ export async function runInteractive({ root, args, chromium, ctl = makeCtl(root)
   } catch (e) {
     await fatal('page creation failed. (' + maskText(String(e.message || e)) + ')')
   }
+  // Fresh login per run: a reused persistent profile must not carry a live session into
+  // the run. Cookies are cleared before any navigation; a context that cannot clear them
+  // refuses to run rather than browsing authenticated state the run did not establish.
+  try {
+    await context.clearCookies()
+    log('bua-interactive: fresh login per run — the profile\'s cookies were cleared')
+  } catch (e) {
+    await fatal('the profile\'s cookies could not be cleared — refusing to run with a ' +
+      'possibly-authenticated session. (' + maskText(String(e.message || e)) + ')')
+  }
   const watchPageConsole = (watched) => {
     try {
       watched.on('console', (msg) => {
@@ -1184,9 +1222,10 @@ export async function runInteractive({ root, args, chromium, ctl = makeCtl(root)
   const handleServiceWorker = makeServiceWorkerHandler(summary, log)
   try {
     await context.addInitScript(serviceWorkerInitScript())
+    await context.addInitScript(freshLoginInitScript())
   } catch (e) {
-    await fatal('service-worker block could not be installed — refusing to browse unscoped. (' +
-      maskText(String(e.message || e)) + ')')
+    await fatal('service-worker block or fresh-login storage clear could not be installed — ' +
+      'refusing to browse unscoped. (' + maskText(String(e.message || e)) + ')')
   }
   try {
     if (typeof context.serviceWorkers === 'function') {
@@ -1462,6 +1501,17 @@ export async function runInteractive({ root, args, chromium, ctl = makeCtl(root)
     }
     return { ok: true, gate: checked.gate }
   }
+  const realFreshLogin = async ({ op, actionClass }) => {
+    // The LOGIN flow itself establishes the fresh session; everything else that writes
+    // must wait for it when the engagement configures login flows (a public, flow-less
+    // engagement has nothing to refresh).
+    if (op.op === 'LOGIN' || actionClass === 'read') return { ok: true }
+    if (!Array.isArray(preflight.login_flows) || !preflight.login_flows.length) return { ok: true }
+    if (loginDone) return { ok: true }
+    return { ok: false, reason: 'fresh login per run: this engagement configures login flows, so ' +
+      'no state-changing action dispatches before the run has logged in with the env-only ' +
+      'credentials — a reused authenticated profile is never trusted' }
+  }
   const realScopeRecheck = async ({ op, snapshot: snapAt }) => {
     const url = op.op === 'NAVIGATE' ? op.url : String((snapAt && snapAt.url) || '')
     if (op.op !== 'NAVIGATE' && summary.scope_violation === true) {
@@ -1544,6 +1594,7 @@ export async function runInteractive({ root, args, chromium, ctl = makeCtl(root)
       viewport: typeof page.viewportSize === 'function' ? page.viewportSize() : null,
     })),
     scopeRecheck: scopeRecheck || ((ctx) => realScopeRecheck(ctx)),
+    freshLogin: freshLogin || ((ctx) => realFreshLogin(ctx)),
   }
   const loop = await runLoop(deps)
   Object.assign(summary, loop)

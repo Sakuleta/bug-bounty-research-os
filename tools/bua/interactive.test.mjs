@@ -304,7 +304,7 @@ function runCli(root, extraArgs = []) {
     goto: async () => ({ status: () => 200 }),
   }
   const context = {
-    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {}, clearCookies: async () => {},
     async route() { installOrder.push('route') },
     async routeWebSocket() { installOrder.push('routeWebSocket') },
     async addInitScript() { installOrder.push('addInitScript') },
@@ -582,7 +582,7 @@ function runCli(root, extraArgs = []) {
     goto: async () => ({ status: () => 200 }),
   }
   const context = {
-    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {}, clearCookies: async () => {},
     async route() { installOrder.push('route') },
     async routeWebSocket() { installOrder.push('routeWebSocket') },
     async addInitScript() { installOrder.push('addInitScript') },
@@ -637,7 +637,7 @@ function runCli(root, extraArgs = []) {
     goto: async () => ({ status: () => 200 }),
   }
   const context = {
-    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {}, clearCookies: async () => {},
     async route() {}, async routeWebSocket() {}, async addInitScript() {},
     async newCDPSession() { return { send: async () => ({}), on() {} } },
   }
@@ -787,7 +787,7 @@ function runCli(root, extraArgs = []) {
     goto: async () => ({ status: () => 200 }),
   }
   const context = {
-    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {}, clearCookies: async () => {},
     async route() {}, async routeWebSocket() {}, async addInitScript() {},
     async newCDPSession() { return { send: async () => ({}), on() {} } },
   }
@@ -834,7 +834,7 @@ function runCli(root, extraArgs = []) {
     goto: async () => ({ status: () => 200 }),
   }
   const context = {
-    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {}, clearCookies: async () => {},
     async route() {}, async routeWebSocket() {}, async addInitScript() {},
     async newCDPSession() { return { send: async () => ({}), on() {} } },
   }
@@ -890,7 +890,7 @@ function runCli(root, extraArgs = []) {
     goto: async () => ({ status: () => 200 }),
   }
   const context = {
-    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {}, clearCookies: async () => {},
     async route() {}, async routeWebSocket() {}, async addInitScript() {},
     async newCDPSession() { return { send: async () => ({}), on() {} } },
   }
@@ -965,7 +965,7 @@ function runCli(root, extraArgs = []) {
   }
   const context = {
     on(event, handler) { handlers[event] = handler },
-    pages: () => [page], newPage: async () => page, close: async () => {},
+    pages: () => [page], newPage: async () => page, close: async () => {}, clearCookies: async () => {},
     async route() {}, async routeWebSocket() {}, async addInitScript() {},
     async newCDPSession() { return { send: async () => ({}), on() {} } },
   }
@@ -1032,7 +1032,7 @@ function runCli(root, extraArgs = []) {
   }
   const context = {
     on(event, handler) { handlers[event] = handler },
-    pages: () => [page], newPage: async () => page, close: async () => {},
+    pages: () => [page], newPage: async () => page, close: async () => {}, clearCookies: async () => {},
     async route() {}, async routeWebSocket() {}, async addInitScript() {},
     async newCDPSession() { return { send: async () => ({}), on() {} } },
   }
@@ -1089,7 +1089,7 @@ function runCli(root, extraArgs = []) {
     goto: async () => ({ status: () => 200 }),
   }
   const context = {
-    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {}, clearCookies: async () => {},
     async route() {}, async routeWebSocket() {}, async addInitScript() {},
     async newCDPSession() { return { send: async () => ({}), on() {} } },
   }
@@ -1160,7 +1160,7 @@ function runCli(root, extraArgs = []) {
     goto: async () => ({ status: () => 200 }),
   }
   const context = {
-    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {}, clearCookies: async () => {},
     async route() {}, async routeWebSocket() {}, async addInitScript() {},
     async newCDPSession() { return { send: async () => ({}), on() {} } },
   }
@@ -1206,6 +1206,69 @@ function runCli(root, extraArgs = []) {
       && receipt.state.entries[0].handle === 'e1')
     check('BUA MF-8: the consequential action records with its gate',
       summary.history.length === 1 && summary.history[0].gate === 'resolved')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+{
+  // Sprint BUA MF-10: fresh login per run. The persistent profile's session is cleared
+  // before the run (cookies on the context + web storage via a static init script), and
+  // when the engagement configures login flows no state-changing action dispatches
+  // before the run has logged in.
+  const cleared = []
+  const initScripts = []
+  const dispatched = []
+  const page = {
+    on() {}, mainFrame: () => ({}), url: () => 'https://t.example/app',
+    title: async () => 'stub', screenshot: async () => {},
+    viewportSize: () => viewport, locator: () => ({ all: async () => [] }),
+    goto: async () => ({ status: () => 200 }),
+  }
+  const context = {
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {}, clearCookies: async () => {},
+    async clearCookies() { cleared.push('cookies') },
+    async route() {}, async routeWebSocket() {},
+    async addInitScript(script) { initScripts.push(script) },
+    async newCDPSession() { return { send: async () => ({}), on() {} } },
+  }
+  const root = tempWorkspace({ preflightExtra: { login_flows: ['primary'] } })
+  try {
+    const summary = await runInteractive({
+      root,
+      args: {
+        url: 'https://t.example/app', principal: 'researcher-A', action: 'A-000001',
+        profile: 'lab/bua-profile', preflight: 'preflight.json', 'out-dir': 'artifacts', steps: '2',
+      },
+      chromium: { launchPersistentContext: async () => context },
+      ctl: (args) => {
+        if (args[0] === 'prepare') return { action_id: 'A-000002' }
+        if (args[0] === 'token-consume') return { action_id: 'A-000002', nonce: 'n2' }
+        if (args[0] === 'evidence') return { entity_id: 'E-000001' }
+        if (args[0] === 'action') return { entity_id: 'A-000002' }
+        return { binding_present: false }
+      },
+      scopeVerdict: () => ({ in_scope: true, gate: 'assets', host: 't.example' }),
+      token: { action_id: 'A-000001', nonce: 'n1', tool_family: 'browser',
+               preflight: { account: 'researcher-A' } },
+      snapshot: async () => ({ generation: 1, entries: [entry('e1')],
+                               locators: new Map([['e1', fakeLocator()]]),
+                               url: 'https://t.example/app', title: 'stub' }),
+      plan: async () => ({ ok: true, source: 'typesafe', operation: { op: 'CLICK', handle: 'e1' } }),
+      scopeRecheck: async () => ({ ok: true }),
+      dispatch: async (ctx) => { dispatched.push(ctx); return { ok: true } },
+      log: () => {},
+    })
+    check('BUA MF-10: the reused profile\'s cookies are cleared before the first action',
+      cleared.length === 1)
+    check('BUA MF-10: a static init script clears the origin\'s web storage for the run',
+      initScripts.some((s) => s.includes('localStorage.clear') && s.includes('sessionStorage.clear')))
+    check('BUA MF-10: a state-changing action before the fresh login is refused',
+      dispatched.length === 0 && summary.status === 'blocked'
+      && summary.events.some((e) => e.guard === 'fresh_login'
+        && String(e.reason).includes('fresh login per run')))
+    check('BUA MF-10: the fresh-login refusal never reaches authorization',
+      summary.events.every((e) => e.guard !== 'authorization'))
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -1275,7 +1338,7 @@ function runCli(root, extraArgs = []) {
     goto: async () => ({ status: () => 200 }),
   }
   const context = {
-    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {}, clearCookies: async () => {},
     async route() {}, async routeWebSocket() {}, async addInitScript() {},
     async newCDPSession() { return { send: async () => ({}), on() {} } },
   }
@@ -1406,7 +1469,7 @@ function runCli(root, extraArgs = []) {
     goto: async () => ({ status: () => 200 }),
   }
   const context = {
-    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {}, clearCookies: async () => {},
     async route() {}, async routeWebSocket() {}, async addInitScript() {},
     async newCDPSession() { return { send: async () => ({}), on() {} } },
   }
@@ -1514,7 +1577,7 @@ print(json.dumps(tok))
       goto: async () => ({ status: () => 200 }),
     }
     const context = {
-      on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+      on() {}, pages: () => [page], newPage: async () => page, close: async () => {}, clearCookies: async () => {},
       async route() {}, async routeWebSocket() {}, async addInitScript() {},
       async newCDPSession() { return { send: async () => ({}), on() {} } },
     }
@@ -1640,7 +1703,7 @@ print(json.dumps(tok))
       goto: async () => ({ status: () => 200 }),
     }
     const context = {
-      on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+      on() {}, pages: () => [page], newPage: async () => page, close: async () => {}, clearCookies: async () => {},
       async route() {}, async routeWebSocket() {}, async addInitScript() {},
       async newCDPSession() { return { send: async () => ({}), on() {} } },
     }
@@ -1763,7 +1826,7 @@ print(json.dumps(tok))
     goto: async () => ({ status: () => 200 }),
   }
   const context = {
-    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {}, clearCookies: async () => {},
     async route() {}, async routeWebSocket() {}, async addInitScript() {},
     async newCDPSession() { return { send: async () => ({}), on() {} } },
   }
@@ -1915,7 +1978,7 @@ print(json.dumps(tok))
     goto: async () => ({ status: () => 200 }),
   }
   const context = {
-    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {}, clearCookies: async () => {},
     async route() {}, async routeWebSocket() {}, async addInitScript() {},
     async newCDPSession() { return { send: async () => ({}), on() {} } },
   }
@@ -1995,7 +2058,7 @@ print(json.dumps(tok))
     goto: async () => ({ status: () => 200 }),
   }
   const context = {
-    on() {}, pages: () => [page], newPage: async () => page, close: async () => {},
+    on() {}, pages: () => [page], newPage: async () => page, close: async () => {}, clearCookies: async () => {},
     async route() {}, async routeWebSocket() {}, async addInitScript() {},
     async newCDPSession() { return { send: async () => ({}), on() {} } },
   }
@@ -2047,7 +2110,7 @@ print(json.dumps(tok))
   let swHandler = null
   const context = {
     on(event, handler) { if (event === 'serviceworker') swHandler = handler },
-    pages: () => [page], newPage: async () => page, close: async () => {},
+    pages: () => [page], newPage: async () => page, close: async () => {}, clearCookies: async () => {},
     async route() {}, async routeWebSocket() {}, async addInitScript() {},
     async newCDPSession() { return { send: async () => ({}), on() {} } },
   }
