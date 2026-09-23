@@ -230,6 +230,91 @@ check("workspace-wide verdict blocks on a corrupt file anywhere",
 check("a missing registry blocks the workspace-wide verdict",
       leases.verdict_all(root(), now=1.0)["blocked"] is True)
 
+# ---------------- D2: launch wrapper ----------------
+
+WRAPPER = TOOLS / "lease_run.py"
+
+
+def run_wrapper(r: Path, run_id: str, cmd: list[str], *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(WRAPPER), "--root", str(r), "--run", run_id, *args, "--", *cmd],
+        capture_output=True, text=True, timeout=120)
+
+
+# 13. Spawn/sleep/exit: heartbeats while the tree lives, awaiting-reconciliation after.
+r9 = root()
+started = time.monotonic()
+proc = run_wrapper(r9, "w-sleep", ["sleep", "0.6"], "--interval", "0.2")
+elapsed = time.monotonic() - started
+v7 = leases.verdict(r9, "w-sleep")
+check("the wrapper propagates a clean exit code", proc.returncode == 0 and elapsed >= 0.5)
+check("process exit leaves the lease held at awaiting-reconciliation (never success)",
+      v7["state"] == "awaiting-reconciliation" and v7["blocked"] is True
+      and v7["exit_code"] == 0)
+check("the wrapper records the child process group", isinstance(v7["pgid"], int)
+      and v7["pgid"] > 0 and not leases._pgid_alive(v7["pgid"]))
+records = [json.loads(line) for line in
+           leases.lease_path(r9, "w-sleep").read_text().splitlines() if line.strip()]
+check("the wrapper heartbeats while the tree is live and the versions are monotonic",
+      any(rec["event"] == "heartbeat" for rec in records)
+      and all(rec["event"] in ("heartbeat", "acquire") or rec["state"] == "awaiting-reconciliation"
+              for rec in records)
+      and [rec["version"] for rec in records] == list(range(1, len(records) + 1)))
+
+# 14. Non-zero exit is recorded raw, never interpreted.
+r10 = root()
+proc = run_wrapper(r10, "w-fail", ["sh", "-c", "exit 7"], "--interval", "5")
+v8 = leases.verdict(r10, "w-fail")
+check("a non-zero exit code propagates and is recorded raw",
+      proc.returncode == 7 and v8["state"] == "awaiting-reconciliation"
+      and v8["exit_code"] == 7)
+
+# 15. Kill the wrapper: the lease stays active (no silent release) and expiry covers it.
+r11 = root()
+marker = r11 / "spawned-marker"
+wrapper = subprocess.Popen(
+    [sys.executable, str(WRAPPER), "--root", str(r11), "--run", "w-killed",
+     "--interval", "0.2", "--", "sh", "-c", f"touch {marker}; sleep 30"],
+    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+pgid = None
+try:
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        current = leases.verdict(r11, "w-killed")
+        if isinstance(current.get("pgid"), int) and marker.exists():
+            pgid = current["pgid"]
+            break
+        time.sleep(0.05)
+    check("the wrapper records the process group before the child does work", pgid is not None)
+    wrapper.kill()
+    wrapper.wait(timeout=30)
+    v9 = leases.verdict(r11, "w-killed")
+    check("killing the wrapper leaves the lease active, not released",
+          v9["state"] == "active" and v9["blocked"] is True)
+    v10 = leases.verdict(r11, "w-killed", now=time.time() + 3600)
+    check("expiry covers a killed wrapper (unknown-recovery-required, never success)",
+          v10["state"] == "unknown-recovery-required" and v10["blocked"] is True)
+finally:
+    if pgid:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except OSError:
+            pass
+    if wrapper.poll() is None:
+        wrapper.kill()
+        wrapper.wait(timeout=30)
+
+# 16. A held lease refuses before any spawn.
+r12 = root()
+leases.acquire(r12, "w-held", interval_seconds=1000.0)
+marker2 = r12 / "must-not-exist"
+proc = run_wrapper(r12, "w-held", ["sh", "-c", f"touch {marker2}"], "--interval", "5")
+check("a held lease refuses the launch before spawning",
+      proc.returncode != 0 and not marker2.exists()
+      and ("refus" in proc.stderr.lower() or "still holds" in proc.stderr))
+check("the refused launch names the run and the held state",
+      "w-held" in proc.stderr and "lease" in proc.stderr.lower())
+
 print(f"\n{len(passed)}/{len(passed) + len(failures)} passed")
 for path in ROOTS:
     shutil.rmtree(path, ignore_errors=True)
