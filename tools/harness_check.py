@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Presence check for the installed research-os-enforcer DSH plugin.
 
-For every `<dsh-home>/profiles/*/plugins/research-os-enforcer/index.js` compare the
-sha256 with the repo's `dsh-plugin/index.js` and report OK / MISSING / DRIFT. Also read
-`<dsh-home>/research-os-enforcer.log` and report the last `APPLY` line's age, warning
-when it predates the newest INSTALLED copy that reported OK (the host was not restarted
-after the last install; the repo file's mtime says nothing about what the host loaded).
+For every `<dsh-home>/profiles/*/plugins/research-os-enforcer/` compare the sha256 of
+`index.js` and of the `goal-deferral/index.js` module with the repo's copies and
+report OK / MISSING / DRIFT (a profile is OK only when both files match: the veto
+module is part of the installed body). Also read `<dsh-home>/research-os-enforcer.log`
+and report the last `APPLY` line's age, warning when it predates the newest INSTALLED
+copy that reported OK (the host was not restarted after the last install; the repo
+file's mtime says nothing about what the host loaded).
 Exit 0 when at least one profile is OK and none are DRIFT, else 1.
 
 Usage: harness_check.py [--repo PATH] [--dsh-home PATH] [--json]
@@ -23,6 +25,8 @@ from pathlib import Path
 
 PLUGIN_REL = Path("dsh-plugin") / "index.js"
 PROFILE_PLUGIN_REL = Path("plugins") / "research-os-enforcer" / "index.js"
+DEFERRAL_REL = Path("dsh-plugin") / "goal-deferral" / "index.js"
+PROFILE_DEFERRAL_REL = Path("plugins") / "research-os-enforcer" / "goal-deferral" / "index.js"
 APPLY_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\s+APPLY\b")
 
 
@@ -56,29 +60,52 @@ def iso_epoch(value: str) -> float | None:
         return None
 
 
+def file_status(got: str | None, want: str | None) -> str:
+    if got is None:
+        return "MISSING"
+    if want is not None and got == want:
+        return "OK"
+    return "DRIFT"
+
+
 def collect(repo: Path, dsh_home: Path) -> dict:
     plugin = repo / PLUGIN_REL
+    deferral = repo / DEFERRAL_REL
     want = sha256_file(plugin)
-    try:
-        plugin_mtime = plugin.stat().st_mtime
-    except OSError:
-        plugin_mtime = None
+    want_deferral = sha256_file(deferral)
+
+    def stat_mtime(path: Path) -> float | None:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return None
+
     profiles = []
     for profile_dir in sorted((dsh_home / "profiles").glob("*")):
         installed = profile_dir / PROFILE_PLUGIN_REL
-        got = sha256_file(installed)
-        try:
-            installed_mtime = installed.stat().st_mtime
-        except OSError:
-            installed_mtime = None
-        if got is None:
-            status = "MISSING"
-        elif want is not None and got == want:
+        installed_deferral = profile_dir / PROFILE_DEFERRAL_REL
+        index_status = file_status(sha256_file(installed), want)
+        deferral_status = file_status(sha256_file(installed_deferral), want_deferral)
+        # A profile is OK only when the whole installed body matches: the deferral
+        # module is part of it, and a stale copy is an unenforced deferral path.
+        if index_status == "OK" and deferral_status == "OK":
             status = "OK"
+        elif "MISSING" in (index_status, deferral_status):
+            status = "MISSING"
         else:
             status = "DRIFT"
-        profiles.append({"profile": profile_dir.name, "path": str(installed),
-                         "status": status, "sha256": got, "mtime": installed_mtime})
+        profiles.append({
+            "profile": profile_dir.name,
+            "path": str(installed),
+            "status": status,
+            "index_status": index_status,
+            "sha256": sha256_file(installed),
+            "mtime": stat_mtime(installed),
+            "deferral_path": str(installed_deferral),
+            "deferral_status": deferral_status,
+            "deferral_sha256": sha256_file(installed_deferral),
+            "deferral_mtime": stat_mtime(installed_deferral),
+        })
     worst = "none" if not profiles else (
         "DRIFT" if any(p["status"] == "DRIFT" for p in profiles)
         else ("OK" if any(p["status"] == "OK" for p in profiles) else "MISSING"))
@@ -86,9 +113,10 @@ def collect(repo: Path, dsh_home: Path) -> dict:
 
     # The load-bearing comparison: what the host actually loaded is the INSTALLED copy,
     # so the newest OK install's mtime is the one an APPLY must postdate. The repo
-    # file's mtime is irrelevant to the running host.
-    installed_mtimes = [p["mtime"] for p in profiles
-                        if p["status"] == "OK" and p["mtime"] is not None]
+    # file's mtime is irrelevant to the running host. Both installed files load at
+    # startup, so the newest of either decides.
+    installed_mtimes = [mtime for p in profiles if p["status"] == "OK"
+                        for mtime in (p["mtime"], p["deferral_mtime"]) if mtime is not None]
     installed_mtime = max(installed_mtimes) if installed_mtimes else None
     apply_at = last_apply_time(dsh_home / "research-os-enforcer.log")
     restart: dict = {"last_apply": apply_at, "age_seconds": None, "message": None,
@@ -108,7 +136,9 @@ def collect(repo: Path, dsh_home: Path) -> dict:
     return {
         "repo": str(repo),
         "dsh_home": str(dsh_home),
-        "plugin": {"path": str(plugin), "sha256": want, "mtime": plugin_mtime},
+        "plugin": {"path": str(plugin), "sha256": want, "mtime": stat_mtime(plugin),
+                   "deferral": {"path": str(deferral), "sha256": want_deferral,
+                                "mtime": stat_mtime(deferral)}},
         "profiles": profiles,
         "ok": ok,
         "exit_code": 0 if ok else 1,
@@ -131,6 +161,8 @@ def main() -> int:
     else:
         for p in result["profiles"]:
             print(f"profile {p['profile']}: {p['status']} ({p['path']})")
+            if p["deferral_status"] != p["index_status"]:
+                print(f"  goal-deferral: {p['deferral_status']} ({p['deferral_path']})")
         if not result["profiles"]:
             print(f"no profiles under {result['dsh_home']}/profiles/*")
         restart = result["restart"]

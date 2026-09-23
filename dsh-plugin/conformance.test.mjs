@@ -32,8 +32,9 @@ function harness() {
     get: (svc) => (svc === 'tools' ? tools : undefined),
     on: (evt, fn) => { if (evt === 'tools/pre-execute') preExecute.push(fn) },
   }
-  apply(ctx)
+  const ready = Promise.resolve(apply(ctx))
   return {
+    ready,
     guardReason: (exec) => guards.map((g) => g(exec)).find((r) => r !== undefined),
     async preExecute(exec) {
       for (const listener of preExecute) {
@@ -993,6 +994,35 @@ check('F10 nohup open -a Safari evil dest denied',
 // NEW-1: trailing-whitespace URL denies (JS seam pin).
 check('NEW-1 trailing-space URL denies at the JS scope seam',
   !!scopeReasonFor(osRoot, 'https://t.example '))
+
+// ---- G1 (D4 wiring): the installed body loads the goal-deferral veto ----------
+// The adapter must be active through the REAL enforcer apply(), not only through its
+// own mock harness: a lease-held workspace must deny create_goal/update_goal.
+const deferralRoot = join(sandbox, 'deferral-workspace')
+mkdirSync(join(deferralRoot, '.leases'), { recursive: true })
+writeFileSync(join(deferralRoot, '.leases', 'run-1.jsonl'), JSON.stringify({
+  seq: 1, version: 1, time: 1000, run_id: 'run-1', lease_id: 'L-1a2b3c4d', event: 'acquire',
+  state: 'active', owner: { pid: 123, label: 'battery', session: 'ses_1' },
+  command: 'python3 -m harness', pgid: 456, heartbeat_at: 1000, expires_at: 9999999999,
+  interval_seconds: 120, exit_code: null, commit: null, reason: '',
+}) + '\n')
+process.env.RESEARCH_OS_LEASE_ROOT = deferralRoot
+process.env.RESEARCH_OS_LEASE_RUN = 'run-1'
+const wiring = harness()
+await wiring.ready
+delete process.env.RESEARCH_OS_LEASE_ROOT
+delete process.env.RESEARCH_OS_LEASE_RUN
+check('the installed body loads the goal-deferral veto through apply()',
+  typeof wiring.guardReason(exec('create_goal', {}, deferralRoot)) === 'string')
+check('the loaded veto denies update_goal while the lease is held',
+  typeof wiring.guardReason(exec('update_goal', {}, deferralRoot)) === 'string')
+check('the loaded veto names the deferred state and the run',
+  /active/.test(wiring.guardReason(exec('update_goal', {}, deferralRoot)))
+  && /run-1/.test(wiring.guardReason(exec('update_goal', {}, deferralRoot))))
+check('the loaded veto leaves read-only get_goal to the rest of the enforcer',
+  wiring.guardReason(exec('get_goal', {}, deferralRoot)) === undefined)
+check('the loaded veto leaves unrelated tools to the rest of the enforcer',
+  wiring.guardReason(exec('bash', { command: 'echo hi' }, deferralRoot)) === undefined)
 
 rmSync(sandbox, { recursive: true, force: true })
 console.log(`\n${passed}/${passed + failures.length} passed`)

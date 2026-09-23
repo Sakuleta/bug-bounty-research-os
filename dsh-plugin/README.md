@@ -65,17 +65,61 @@ the gate cannot expand the variable, so it refuses rather than allow a possible 
 markers as suspicious even when it only reads (`bash -c "cat 11_runtime/events.jsonl"`
 denies while a direct `cat 11_runtime/events.jsonl` read stays allowed).
 
+## Goal deferral (veto-only, `goal-deferral/`)
+
+`goal-deferral/` is the DSH side of the shared work-lease registry
+(`tools/leases.py`, `.leases/<run>.jsonl` under the run workspace). It is
+**veto-only**: it blocks DSH goal mutation (`create_goal`/`update_goal`) while a
+run's lease is held (`active`, `awaiting-reconciliation` or
+`unknown-recovery-required`), and it never pauses/resumes durable goal state and
+never emits a continuation. The single continuation emitter for a run is the
+OpenCode goal plugin (gate contract: `goal-deferral/opencode-gate-contract.md`).
+
+- Observation: the registry file (same verdict rules as `tools/leases.py`,
+  parity-tested — including the strict byte/line encoding contract and the
+  released-commit verification) plus owner-scoped job lifecycle
+  (`ctx.jobs.onJobsChanged` / `onJobDone`) and continuable-child edges
+  (`subagent/start` / `subagent/end`); every edge re-reads the registry
+  (subscribe-then-reread — no lost wake-up).
+- Activation: an explicit `root` / `RESEARCH_OS_LEASE_ROOT` (plus optional
+  `RESEARCH_OS_LEASE_RUN`; without a run id the whole workspace is watched), or
+  per-call discovery of an ancestor directory containing `.leases/`. A workspace
+  that never used leases is not deferred.
+- Fail closed: a missing/unreadable registry, a corrupt line (an undecodable
+  byte, or a raw U+0085/U+2028/U+2029 — the shared writer escapes those), an
+  unverifiable version chain, a `released` record whose commit does not exist in
+  the run's git work tree, and an expired `active` lease all block; a stale lease
+  is never success. Internal `apply()` errors fail open like the rest of the
+  plugin.
+- Bounded reconciliation: a stable `unknown-recovery-required` state wakes at
+  most one dispatch of the run workspace's `tools/researchctl.py <root>
+  lease-reconcile <run>` (async `execFile`, injectable through
+  `options.reconcile`); re-entering the unknown state re-arms exactly one more;
+  a failed or unavailable CLI is logged and the lease stays blocking.
+- Wiring: the module is part of the installed body (`install.sh` copies it into
+  every profile) **and the enforcer's `apply()` dynamic-imports it**, so the veto
+  installs through the same `tools.guard` seam as R1 — a lease-held workspace
+  denies `create_goal`/`update_goal` even though the host only loads `index.js`.
+  The real continuation veto belongs in the DSH `goal-round-driver` readiness
+  gate (upstream/overlay, out of this repo's scope) — the adapter owns the
+  predicate, the subscription and the integration coverage.
+
 ## Tests
 
 ```bash
 node conformance.test.mjs          # guard + egress + token-selection cases (mocked harness)
 node executor.integration.test.mjs # full R4 chain against a local lab server (real researchctl)
+node goal-deferral/conformance.test.mjs           # veto matrix (mocked DSH seams + registry fixtures)
+node goal-deferral/deferral.integration.test.mjs  # real lease registry + launch wrapper + fake driver
+node goal-deferral/gate.matrix.test.mjs           # OpenCode pre-continuation gate contract matrix
 ```
 
 ## Install / update
 
 ```bash
-./install.sh
+./install.sh            # installs index.js, package.json and goal-deferral/ into web + ro-smoke
+./install.sh --dry-run  # prints the copies it would make and touches nothing
+# DSH_PROFILES="web" overrides the profile list
 ```
 
 Then **restart the DSH host** (plugin bodies load at startup on this machine; see the

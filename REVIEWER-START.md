@@ -29,17 +29,18 @@ are in the request you received.
 |---|---|---|
 | `ARCHITECTURE.md` | 102 | The claimed shape: event log → projections → guards |
 | `START.md` | 153 | The engagement entry contract: loop, gates, closure |
-| `AGENTS.md` | 305 | The operational flow an agent must follow |
+| `AGENTS.md` | 307 | The operational flow an agent must follow |
 | `tools/control_plane.py` | 3998 | **The single policy seam**: event schema (incl. `os_version` stamping), state machine, projections (incl. `knowledge-usage`/`knowledge-proposals`), guards, audit/freshness/evidence/technique/budget records, `KNOWLEDGE_PROPOSED`/`KNOWLEDGE_RESOLVED`, and the broker integration (`set_scope` policy push, `prepare` minting signed single-use tokens through `tools/broker/`, `scope_check` delegation) |
 | `tools/audit.py` | 1435 | What the machine audit actually checks (and what it does not): reviewed-cycle binding, audit content, budget caps, closure-proof parsing, `--emit-proof` |
-| `dsh-plugin/index.js` | 2673 | Enforcement R1–R7: write protection, raw-egress gate, single-use preflight tokens, executor-side scope, browser-launch gate, capture redaction, broker-minted token consumption (R7) |
+| `dsh-plugin/index.js` | 2689 | Enforcement R1–R7: write protection, raw-egress gate, single-use preflight tokens, executor-side scope, browser-launch gate, capture redaction, broker-minted token consumption (R7) |
 | `tools/test_control_plane.py` | 3966 | Executable spec for the seam |
+| `tools/leases.py` | 860 | Work-lease registry + completion predicate (goal deferral): acquire/heartbeat/expiry/release, fail-closed reads, the five-conjunct reconcile |
 | `tools/test_scope_parity.py` | 131 | Cross-language scope parity: Python `scope_check` vs the enforcer `scopeReasonFor` (SKIPs when node is unavailable) |
 | `tools/test_replay.py` | 368 | Executor replay diff (two identical runs over a canned local server) + capture integrity (secret scan, masker idempotence) in one harness |
 | `tools/test_broker.py` | 1308 | Executable spec for the policy broker (real daemon on a temp home, real Unix socket: protocol, policy, mint/consume, fail-closed paths, control-plane integration) |
 | `tools/test_containment.py` | 306 | Executable spec for the SBPL generator (determinism, deny-default, literal-IP pins, `--print`/`--out` equivalence) and the containment selftest |
 | `tools/test_masker_parity.py` | 98 | Executable spec for the single secret-pattern source (`tools/secret-patterns.json` rendered into all three maskers) |
-| `dsh-plugin/conformance.test.mjs` | 1002 | Executable spec for the enforcer |
+| `dsh-plugin/conformance.test.mjs` | 1032 | Executable spec for the enforcer |
 | `dsh-plugin/executor.integration.test.mjs` | 730 | Executable spec for the executors |
 | `dsh-plugin/broker.integration.test.mjs` | 317 | Broker R7 end to end against the real Python broker: signed mint, consume-through-broker before dispatch, tamper/replay/narrowed-policy refusals |
 | `tools/bua/run.test.mjs` | 551 | Executable spec for the browser runner: per-request scope routes (`route`/`routeWebSocket`), blocked-request and redirect-hop records |
@@ -67,7 +68,7 @@ check whether the audit's PASS is earned.
 `05_HYPOTHESIS_ENGINE.md` (61) · `06_EVIDENCE_VALIDATION.md` (101) ·
 `07_AUDIT_CLOSURE.md` (193) · `08_human_gates.md` (68) · `09_RESEARCH_PROTOCOL.md` (61) ·
 `10_STATE_MODEL.md` (91) · `11_WORKER_PROTOCOL.md` (120) · `12_REPORT_PROTOCOL.md` (113) ·
-`13_RUNTIME.md` (61) · `15_TOOLING.md` (620) · `16_RESEARCH_LANES.md` (33) ·
+`13_RUNTIME.md` (66) · `15_TOOLING.md` (687) · `16_RESEARCH_LANES.md` (33) ·
 `17_DYNAMIC_TECHNIQUE_ENGINE.md` (101) · `18_MODERN_SURFACES.md` (49) ·
 `19_PROGRAM_LEARNING.md` (41) · `22_CONTEXT_MANIFEST.md` (32) ·
 `24_ADVANCED_TRADECRAFT.md` (39) · `25_MINIMUM_MODEL_OUTPUT.md` (20) ·
@@ -77,7 +78,7 @@ check whether the audit's PASS is earned.
 
 ## Tier 4 — remaining tools, knowledge, skills, schemas
 
-- Tools: `researchctl.py` (514), CLI over the seam (incl. the broker commands:
+- Tools: `researchctl.py` (571), CLI over the seam (incl. the broker commands:
   `scope-set` policy push, broker-minted `prepare`, `scope-check` delegation,
   `review-issue` review vouchers, `identity-binding` readout,
   `broker serve`/`status`), `cycle.py` (159), `build_context.py` (164),
@@ -88,12 +89,15 @@ check whether the audit's PASS is earned.
   `secret-patterns.json` + `generate_secret_patterns.py` (92, the single
   secret-pattern source rendered into all three maskers), `state.py` (45),
   `new_cycle.py` (16),
-  `harness_check.py` (146) — per-profile presence/drift + restart-pending check for the
-  installed enforcer plugin — and the v8.3 verification organs: `ts_cost.py` (181),
+  `harness_check.py` (178) — per-profile presence/drift + restart-pending check for the
+  installed enforcer plugin (index.js + the goal-deferral module) — `leases.py` (860,
+  work-lease registry + completion predicate), `lease_run.py` (160, the lease-guarded
+  launcher) and `test_leases.py` (878, registry + wrapper + predicate + cross-language
+  parity) — and the v8.3 verification organs: `ts_cost.py` (181),
   `ts_screen.py` (402), `ts_ground.py` (593), `ts_novelty.py` (300),
   `ts_rank.py` (353), `ts_label.py` (268), `ts_honesty.py` (227) — each backed by a
   paired eval under `tools/ts-eval/` — and the other `test_*.py` suites, incl.
-  `test_harness_check.py` (136) and `test_replay.py` (368, also the capture-integrity
+  `test_harness_check.py` (191) and `test_replay.py` (368, also the capture-integrity
   harness for a workspace argument). Out-of-workspace layers: `broker/broker.py` (781,
   Unix-socket policy/key/mint/review-voucher authority) + `broker/client.py` (92), and
   `containment/generate_profile.py` (349) + `containment/selftest.py` (335) — macOS
@@ -105,6 +109,10 @@ check whether the audit's PASS is earned.
   refute-don't-confirm, fingerprint stability, material-replacement
   re-verification, live-target routing; not a knowledge pack).
 - Contracts: `schemas/*.json` (event and review records).
+- Goal deferral: `dsh-plugin/goal-deferral/index.js` (veto-only DSH adapter over the shared
+  registry), `opencode-gate-contract.md` (99, the normative upstream gate patch),
+  `conformance.test.mjs` (330), `deferral.integration.test.mjs` (221) and
+  `gate.matrix.test.mjs` (193).
 
 ## Central claims worth verifying against code
 
