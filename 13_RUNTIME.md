@@ -17,6 +17,11 @@ Everything else under `11_runtime/` (`run-status.yaml`, `active-cycle.yaml`,
 views: their list and rebuild rules live in `10_STATE_MODEL.md` — never hand-edit them.
 Canonical mutation entry point: `tools/researchctl.py`; deterministic audit: `tools/audit.py`.
 
+Work leases (`.leases/<run-id>.jsonl`) are deliberately NOT under `11_runtime/`: they
+belong to the run workspace root (a measurement battery's own workspace) and are read by
+both continuation layers. Lifecycle, completion predicate and the single-emitter rule:
+`15_TOOLING.md` → Goal deferral.
+
 Methodology index: novelty `17_DYNAMIC_TECHNIQUE_ENGINE.md`, freshness `31_FRESHNESS_WATCHTOWER.md`, agentic `32_AGENTIC_PARADIGM.md`, self-attack `33_METHOD_SELF_ATTACK.md`, guards `28_CYCLE_STATE_MACHINE.md`.
 
 ## Run status

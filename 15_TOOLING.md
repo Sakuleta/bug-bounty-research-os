@@ -440,13 +440,60 @@ paths remain advisory interception: a scope decision made inside an interpreter 
 or a bash-invoked CLI is not visible to the plugin.
 Verify the install is present and current with `python3 tools/harness_check.py
 [--repo PATH] [--dsh-home PATH] [--json]`: it hashes
-`<dsh-home>/profiles/*/plugins/research-os-enforcer/index.js` against
-`dsh-plugin/index.js` (OK / MISSING / DRIFT), reads the last `APPLY` line's age from
+`<dsh-home>/profiles/*/plugins/research-os-enforcer/index.js` and the installed
+`goal-deferral/index.js` module against the repo copies (a profile is OK only when both
+match; OK / MISSING / DRIFT), reads the last `APPLY` line's age from
 `research-os-enforcer.log` and warns when it predates the newest INSTALLED copy that
 reported OK — the repo file's mtime says nothing about what the host loaded (restart
 pending). Exit 0 when at least one profile is OK and none DRIFT, else 1 — a drifted
 install is an unenforced workspace. To disable it, delete its row in
 `~/.dsh/profiles/web/cordis.patch.yml` and restart the host.
+
+### Goal deferral (work leases, optional)
+
+A long measurement battery runs as a detached process tree that can outlive the agent
+session which launched it. A continuation gate that watches only Task/subagent sessions
+fires while that tree is still alive — the lifecycle-identity gap this layer closes: a
+lease is acquired BEFORE the run's process tree is spawned, heartbeated while it is
+live, and released only after the completion predicate clears. The normative rule text
+is the goal-deferral amendment (`SPRINT-DSH-SPEC.md` D0, amending the frozen
+`SPRINT-v8.2-SPEC.md` item); this section documents the implementation.
+
+- **Registry.** `<run workspace root>/.leases/<run-id>.jsonl` — append-only JSONL under
+  the RUN workspace (not under `11_runtime/`), one record per transition, monotonic
+  `version`, owner pid/session lineage, process-group id, raw exit code and commit.
+  `python3 tools/lease_run.py --root R --run ID [--interval S] -- <cmd>` acquires the
+  lease before spawning, heartbeats while the process group lives and records the raw
+  exit code as `awaiting-reconciliation` — process exit is never success. A wrapper
+  killed with SIGKILL leaves the lease `active`; expiry (3x the interval, strictly
+  greater than 2x, so a lease can never self-expire between heartbeats) turns a missed
+  heartbeat into `unknown-recovery-required`.
+- **Completion predicate.** `researchctl <root> lease-reconcile <run>` returns clear
+  ONLY when the loop exited (exit recorded) AND zero matching children are alive (the
+  recorded process group has no live members) AND every planned cell has a manifest
+  (`runs/<cell>/manifest.json` for each cell in `runs/<run>/plan.json`) AND reports were
+  regenerated (`reports/` non-empty and no older than the newest manifest) AND the
+  results commit exists (`runs/<run>/results-commit`, verified with
+  `git cat-file -e <sha>^{commit}`). Anything missing or unverifiable blocks (exit 3,
+  the lease stays held). On clear the lease is released with the commit recorded;
+  already-released is an idempotent clear. Stale/expired/missing input reads
+  `unknown-recovery-required` and gets exactly one bounded reconciliation attempt per
+  invocation — never a success report.
+- **Single emitter.** Continuation authority for a run belongs to ONE layer: the
+  OpenCode goal plugin is the sole emitter (gate contract:
+  `dsh-plugin/goal-deferral/opencode-gate-contract.md`); the DSH adapter
+  (`dsh-plugin/goal-deferral/`) is **veto-only** — it blocks goal mutation while a lease
+  is held and never emits a competing continuation. Neither layer pauses or resumes the
+  other's durable goal state.
+- **Fail closed.** A missing or unreadable registry, a corrupt line, an unverifiable
+  version chain and an expired lease all block; stale is never success, and no lease is
+  deleted silently. Readers never mistake missing/unreadable state for clear.
+- **Fork pointer.** Applying the OpenCode-side gate belongs in the upstream MIT repo
+  (`prevalentWare/opencode-goal-plugin`, V2 `taskBlockStatus`/`runAutoContinue`); this
+  repo ships the contract plus matrix tests and never patches `~/.npm` or the package
+  cache. The DSH-side readiness hook belongs in the upstream `goal-round-driver` or a
+  deliberately maintained local overlay — the adapter owns the predicate and its
+  integration coverage.
 
 ### Policy broker (scope/token authority outside the workspace, optional)
 
